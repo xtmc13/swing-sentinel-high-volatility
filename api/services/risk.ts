@@ -56,8 +56,10 @@ export function sizePosition(input: SizePositionInput): PositionSize {
 
   const multiplier = input.mode === "HIGH" ? input.highVolatilityRiskMultiplier : 1;
   const riskBudget = input.equity * input.riskPerTradePct / 100 * multiplier;
-  const twoSidedCostPerUnit = (input.entryPrice + input.stopPrice)
-    * (input.takerFeeBps + input.slippageBps) / 10_000;
+  // entryPrice is already the expected fill price (ask/bid live, slippage-adjusted in backtests).
+  // Count fees on both sides, but only the stop-side slippage here; entry slippage is already in entryPrice.
+  const twoSidedCostPerUnit = (input.entryPrice + input.stopPrice) * input.takerFeeBps / 10_000
+    + input.stopPrice * input.slippageBps / 10_000;
   const riskPerUnit = stopDistance + twoSidedCostPerUnit;
   const qtyByRisk = riskBudget / riskPerUnit;
   const qtyByMargin = input.equity * input.marginPerTradePct / 100 * input.leverage / input.entryPrice;

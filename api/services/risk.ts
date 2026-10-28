@@ -169,8 +169,10 @@ export function portfolioRisk(input: PortfolioRiskInput): PortfolioRiskResult {
     }
     const correlatedPositions = input.positions.filter((position, index) => {
       const value = correlations[index];
+      // Only strong positive correlation concentrates same-direction exposure;
+      // strong negative correlation is a hedge relationship, not a concentration signal.
       return position.side === input.candidate!.side && value !== null && value !== undefined
-        && Math.abs(value) >= input.correlationThreshold;
+        && value >= input.correlationThreshold;
     });
     if (correlatedPositions.length > 0) {
       correlatedRisk = candidateRisk + correlatedPositions.reduce((sum, position) => {

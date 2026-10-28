@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 56% 4%;
+    --foreground: 216 33% 94%;
+    --card: 218 48% 8%;
+    --card-foreground: 216 33% 94%;
+    --popover: 218 48% 8%;
+    --popover-foreground: 216 33% 94%;
+    --primary: 188 86% 53%;
+    --primary-foreground: 222 56% 4%;
+    --secondary: 216 42% 13%;
+    --secondary-foreground: 216 33% 94%;
+    --muted: 216 42% 13%;
+    --muted-foreground: 217 19% 63%;
+    --accent: 216 42% 15%;
+    --accent-foreground: 188 86% 60%;
+    --destructive: 0 84% 71%;
+    --destructive-foreground: 222 56% 4%;
+    --border: 219 43% 18%;
+    --input: 219 43% 24%;
+    --ring: 188 86% 53%;
+    --radius: 0.375rem;
+  }
+  * { @apply border-border; }
+  html { color-scheme: dark; background: #050810; }
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+    min-width: 320px;
+    min-height: 100dvh;
+    font-family: "JetBrains Mono Variable", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", monospace;
+    font-size: 16px;
+    line-height: 1.55;
+    font-variant-numeric: tabular-nums;
+    background-image: radial-gradient(circle at 55% -10%, rgba(34,211,238,.055), transparent 34%);
+  }
+  button, [role="button"], a, select, input { outline: none; }
+  button, [role="button"], a, select { cursor: pointer; }
+  button:focus-visible, [role="button"]:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible {
+    outline: 2px solid #22d3ee;
+    outline-offset: 2px;
+  }
+  ::selection { background: rgba(34,211,238,.25); color: #f1f5fb; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #080d17; }
+  ::-webkit-scrollbar-thumb { background: #26344e; border-radius: 4px; }
+}
+
+@layer components {
+  .panel { @apply border border-[#1a2540] bg-[#0c1220]; }
+  .panel-raised { background: #111a2b; }
+  .terminal-label { @apply text-[11px] font-medium uppercase tracking-[0.14em] text-[#8290aa]; }
+  .terminal-value { @apply font-medium tracking-[-0.03em] text-[#e7edf7]; }
+  .data-positive { color: #34d399; }
+  .data-negative { color: #f87171; }
+  .data-warning { color: #fbbf24; }
+  .data-live { color: #22d3ee; }
+  .btn-primary {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 border border-[#22d3ee] bg-[#22d3ee] px-4 text-[12px] font-semibold text-[#050810] transition-colors duration-150 hover:bg-[#67e8f9] active:bg-[#0891b2] disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-secondary {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 border border-[#263650] bg-[#0c1220] px-3 text-[12px] font-medium text-[#c5d0df] transition-colors duration-150 hover:border-[#22d3ee] hover:text-[#22d3ee] active:bg-[#111a2b] disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-danger {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 border border-[#66343c] bg-[#1a1119] px-3 text-[12px] font-medium text-[#f87171] transition-colors duration-150 hover:border-[#f87171] hover:bg-[#28151d] disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .terminal-input {
+    @apply min-h-11 w-full border border-[#263650] bg-[#080e19] px-3 text-[13px] text-[#e7edf7] transition-colors duration-150 focus:border-[#22d3ee];
+  }
+  .status-dot { width: 6px; height: 6px; border-radius: 999px; display: inline-block; background: currentColor; box-shadow: 0 0 9px currentColor; }
+  .status-dot.live { animation: status-pulse 1.5s ease-in-out infinite; }
+  .ticker-track { display: flex; width: max-content; animation: terminal-ticker 48s linear infinite; }
+  .ticker-track:hover { animation-play-state: paused; }
+  .scanlines {
+    pointer-events: none; position: fixed; inset: 0; z-index: 40; opacity: .018;
+    background: repeating-linear-gradient(to bottom, transparent 0, transparent 2px, #d7e6ff 3px);
+  }
+  .reading { font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; }
+}
+
+@keyframes status-pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes terminal-ticker { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+  .ticker-track { animation: none; }
+}

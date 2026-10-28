@@ -1,0 +1,1 @@
+ALTER TABLE `trading_settings` MODIFY COLUMN `auto_trade` boolean NOT NULL DEFAULT false;

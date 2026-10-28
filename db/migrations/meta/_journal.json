@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1793103279100,
+      "tag": "0000_charming_tomas",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1793106418832,
+      "tag": "0001_high_volatility",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1793167572870,
+      "tag": "0002_smooth_katie_power",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1793176196104,
+      "tag": "0003_pause_existing_auto_trade",
+      "breakpoints": true
+    }
+  ]
+}

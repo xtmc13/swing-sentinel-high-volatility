@@ -337,6 +337,10 @@ export async function runPortfolioBacktest(
     }
     if (newDay) dailyLossLocked = false;
 
+    // Funding settles only for positions carried into this timestamp. Entries
+    // filled at this bar's open must not receive a funding charge retroactively.
+    const fundingEligibleSymbols = new Set(positions.keys());
+
     for (const symbol of symbols) {
       const opportunity = pending.get(symbol);
       if (!opportunity) continue;
@@ -409,6 +413,7 @@ export async function runPortfolioBacktest(
     }
 
     for (const symbol of symbols) {
+      if (!fundingEligibleSymbols.has(symbol)) continue;
       const position = positions.get(symbol);
       if (!position) continue;
       const bar = currentBars.get(symbol)!;

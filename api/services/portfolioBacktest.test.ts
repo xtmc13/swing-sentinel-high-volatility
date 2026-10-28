@@ -275,6 +275,7 @@ describe("多标的同步组合回测事件语义", () => {
     });
     const result = await run({
       data: { BTCUSDT: symbol },
+      settings: settings({ takerFeeBps: 0, slippageBps: 0 }),
       signals: { BTCUSDT: { [bars[0].closeTime]: { side: "LONG" } } },
     });
 

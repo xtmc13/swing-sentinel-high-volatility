@@ -14,6 +14,8 @@ export interface SizePositionInput {
   usedMargin: number;
   takerFeeBps: number;
   slippageBps: number;
+  // True when the supplied entryPrice already includes modeled adverse entry slippage (historical fills).
+  entrySlippageIncluded?: boolean;
   stepSize: number;
   minQty: number;
   minNotional: number;
@@ -56,10 +58,10 @@ export function sizePosition(input: SizePositionInput): PositionSize {
 
   const multiplier = input.mode === "HIGH" ? input.highVolatilityRiskMultiplier : 1;
   const riskBudget = input.equity * input.riskPerTradePct / 100 * multiplier;
-  // entryPrice is already the expected fill price (ask/bid live, slippage-adjusted in backtests).
-  // Count fees on both sides, but only the stop-side slippage here; entry slippage is already in entryPrice.
+  // Fees apply on both sides. Historical fill prices already include entry slippage;
+  // live ask/bid quotes do not, so reserve entry slippage only for live-priced entries.
   const twoSidedCostPerUnit = (input.entryPrice + input.stopPrice) * input.takerFeeBps / 10_000
-    + input.stopPrice * input.slippageBps / 10_000;
+    + (input.stopPrice + (input.entrySlippageIncluded ? 0 : input.entryPrice)) * input.slippageBps / 10_000;
   const riskPerUnit = stopDistance + twoSidedCostPerUnit;
   const qtyByRisk = riskBudget / riskPerUnit;
   const qtyByMargin = input.equity * input.marginPerTradePct / 100 * input.leverage / input.entryPrice;

@@ -112,17 +112,25 @@ describe("仓位、组合风险与持仓管理", () => {
     expect(rejected.reasons).toContain("组合止损风险超过1%上限");
   });
 
-  it("同方向且相关性绝对值达 0.8 的风险合计不得超过权益 0.5%", () => {
+  it("同方向且正相关性达到 0.8 的风险合计不得超过权益 0.5%", () => {
     const accepted = portfolioRisk(portfolioInput(40));
     const rejected = portfolioRisk(portfolioInput(46));
-    const opposite: Parameters<typeof portfolioRisk>[0] = portfolioInput(60, { AAA: -1 });
-    opposite.candidate!.side = "SHORT";
+    const negativeCorrelation = portfolioRisk(portfolioInput(60, { AAA: -1 }));
 
     expect(accepted.approved).toBe(true);
     expect(accepted.correlatedRisk).toBeCloseTo(45.0665, 10);
     expect(rejected.approved).toBe(false);
     expect(rejected.reasons).toContain("高相关同方向风险超过0.5%上限");
-    expect(portfolioRisk(opposite).approved).toBe(true);
+    expect(negativeCorrelation.approved).toBe(true);
+    expect(negativeCorrelation.correlatedRisk).toBe(0);
+  });
+
+  it("负相关同方向候选不应被误判为相关集中风险", () => {
+    const result = portfolioRisk(portfolioInput(60, { AAA: -0.95 }));
+
+    expect(result.approved).toBe(true);
+    expect(result.correlatedRisk).toBe(0);
+    expect(result.reasons).not.toContain("高相关同方向风险超过0.5%上限");
   });
 
   it("已有持仓时相关样本不足暂停新增，首仓无需相关样本", () => {

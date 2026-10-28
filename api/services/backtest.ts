@@ -132,7 +132,7 @@ export async function runHistoricalBacktest(symbol: string, timeframe: "5m" | "1
           const initialRisk = Math.abs(entry - stop);
           const liq = side === "LONG" ? entry * (1 - 1 / leverage + 0.005) : entry * (1 + 1 / leverage - 0.005);
           const liquidationSafe = side === "LONG" ? stop > liq + entry * 0.0015 : stop < liq - entry * 0.0015;
-          const riskPerUnit = initialRisk + (entry + stop) * (settings.takerFeeBps + settings.slippageBps) / 10000;
+          const riskPerUnit = initialRisk + (entry + stop) * settings.takerFeeBps / 10000 + stop * settings.slippageBps / 10000;
           let qty = roundToStep(Math.min(
             equity * settings.riskPerTradePct / 100 / riskPerUnit,
             equity * settings.marginPerTradePct / 100 * leverage / entry,

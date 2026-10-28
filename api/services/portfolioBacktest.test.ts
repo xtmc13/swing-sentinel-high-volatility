@@ -254,7 +254,7 @@ describe("多标的同步组合回测事件语义", () => {
   it("历史资金费按持仓方向和事件时标记价结算", async () => {
     const bars = candles([[100, 101, 99, 100], [100, 101, 99, 100], [100, 101, 99, 100]]);
     const symbol = data("BTCUSDT", bars, "5m", {
-      funding: [{ symbol: "BTCUSDT", fundingTime: bars[1].time * 1000, fundingRate: 0.01 }],
+      funding: [{ symbol: "BTCUSDT", fundingTime: bars[2].time * 1000, fundingRate: 0.01 }],
     });
     const result = await run({
       data: { BTCUSDT: symbol },
@@ -266,6 +266,23 @@ describe("多标的同步组合回测事件语义", () => {
     expect(result.totalFunding).toBe(-2);
     expect(result.trades[0].pnl).toBe(-2);
     expect(result.finalEquity).toBe(998);
+  });
+
+  it("在资金费结算时刻刚开仓的持仓不追溯收取资金费", async () => {
+    const bars = candles([[100, 101, 99, 100], [100, 101, 99, 100], [100, 101, 99, 100]]);
+    const symbol = data("BTCUSDT", bars, "5m", {
+      funding: [{ symbol: "BTCUSDT", fundingTime: bars[1].time * 1000, fundingRate: 0.01 }],
+    });
+    const result = await run({
+      data: { BTCUSDT: symbol },
+      settings: settings({ takerFeeBps: 0, slippageBps: 0 }),
+      signals: { BTCUSDT: { [bars[0].closeTime]: { side: "LONG" } } },
+    });
+
+    expect(result.funding).toHaveLength(0);
+    expect(result.totalFunding).toBe(0);
+    expect(result.trades[0].pnl).toBeCloseTo(0, 8);
+    expect(result.finalEquity).toBeCloseTo(1000, 8);
   });
 
   it("任一标的主时间轴缺口都失败关闭而不补未来数据", async () => {
@@ -372,7 +389,7 @@ describe("多标的同步组合回测事件语义", () => {
   it("资金费时间戳的开盘毫秒抖动归一到该根K线结算", async () => {
     const bars = candles([[100, 101, 99, 100], [100, 101, 99, 100], [100, 101, 99, 100]]);
     const symbol = data("BTCUSDT", bars, "5m", {
-      funding: [{ symbol: "BTCUSDT", fundingTime: bars[1].time * 1000 + 2, fundingRate: 0.01 }],
+      funding: [{ symbol: "BTCUSDT", fundingTime: bars[2].time * 1000 + 2, fundingRate: 0.01 }],
     });
     const result = await run({
       data: { BTCUSDT: symbol },
@@ -380,7 +397,7 @@ describe("多标的同步组合回测事件语义", () => {
     });
 
     expect(result.funding).toHaveLength(1);
-    expect(result.funding[0]).toMatchObject({ time: bars[1].time * 1000, rate: 0.01, amount: -2 });
+    expect(result.funding[0]).toMatchObject({ time: bars[2].time * 1000, rate: 0.01, amount: -2 });
     expect(result.finalEquity).toBe(998);
   });
 
@@ -437,7 +454,7 @@ describe("Task 6 评审回归：现金费用、SHORT 与跨日日损", () => {
   it("SHORT 在负资金费率下支付资金费并计入现金", async () => {
     const bars = candles([[100, 101, 99, 100], [100, 101, 99, 100], [100, 101, 99, 100]]);
     const symbol = data("BTCUSDT", bars, "5m", {
-      funding: [{ symbol: "BTCUSDT", fundingTime: bars[1].time * 1000, fundingRate: -0.01 }],
+      funding: [{ symbol: "BTCUSDT", fundingTime: bars[2].time * 1000, fundingRate: -0.01 }],
     });
     const result = await run({
       data: { BTCUSDT: symbol },

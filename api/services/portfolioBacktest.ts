@@ -337,6 +337,10 @@ export async function runPortfolioBacktest(
     }
     if (newDay) dailyLossLocked = false;
 
+    // Funding settles only for the exact position instances carried into this timestamp.
+    // A newly opened/reopened position for the same symbol must not inherit the old position's funding eligibility.
+    const fundingEligiblePositions = new Map(positions);
+
     for (const symbol of symbols) {
       const opportunity = pending.get(symbol);
       if (!opportunity) continue;
@@ -409,8 +413,9 @@ export async function runPortfolioBacktest(
     }
 
     for (const symbol of symbols) {
+      const carriedPosition = fundingEligiblePositions.get(symbol);
       const position = positions.get(symbol);
-      if (!position) continue;
+      if (!carriedPosition || position !== carriedPosition) continue;
       const bar = currentBars.get(symbol)!;
       for (const event of fundingBySymbol.get(symbol)!) {
         if (event.fundingTime !== openTime) continue;

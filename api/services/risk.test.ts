@@ -60,7 +60,7 @@ describe("仓位、组合风险与持仓管理", () => {
     if (!result.ok) return;
     expect(result.stopDistance).toBe(5);
     expect(result.riskBudget).toBe(35);
-    expect(result.qty).toBeCloseTo(35 / (5 + 199 * 0.0007), 10);
+    expect(result.qty).toBeCloseTo(35 / (5 + 199 * 0.0005 + 97 * 0.0002), 10);
     expect(result.estimatedRisk).toBeCloseTo(35, 10);
     expect(result.targetPrice).toBeCloseTo(113);
   });

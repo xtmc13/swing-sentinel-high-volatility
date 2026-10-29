@@ -344,7 +344,8 @@ export class BinanceFuturesClient {
     const now = this.now();
     const intervalMs = 300_000;
     const required = Math.ceil(days * 86_400_000 / intervalMs);
-    const startTime = now - required * intervalMs;
+    // Align down so a non-boundary wall clock cannot create an endless paging loop.
+    const startTime = Math.floor((now - required * intervalMs) / intervalMs) * intervalMs;
     const byOpenTime = new Map<number, Candle>();
     let endTime = now - 1;
 
@@ -353,6 +354,8 @@ export class BinanceFuturesClient {
       const path = `/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=5m&limit=${limit}&endTime=${endTime}`;
       const raw = await this.request<NumericRow[]>(source, path);
       if (!Array.isArray(raw) || raw.length === 0) break;
+      const firstOpen = Number(raw[0]?.[0]);
+      if (!Number.isFinite(firstOpen)) throw new Error(`Invalid 5m baseline for ${symbol}`);
       for (const row of raw) {
         const openTime = Number(row[0]);
         const closeTime = Number(row[6]);
@@ -365,7 +368,8 @@ export class BinanceFuturesClient {
           });
         }
       }
-      endTime = Number(raw[0][0]) - 1;
+      endTime = firstOpen - 1;
+      if (firstOpen < startTime) break;
     }
 
     const candles = [...byOpenTime.values()].sort((a, b) => a.time - b.time);

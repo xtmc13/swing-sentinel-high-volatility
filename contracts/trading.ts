@@ -101,6 +101,9 @@ export interface AccountSnapshot {
   todayPnl: number;
   todayPnlPct: number;
   dayStartEquity: number;
+  valuationValid: boolean;
+  valuationIssues: string[];
+  dailyLocked: boolean;
 }
 
 export interface Opportunity {
@@ -145,6 +148,7 @@ export interface PositionView {
   openedAt: string;
   holdingMinutes: number;
   rMultiple: number;
+  valuationValid: boolean;
 }
 
 export interface TradeView {
@@ -157,6 +161,7 @@ export interface TradeView {
   pnl: number;
   returnPct: number;
   fees: number;
+  fundingPnl: number;
   holdingMinutes: number;
   exitReason: string;
   openedAt: string;

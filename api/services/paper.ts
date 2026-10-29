@@ -7,6 +7,7 @@ import {
   closedTrades,
   tradingSettings,
   volatilityStates,
+  fundingSettlements,
 } from "@db/schema";
 import {
   getOpenPositions,
@@ -17,7 +18,7 @@ import {
   settingsFromRow,
 } from "../queries/trading";
 import { binance, createMarketSnapshot, type MarketSnapshot } from "./binance";
-import { approveAndPriceEntry, type EntryRiskPosition } from "./execution";
+import { applyAdverseSlippage, approveAndPriceEntry, type EntryRiskPosition } from "./execution";
 import { alignedCorrelation, managePositionPrice } from "./risk";
 import { log } from "../lib/logger";
 import type {
@@ -36,20 +37,24 @@ import type {
 export type PositionRow = typeof positions.$inferSelect;
 export type TradeRow = typeof closedTrades.$inferSelect;
 
-export function toPositionView(row: PositionRow, market?: Market): PositionView {
+export function toPositionView(row: PositionRow, market?: Market, snapshot?: MarketSnapshot): PositionView {
   const direction = row.side === "LONG" ? 1 : -1;
-  const markPrice = market?.markPrice || market?.price || row.entryPrice;
-  const unrealizedPnl = (markPrice - row.entryPrice) * row.qty * direction;
+  const candidate = snapshot ? snapshot.markPrice : market?.markPrice ?? market?.price;
+  const sourceValid = snapshot ? snapshot.quality.valid : true;
+  const valuationValid = sourceValid && Number.isFinite(candidate) && (candidate ?? 0) > 0;
+  const markPrice = valuationValid ? candidate! : Number.NaN;
+  const unrealizedPnl = valuationValid ? (markPrice - row.entryPrice) * row.qty * direction : Number.NaN;
   return {
     id: row.id, symbol: row.symbol, side: row.side as Side,
     qty: row.qty, initialQty: row.initialQty, entryPrice: row.entryPrice,
     markPrice, stopPrice: row.stopPrice, targetPrice: row.targetPrice,
     liquidationPrice: row.liquidationPrice, leverage: row.leverage,
     margin: row.margin, unrealizedPnl,
-    unrealizedPct: row.margin > 0 ? unrealizedPnl / row.margin * 100 : 0,
+    unrealizedPct: valuationValid && row.margin > 0 ? unrealizedPnl / row.margin * 100 : Number.NaN,
     realizedPnl: row.realizedPnl, openedAt: row.openedAt.toISOString(),
     holdingMinutes: Math.max(0, (Date.now() - row.openedAt.getTime()) / 60000),
-    rMultiple: row.initialRisk > 0 ? (markPrice - row.entryPrice) * direction / row.initialRisk : 0,
+    rMultiple: valuationValid && row.initialRisk > 0 ? (markPrice - row.entryPrice) * direction / row.initialRisk : Number.NaN,
+    valuationValid,
   };
 }
 
@@ -57,7 +62,7 @@ export function toTradeView(row: TradeRow): TradeView {
   return {
     id: row.id, symbol: row.symbol, side: row.side as Side, qty: row.qty,
     entryPrice: row.entryPrice, exitPrice: row.exitPrice, pnl: row.pnl,
-    returnPct: row.returnPct, fees: row.fees, holdingMinutes: row.holdingMinutes,
+    returnPct: row.returnPct, fees: row.fees, fundingPnl: row.fundingPnl, holdingMinutes: row.holdingMinutes,
     exitReason: row.exitReason, openedAt: row.openedAt.toISOString(), closedAt: row.closedAt.toISOString(),
   };
 }
@@ -66,35 +71,67 @@ async function rollUtcDayBaseline(
   account: typeof simulationAccounts.$inferSelect,
   equity: number,
   now: number,
-  update: (values: { dayKey: string; dayStartEquity: number }) => Promise<unknown>,
+  update: (values: { dayKey: string; dayStartEquity: number; dailyLockDay: null }) => Promise<unknown>,
 ) {
   const dayKey = new Date(now).toISOString().slice(0, 10);
-  if (account.dayKey === dayKey) return { dayKey, dayStartEquity: account.dayStartEquity };
+  if (account.dayKey === dayKey) {
+    return { dayKey, dayStartEquity: account.dayStartEquity, dailyLockDay: account.dailyLockDay };
+  }
+  if (!Number.isFinite(equity)) {
+    return { dayKey, dayStartEquity: account.dayStartEquity, dailyLockDay: null };
+  }
   const dayStartEquity = equity;
-  await update({ dayKey, dayStartEquity });
-  return { dayKey, dayStartEquity };
+  await update({ dayKey, dayStartEquity, dailyLockDay: null });
+  return { dayKey, dayStartEquity, dailyLockDay: null };
 }
 
-export async function getAccountSnapshot(rows?: PositionRow[], markets?: Market[]): Promise<AccountSnapshot> {
-  const openRows = rows ?? await getOpenPositions();
-  const marketRows = markets ?? await binance.getMarkets(await getSettings());
-  const marketMap = new Map(marketRows.map((market) => [market.symbol, market]));
-  const unrealizedPnl = openRows.reduce((sum, row) => sum + toPositionView(row, marketMap.get(row.symbol)).unrealizedPnl, 0);
+export async function getAccountSnapshot(rows?: PositionRow[]): Promise<AccountSnapshot> {
+  const [openRows, settings] = await Promise.all([rows ? Promise.resolve(rows) : getOpenPositions(), getSettings()]);
+  const valued = await Promise.all(openRows.map(async (row) => {
+    try {
+      const snapshot = await binance.getMarketSnapshot(row.symbol);
+      return {
+        view: toPositionView(row, undefined, snapshot),
+        issue: snapshot.quality.valid ? null : `${row.symbol}：${snapshot.quality.reasons.join("、") || "行情无效"}`,
+      };
+    } catch (error) {
+      return { view: toPositionView(row), issue: `${row.symbol}：${error instanceof Error ? error.message : String(error)}` };
+    }
+  }));
+  const valuationValid = valued.every((item) => item.view.valuationValid);
+  const valuationIssues = valued.flatMap((item) => item.issue ? [item.issue] : []);
+  const unrealizedPnl = valuationValid ? valued.reduce((sum, item) => sum + item.view.unrealizedPnl, 0) : Number.NaN;
   const usedMargin = openRows.reduce((sum, row) => sum + row.margin, 0);
-  const { account, dayStartEquity } = await getDb().transaction(async (tx) => {
+  const { account, dayStartEquity, dailyLocked } = await getDb().transaction(async (tx) => {
     const locked = (await tx.select().from(simulationAccounts)
       .where(eq(simulationAccounts.id, 1)).limit(1).for("update"))[0];
     if (!locked) throw new Error("Simulation account is missing");
-    const baseline = await rollUtcDayBaseline(locked, locked.cash + unrealizedPnl, Date.now(), (values) =>
+    const equity = valuationValid ? locked.cash + unrealizedPnl : Number.NaN;
+    const baseline = await rollUtcDayBaseline(locked, equity, Date.now(), (values) =>
       tx.update(simulationAccounts).set(values).where(eq(simulationAccounts.id, 1)));
-    return { account: locked, dayStartEquity: baseline.dayStartEquity };
+    const todayPnlPct = valuationValid && baseline.dayStartEquity > 0
+      ? (equity - baseline.dayStartEquity) / baseline.dayStartEquity * 100 : Number.NaN;
+    let dailyLockDay = baseline.dailyLockDay;
+    if (todayPnlPct <= -settings.dailyLossLimitPct && dailyLockDay !== baseline.dayKey) {
+      dailyLockDay = baseline.dayKey;
+      await tx.update(simulationAccounts).set({ dailyLockDay }).where(eq(simulationAccounts.id, 1));
+    }
+    return { account: locked, dayStartEquity: baseline.dayStartEquity, dailyLocked: dailyLockDay === baseline.dayKey };
   });
-  const equity = account.cash + unrealizedPnl;
+  const equity = valuationValid ? account.cash + unrealizedPnl : Number.NaN;
   return {
-    equity, cash: account.cash, availableMargin: Math.max(0, equity - usedMargin), usedMargin,
-    unrealizedPnl, realizedPnl: account.realizedPnl, todayPnl: equity - dayStartEquity,
-    todayPnlPct: dayStartEquity > 0 ? (equity - dayStartEquity) / dayStartEquity * 100 : 0,
+    equity,
+    cash: account.cash,
+    availableMargin: valuationValid ? Math.max(0, equity - usedMargin) : Number.NaN,
+    usedMargin,
+    unrealizedPnl,
+    realizedPnl: account.realizedPnl,
+    todayPnl: valuationValid ? equity - dayStartEquity : Number.NaN,
+    todayPnlPct: valuationValid && dayStartEquity > 0 ? (equity - dayStartEquity) / dayStartEquity * 100 : Number.NaN,
     dayStartEquity,
+    valuationValid,
+    valuationIssues,
+    dailyLocked,
   };
 }
 
@@ -127,6 +164,7 @@ export interface PaperMarket {
   getSymbolMeta(symbol: string): ReturnType<typeof binance.getSymbolMeta>;
   getMarkets(settings: TradingSettings): Promise<Market[]>;
   getCandles(symbol: string, interval: string, limit?: number): Promise<Candle[]>;
+  getFundingRates?(symbol: string, startTime: number, endTime: number): ReturnType<typeof binance.getFundingRates>;
 }
 
 export interface PaperServiceDependencies {
@@ -173,6 +211,44 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+
+  const fundingCheckedAt = new Map<string, number>();
+
+  async function settlePositionFunding(row: PositionRow, snapshot: MarketSnapshot) {
+    if (!market.getFundingRates || !snapshot.quality.valid) return;
+    const lastCheck = fundingCheckedAt.get(row.id) ?? 0;
+    if (now() - lastCheck < 60_000) return;
+    const db = dbFor();
+    const events = await market.getFundingRates(row.symbol, row.openedAt.getTime(), now());
+    for (const event of events) {
+      if (event.fundingTime < row.openedAt.getTime() || event.fundingTime > now()) continue;
+      if (!Number.isFinite(event.fundingRate) || !Number.isFinite(event.fundingTime)) throw new Error(`${row.symbol} 资金费历史数据无效`);
+      const settled = await db.transaction(async (tx) => {
+        await tx.select().from(simulationAccounts).where(eq(simulationAccounts.id, 1)).limit(1).for("update");
+        const current = (await tx.select().from(positions).where(eq(positions.id, row.id)).limit(1))[0];
+        if (!current || current.status !== "OPEN") return false;
+        const existing = await tx.select().from(fundingSettlements).where(and(
+          eq(fundingSettlements.positionId, row.id),
+          eq(fundingSettlements.fundingTime, event.fundingTime),
+        )).limit(1);
+        if (existing.length) return false;
+        const direction = current.side === "LONG" ? 1 : -1;
+        const notional = current.qty * snapshot.markPrice;
+        const amount = -direction * notional * event.fundingRate;
+        if (!Number.isFinite(notional) || !Number.isFinite(amount)) throw new Error(`${row.symbol} 资金费结算金额无效`);
+        await tx.insert(fundingSettlements).values({ id: crypto.randomUUID(), positionId: current.id, symbol: current.symbol, fundingTime: event.fundingTime, rate: event.fundingRate, notional, amount });
+        await tx.update(positions).set({ fundingPnl: sql`${positions.fundingPnl} + ${amount}` })
+          .where(and(eq(positions.id, current.id), eq(positions.status, "OPEN")));
+        await tx.update(simulationAccounts).set({
+          cash: sql`${simulationAccounts.cash} + ${amount}`,
+          realizedPnl: sql`${simulationAccounts.realizedPnl} + ${amount}`,
+        }).where(eq(simulationAccounts.id, 1));
+        return true;
+      });
+      if (settled) await reportEvent("INFO", "资金费结算", `${row.symbol} 按当前标记价近似结算资金费`, row.symbol);
+    }
+    fundingCheckedAt.set(row.id, now());
   }
 
   async function openPaperPosition(opportunity: Opportunity, executionHealthy?: () => boolean) {
@@ -250,9 +326,15 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         }, 0);
         const usedMargin = openRows.reduce((sum, row) => sum + row.margin, 0);
         const equity = account.cash + unrealizedPnl;
-        const { dayStartEquity } = await rollUtcDayBaseline(account, equity, now(), (values) =>
+        const baseline = await rollUtcDayBaseline(account, equity, now(), (values) =>
           tx.update(simulationAccounts).set(values).where(eq(simulationAccounts.id, 1)));
+        const dayStartEquity = baseline.dayStartEquity;
         const todayPnlPct = dayStartEquity > 0 ? (equity - dayStartEquity) / dayStartEquity * 100 : 0;
+        let dailyLockDay = baseline.dailyLockDay;
+        if (todayPnlPct <= -settings.dailyLossLimitPct && dailyLockDay !== baseline.dayKey) {
+          dailyLockDay = baseline.dayKey;
+          await tx.update(simulationAccounts).set({ dailyLockDay }).where(eq(simulationAccounts.id, 1));
+        }
         const approved = approveAndPriceEntry({
           opportunity,
           snapshot: currentSnapshots.get(opportunity.symbol)!,
@@ -269,6 +351,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
           equity,
           usedMargin,
           todayPnlPct,
+          dailyLossLocked: dailyLockDay === baseline.dayKey,
           positions: riskPositions,
           correlations,
           symbolMeta: meta,
@@ -345,10 +428,11 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       }
       const side = row.side as Side;
       const direction = side === "LONG" ? 1 : -1;
-      const exitPrice = side === "LONG" ? current.bid : current.ask;
+      const rawExit = side === "LONG" ? current.bid : current.ask;
+      const exitPrice = applyAdverseSlippage(rawExit, side, settings.slippageBps, "CLOSE");
       const grossPnl = (exitPrice - row.entryPrice) * row.qty * direction;
       const closeFee = row.qty * exitPrice * settings.takerFeeBps / 10_000;
-      const netPnl = grossPnl - row.fees - closeFee;
+      const netPnl = grossPnl - row.fees - closeFee + row.fundingPnl;
       const holdingMinutes = Math.max(0, (now() - row.openedAt.getTime()) / 60_000);
       const closedAt = new Date(now());
       await dependencies.beforeCloseUpdate?.(row.id);
@@ -375,6 +459,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         pnl: netPnl,
         returnPct: row.margin > 0 ? netPnl / row.margin * 100 : 0,
         fees: row.fees + closeFee,
+        fundingPnl: row.fundingPnl,
         holdingMinutes,
         exitReason: reason,
         openedAt: row.openedAt,
@@ -399,24 +484,38 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
     const db = dbFor();
     const rows = await db.select().from(positions).where(eq(positions.status, "OPEN"));
     const snapshots = new Map(await Promise.all(rows.map(async (row) => [row.symbol, await market.getMarketSnapshot(row.symbol)] as const)));
-    const unrealizedPnl = rows.reduce((sum, row) => {
+    for (const row of rows) {
       const snapshot = snapshots.get(row.symbol);
-      if (!snapshot?.quality.valid) return sum;
+      if (!snapshot?.quality.valid) continue;
+      try {
+        await settlePositionFunding(row, snapshot);
+      } catch (error) {
+        log.error("funding settlement failed", { symbol: row.symbol, error: String(error) });
+      }
+    }
+    const valuationValid = rows.every((row) => snapshots.get(row.symbol)?.quality.valid);
+    const unrealizedPnl = valuationValid ? rows.reduce((sum, row) => {
+      const snapshot = snapshots.get(row.symbol)!;
       return sum + (snapshot.markPrice - row.entryPrice) * row.qty * (row.side === "LONG" ? 1 : -1);
-    }, 0);
+    }, 0) : Number.NaN;
     const dailyBaseline = await db.transaction(async (tx) => {
       const account = (await tx.select().from(simulationAccounts)
         .where(eq(simulationAccounts.id, 1)).limit(1).for("update"))[0];
       if (!account) return null;
-      const equity = account.cash + unrealizedPnl;
+      const equity = valuationValid ? account.cash + unrealizedPnl : Number.NaN;
       const baseline = await rollUtcDayBaseline(account, equity, now(), (values) =>
         tx.update(simulationAccounts).set(values).where(eq(simulationAccounts.id, 1)));
-      return { cash: account.cash, dayStartEquity: baseline.dayStartEquity };
+      const todayPnlPct = valuationValid && baseline.dayStartEquity > 0
+        ? (equity - baseline.dayStartEquity) / baseline.dayStartEquity * 100 : Number.NaN;
+      let dailyLockDay = baseline.dailyLockDay;
+      if (todayPnlPct <= -settings.dailyLossLimitPct && dailyLockDay !== baseline.dayKey) {
+        dailyLockDay = baseline.dayKey;
+        await tx.update(simulationAccounts).set({ dailyLockDay }).where(eq(simulationAccounts.id, 1));
+      }
+      return { dailyLocked: dailyLockDay === baseline.dayKey };
     });
     if (!dailyBaseline) return;
-    const equity = dailyBaseline.cash + unrealizedPnl;
-    const dailyLocked = dailyBaseline.dayStartEquity > 0
-      && (equity - dailyBaseline.dayStartEquity) / dailyBaseline.dayStartEquity * 100 <= -settings.dailyLossLimitPct;
+    const dailyLocked = dailyBaseline.dailyLocked;
     for (const row of rows) {
       const snapshot = snapshots.get(row.symbol);
       if (!snapshot?.quality.valid) continue;
@@ -474,6 +573,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
           realizedPnl: 0,
           dayStartEquity: 100_000,
           dayKey: new Date(now()).toISOString().slice(0, 10),
+          dailyLockDay: null,
         }).where(eq(simulationAccounts.id, 1));
         return [];
       });

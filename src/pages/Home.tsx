@@ -25,9 +25,9 @@ export default function Home() {
   const openRisk = data.portfolioRisk.totalRiskPct;
   const transitions = data.events.filter((event) => event.category === "三态迁移");
   const metrics = [
-    { label: "模拟账户权益", value: formatNumber(data.account.equity), suffix: "USDT", tone: data.account.equity >= 100000 ? "data-positive" : "data-negative" },
+    { label: "模拟账户权益", value: formatNumber(data.account.equity), suffix: data.account.valuationValid ? "USDT" : "估值不可用", tone: !data.account.valuationValid ? "data-warning" : data.account.equity >= 100000 ? "data-positive" : "data-negative" },
     { label: "可用保证金", value: formatNumber(data.account.availableMargin), suffix: "USDT", tone: "text-[#e7edf7]" },
-    { label: "今日净盈亏", value: `${data.account.todayPnl >= 0 ? "+" : ""}${formatNumber(data.account.todayPnl)}`, suffix: formatPercent(data.account.todayPnlPct), tone: data.account.todayPnl >= 0 ? "data-positive" : "data-negative" },
+    { label: "今日净盈亏", value: `${data.account.todayPnl >= 0 ? "+" : ""}${formatNumber(data.account.todayPnl)}`, suffix: data.account.dailyLocked ? "当日已锁定" : formatPercent(data.account.todayPnlPct), tone: !data.account.valuationValid ? "data-warning" : data.account.todayPnl >= 0 ? "data-positive" : "data-negative" },
     { label: "当前止损风险", value: formatNumber(openRisk), suffix: "% 权益", tone: openRisk > 1 ? "data-warning" : "data-live" },
   ];
 
@@ -50,6 +50,15 @@ export default function Home() {
           <ShieldAlert size={15} className="mt-0.5 shrink-0" />
           <span className="reading">当前连接为币安期货测试网公开行情，并非主网实时盘面。行情与成交只用于系统验证，不代表主网流动性或可实现收益。</span>
         </div>
+      )}
+
+      {!data.account.valuationValid && (
+        <div className="mb-3 border border-[#7f1d1d] bg-[#1c1015] px-4 py-3 text-[11px] leading-5 text-[#fca5a5]" role="alert">
+          持仓估值不可用，页面以“—”显示未知盈亏，不再按开仓价伪装成 0。权益快照已暂停写入。{data.account.valuationIssues.length > 0 && <span className="block mt-1">{data.account.valuationIssues.join("；")}</span>}
+        </div>
+      )}
+      {data.account.dailyLocked && (
+        <div className="mb-3 border border-[#55461e] bg-[#17150e] px-4 py-3 text-[11px] text-[#fbbf24]" role="alert">当日亏损熔断已锁存；即使价格恢复，也要到下一 UTC 日才允许新增持仓。</div>
       )}
 
       <section className="mb-3 grid grid-cols-2 border border-[#1a2540] bg-[#0c1220] xl:grid-cols-4" aria-label="账户关键指标">
@@ -100,7 +109,7 @@ export default function Home() {
               {data.positions.map((position) => (
                 <div key={position.id} className="border-b border-[#1a2540] p-4">
                   <div className="flex items-center justify-between"><button onClick={() => setSelectedSymbol(position.symbol)} className="text-[12px] font-medium hover:text-[#22d3ee]">{position.symbol}</button><span className={`text-[10px] ${sideColor(position.side)}`}>{sideLabel(position.side)} · {position.leverage}×</span></div>
-                  <div className="mt-3 grid grid-cols-2 gap-3 text-[10px]"><div><div className="text-[#8290aa]">未实现盈亏</div><div className={`mt-1 text-[14px] ${position.unrealizedPnl >= 0 ? "data-positive" : "data-negative"}`}>{position.unrealizedPnl >= 0 ? "+" : ""}{formatNumber(position.unrealizedPnl)}</div></div><div className="text-right"><div className="text-[#8290aa]">保证金</div><div className="mt-1 text-[14px]">{formatNumber(position.margin)}</div></div></div>
+                  <div className="mt-3 grid grid-cols-2 gap-3 text-[10px]"><div><div className="text-[#8290aa]">未实现盈亏</div><div className={`mt-1 text-[14px] ${!position.valuationValid ? "data-warning" : position.unrealizedPnl >= 0 ? "data-positive" : "data-negative"}`}>{position.unrealizedPnl >= 0 ? "+" : ""}{formatNumber(position.unrealizedPnl)}</div></div><div className="text-right"><div className="text-[#8290aa]">保证金</div><div className="mt-1 text-[14px]">{formatNumber(position.margin)}</div></div></div>
                   <div className="mt-3 space-y-1 text-[9px] text-[#91a0b8]"><div className="flex justify-between"><span>进场 {formatPrice(position.entryPrice)}</span><span>标记 {formatPrice(position.markPrice)}</span></div><div className="flex justify-between"><span className="text-[#f87171]">止损 {formatPrice(position.stopPrice)}</span><span className="data-positive">目标 {formatPrice(position.targetPrice)}</span></div><div className="flex justify-between"><span>强平参考 {formatPrice(position.liquidationPrice)}</span><span>{position.holdingMinutes.toFixed(0)} 分钟</span></div></div>
                   <button className="btn-secondary mt-3 w-full !min-h-9 !text-[10px]" disabled={close.isPending} onClick={() => { if (window.confirm(`确认按当前模拟市价平掉 ${position.symbol}？`)) close.mutate({ positionId: position.id }); }}><X size={12} />模拟市价平仓</button>
                 </div>

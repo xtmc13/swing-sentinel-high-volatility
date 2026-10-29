@@ -35,8 +35,8 @@ function candleRow(openTime: number, close = 100): unknown[] {
   return [openTime, "99", "101", "98", String(close), "123", openTime + INTERVAL_MS - 1];
 }
 
-function clientWith(fetchFake: typeof fetch, source: DataSource = "MAINNET") {
-  return new BinanceFuturesClient({ source, fetch: fetchFake, now: () => NOW });
+function clientWith(fetchFake: typeof fetch, source: DataSource = "MAINNET", now = NOW) {
+  return new BinanceFuturesClient({ source, fetch: fetchFake, now: () => now });
 }
 
 describe("单源 REST 行情", () => {
@@ -169,6 +169,24 @@ describe("七天已收盘基线", () => {
     expect(candles[0].time).toBe((NOW - 2016 * INTERVAL_MS) / 1000);
     expect(candles.at(-1)?.closeTime).toBe(NOW - 1);
     expect(candles.every((candle) => candle.closeTime < NOW)).toBe(true);
+  });
+
+  it("非 5M 对齐时间也能在两页内取得完整基线而不无限翻页", async () => {
+    const now = NOW + 42_123;
+    const calls: number[] = [];
+    const fetchFake = (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const limit = Number(url.searchParams.get("limit"));
+      const endTime = Number(url.searchParams.get("endTime"));
+      calls.push(limit);
+      const lastOpen = Math.floor(endTime / INTERVAL_MS) * INTERVAL_MS;
+      return response(Array.from({ length: limit }, (_, index) => candleRow(lastOpen - (limit - 1 - index) * INTERVAL_MS)));
+    }) as typeof fetch;
+    const candles = await clientWith(fetchFake, "MAINNET", now).getBaselineCandles("BTCUSDT");
+    expect(candles).toHaveLength(2016);
+    expect(calls).toEqual([1500, 517]);
+    expect(candles[0].time).toBe(Math.floor((now - 2016 * INTERVAL_MS) / INTERVAL_MS) * INTERVAL_MS / 1000);
+    expect(candles.at(-1)?.closeTime).toBe(Math.floor(now / INTERVAL_MS) * INTERVAL_MS - 1);
   });
 });
 

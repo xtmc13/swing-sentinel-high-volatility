@@ -73,7 +73,7 @@ export async function runHistoricalBacktest(symbol: string, timeframe: "5m" | "1
       id: crypto.randomUUID(), symbol, side: position.side, qty: position.qty,
       entryPrice: position.entry, exitPrice: exit, pnl,
       returnPct: position.margin > 0 ? pnl / position.margin * 100 : 0,
-      fees: openFee + closeFee, holdingMinutes: (timeMs - position.openedAt) / 60000,
+      fees: openFee + closeFee, fundingPnl: 0, holdingMinutes: (timeMs - position.openedAt) / 60000,
       exitReason: reason, openedAt: new Date(position.openedAt).toISOString(), closedAt: new Date(timeMs).toISOString(),
     });
     position = null;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, type Opportunity, type TradingSettings, type VolatilityState } from "@contracts/trading";
-import { approveAndPriceEntry, type EntryApprovalInput } from "./execution";
+import { applyAdverseSlippage, approveAndPriceEntry, type EntryApprovalInput } from "./execution";
 import { assertAffectedRows } from "../queries/trading";
 import { toPositionView, type PositionRow } from "./paper";
 import type { MarketSnapshot } from "./binance";
@@ -82,22 +82,31 @@ function input(overrides: Partial<EntryApprovalInput> = {}): EntryApprovalInput 
   };
 }
 
+describe("实时与回测共用不利滑点方向", () => {
+  it("开平仓均让成交价向不利于持仓方向移动", () => {
+    expect(applyAdverseSlippage(100, "LONG", 2, "OPEN")).toBeCloseTo(100.02, 10);
+    expect(applyAdverseSlippage(100, "LONG", 2, "CLOSE")).toBeCloseTo(99.98, 10);
+    expect(applyAdverseSlippage(100, "SHORT", 2, "OPEN")).toBeCloseTo(99.98, 10);
+    expect(applyAdverseSlippage(100, "SHORT", 2, "CLOSE")).toBeCloseTo(100.02, 10);
+  });
+});
+
 describe("统一开仓审批与当前盘口定价", () => {
-  it("多头按当前 ask 成交并重算数量、2.2R 目标、费用、保证金和初始风险", () => {
+  it("多头按当前 ask 加不利滑点成交并重算数量、2.2R 目标、费用、保证金和初始风险", () => {
     const result = approveAndPriceEntry(input());
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.fillPrice).toBe(100.06);
-    expect(result.qty).toBe(159.189);
-    expect(result.initialRisk).toBeCloseTo(2.06, 10);
-    expect(result.targetPrice).toBeCloseTo(104.592, 10);
-    expect(result.openFee).toBeCloseTo(7.96422567, 10);
-    expect(result.margin).toBeCloseTo(796.422567, 10);
+    expect(result.fillPrice).toBeCloseTo(100.080012, 10);
+    expect(result.qty).toBe(157.752);
+    expect(result.initialRisk).toBeCloseTo(2.080012, 10);
+    expect(result.targetPrice).toBeCloseTo(104.6560384, 10);
+    expect(result.openFee).toBeCloseTo(7.893911026512, 10);
+    expect(result.margin).toBeCloseTo(789.3911026512, 10);
     expect(result.estimatedRisk).toBeLessThanOrEqual(350);
   });
 
-  it("空头按当前 bid 而不是旧信号价成交并重算目标", () => {
+  it("空头按当前 bid 减不利滑点成交并重算目标", () => {
     const shortOpportunity: Opportunity = {
       ...opportunity,
       id: "BTCUSDT-SHORT",
@@ -112,9 +121,9 @@ describe("统一开仓审批与当前盘口定价", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.fillPrice).toBe(99.94);
-    expect(result.initialRisk).toBeCloseTo(2.06, 10);
-    expect(result.targetPrice).toBeCloseTo(95.408, 10);
+    expect(result.fillPrice).toBeCloseTo(99.920012, 10);
+    expect(result.initialRisk).toBeCloseTo(2.079988, 10);
+    expect(result.targetPrice).toBeCloseTo(95.3440384, 10);
   });
 
   it.each([
@@ -165,6 +174,7 @@ describe("数据库结果与不可变初始风险", () => {
       leverage: 20,
       margin: 5,
       fees: 0.1,
+      fundingPnl: 0,
       realizedPnl: 0,
       maxFavorableR: 0,
       initialRisk: 2,
@@ -173,7 +183,9 @@ describe("数据库结果与不可变初始风险", () => {
       closedAt: null,
     };
 
-    expect(toPositionView(row).rMultiple).toBe(0);
+    expect(toPositionView(row)).toMatchObject({ valuationValid: false });
+    expect(toPositionView(row).rMultiple).toBeNaN();
+    expect(toPositionView(row).unrealizedPnl).toBeNaN();
     expect(toPositionView(row, {
       symbol: "BTCUSDT",
       baseAsset: "BTC",

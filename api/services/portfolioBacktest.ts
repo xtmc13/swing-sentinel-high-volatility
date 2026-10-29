@@ -13,7 +13,7 @@ import {
   type VolatilityState,
 } from "@contracts/trading";
 import { getSettings } from "../queries/trading";
-import { approveHistoricalEntry, type EntryRiskPosition } from "./execution";
+import { applyAdverseSlippage, approveHistoricalEntry, type EntryRiskPosition } from "./execution";
 import { persistBacktestResult } from "./backtest";
 import { atrSeries, maxDrawdown } from "./indicators";
 import { alignedCorrelation, managePositionPrice } from "./risk";
@@ -294,7 +294,7 @@ export async function runPortfolioBacktest(
     .reduce((sum, position) => sum + (price(position) - position.entryPrice) * position.qty * direction(position.side), 0);
 
   const closePosition = (position: HistoricalPosition, rawExit: number, time: number, reason: string) => {
-    const exit = rawExit * (1 - direction(position.side) * settings.slippageBps / 10_000);
+    const exit = applyAdverseSlippage(rawExit, position.side, settings.slippageBps, "CLOSE");
     const closeFee = position.qty * exit * settings.takerFeeBps / 10_000;
     const gross = (exit - position.entryPrice) * position.qty * direction(position.side);
     cash += gross - closeFee;
@@ -310,6 +310,7 @@ export async function runPortfolioBacktest(
       pnl,
       returnPct: position.margin > 0 ? pnl / position.margin * 100 : 0,
       fees: position.openFee + closeFee,
+      fundingPnl: position.fundingPnl,
       holdingMinutes: (time - position.openedAt) / 60_000,
       exitReason: reason,
       openedAt: new Date(position.openedAt).toISOString(),
@@ -341,6 +342,10 @@ export async function runPortfolioBacktest(
       const opportunity = pending.get(symbol);
       if (!opportunity) continue;
       pending.delete(symbol);
+      if (dailyLossLocked) {
+        riskRejections.push({ time: openTime, symbol, reason: "当日亏损熔断已触发并锁定至下一 UTC 日" });
+        continue;
+      }
       const bar = currentBars.get(symbol)!;
       const state = states.get(symbol);
       if (!state) {
@@ -374,13 +379,14 @@ export async function runPortfolioBacktest(
         equity,
         usedMargin,
         todayPnlPct: dayStartEquity > 0 ? (equity - dayStartEquity) / dayStartEquity * 100 : -100,
+        dailyLossLocked,
         positions: riskPositions,
         correlations,
         symbolMeta: data[symbol].meta,
         maxLeverage: data[symbol].market.maxLeverage,
         now: openTime,
         currentPrice: bar.open,
-        fillPrice: bar.open * (1 + direction(opportunity.side) * settings.slippageBps / 10_000),
+        fillPrice: applyAdverseSlippage(bar.open, opportunity.side, settings.slippageBps, "OPEN"),
       });
       if (!approved.ok) {
         riskRejections.push({ time: openTime, symbol, reason: approved.reason });

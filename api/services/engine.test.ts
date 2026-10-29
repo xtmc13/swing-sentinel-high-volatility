@@ -93,6 +93,9 @@ const account: AccountSnapshot = {
   todayPnl: 0,
   todayPnlPct: 0,
   dayStartEquity: 100_000,
+  valuationValid: true,
+  valuationIssues: [],
+  dailyLocked: false,
 };
 
 const normalRiskData: EngineRiskData = {

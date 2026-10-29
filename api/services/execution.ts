@@ -14,6 +14,7 @@ export interface EntryApprovalInput {
   equity: number;
   usedMargin: number;
   todayPnlPct: number;
+  dailyLossLocked?: boolean;
   positions: EntryRiskPosition[];
   correlations: Record<string, number | null>;
   symbolMeta: SymbolMeta;
@@ -45,6 +46,12 @@ export function liquidationPrice(entry: number, side: Side, leverage: number) {
     : entry * (1 + 1 / leverage - maintenanceMarginRate);
 }
 
+export function applyAdverseSlippage(rawPrice: number, side: Side, slippageBps: number, purpose: "OPEN" | "CLOSE") {
+  const direction = side === "LONG" ? 1 : -1;
+  const executionSign = purpose === "OPEN" ? 1 : -1;
+  return rawPrice * (1 + direction * executionSign * slippageBps / 10_000);
+}
+
 export interface PricedEntryApprovalInput extends Omit<EntryApprovalInput, "snapshot"> {
   currentPrice: number;
   fillPrice: number;
@@ -55,7 +62,9 @@ export interface PricedEntryApprovalInput extends Omit<EntryApprovalInput, "snap
 function approvePricedEntry(input: PricedEntryApprovalInput, snapshot?: MarketSnapshot): EntryApproval {
   const { opportunity, state, settings } = input;
   if (!settings.autoTrade) return { ok: false, reason: "自动交易已暂停" };
-  if (input.todayPnlPct <= -settings.dailyLossLimitPct) return { ok: false, reason: "当日亏损熔断已触发" };
+  if (input.dailyLossLocked || input.todayPnlPct <= -settings.dailyLossLimitPct) {
+    return { ok: false, reason: "当日亏损熔断已触发并锁定至下一 UTC 日" };
+  }
   if (input.positions.length >= settings.maxPositions) return { ok: false, reason: "持仓数量达到上限" };
   if (input.positions.some((position) => position.symbol === opportunity.symbol)) {
     return { ok: false, reason: "同一合约已有持仓" };
@@ -168,10 +177,11 @@ export function approveAndPriceEntry(input: EntryApprovalInput): EntryApproval {
     bookTime: input.snapshot.bookTime,
     markTime: input.snapshot.markTime,
   }, input.now, input.settings.bookStaleSeconds * 1000, input.settings.candleStaleSeconds * 1000);
+  const rawFill = input.opportunity.side === "LONG" ? snapshot.ask : snapshot.bid;
   return approvePricedEntry({
     ...input,
     currentPrice: snapshot.mid,
-    fillPrice: input.opportunity.side === "LONG" ? snapshot.ask : snapshot.bid,
+    fillPrice: applyAdverseSlippage(rawFill, input.opportunity.side, input.settings.slippageBps, "OPEN"),
     snapshotQualityValid: input.snapshot.quality.valid,
     snapshotQualityReasons: input.snapshot.quality.reasons,
   }, snapshot);

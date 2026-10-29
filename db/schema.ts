@@ -8,6 +8,7 @@ import {
   double,
   boolean,
   index,
+  uniqueIndex,
 } from "drizzle-orm/mysql-core";
 
 export const simulationAccounts = mysqlTable("simulation_accounts", {
@@ -17,6 +18,7 @@ export const simulationAccounts = mysqlTable("simulation_accounts", {
   realizedPnl: double("realized_pnl").notNull().default(0),
   dayStartEquity: double("day_start_equity").notNull().default(100000),
   dayKey: varchar("day_key", { length: 16 }).notNull().default(""),
+  dailyLockDay: varchar("daily_lock_day", { length: 16 }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
 });
@@ -73,6 +75,7 @@ export const positions = mysqlTable("positions", {
   leverage: int("leverage").notNull(),
   margin: double("margin").notNull(),
   fees: double("fees").notNull().default(0),
+  fundingPnl: double("funding_pnl").notNull().default(0),
   realizedPnl: double("realized_pnl").notNull().default(0),
   maxFavorableR: double("max_favorable_r").notNull().default(0),
   initialRisk: double("initial_risk").notNull(),
@@ -107,6 +110,20 @@ export const executionOrders = mysqlTable("execution_orders", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 }, (table) => ({ positionIdx: index("orders_position_idx").on(table.positionId) }));
 
+export const fundingSettlements = mysqlTable("funding_settlements", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  positionId: varchar("position_id", { length: 36 }).notNull(),
+  symbol: varchar("symbol", { length: 24 }).notNull(),
+  fundingTime: bigint("funding_time", { mode: "number" }).notNull(),
+  rate: double("rate").notNull(),
+  notional: double("notional").notNull(),
+  amount: double("amount").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (table) => ({
+  positionFundingUnique: uniqueIndex("funding_position_time_unique").on(table.positionId, table.fundingTime),
+  symbolTimeIdx: index("funding_symbol_time_idx").on(table.symbol, table.fundingTime),
+}));
+
 export const closedTrades = mysqlTable("closed_trades", {
   id: varchar("id", { length: 36 }).primaryKey(),
   symbol: varchar("symbol", { length: 24 }).notNull(),
@@ -117,6 +134,7 @@ export const closedTrades = mysqlTable("closed_trades", {
   pnl: double("pnl").notNull(),
   returnPct: double("return_pct").notNull(),
   fees: double("fees").notNull(),
+  fundingPnl: double("funding_pnl").notNull().default(0),
   holdingMinutes: double("holding_minutes").notNull(),
   exitReason: varchar("exit_reason", { length: 64 }).notNull(),
   openedAt: timestamp("opened_at").notNull(),

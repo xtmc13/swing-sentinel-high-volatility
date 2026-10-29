@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { desc, eq } from "drizzle-orm";
 import { createRouter, publicQuery } from "./middleware";
+import { adminQuery } from "./admin";
 import { engine } from "./services/engine";
 import { binance } from "./services/binance";
 import {
@@ -111,29 +112,30 @@ async function dashboard(): Promise<DashboardData> {
 
 export const tradingRouter = createRouter({
   dashboard: publicQuery.query(dashboard),
+  adminStatus: adminQuery.query(() => ({ ok: true as const })),
   candles: publicQuery.input(z.object({
     symbol: z.string().regex(/^[A-Z0-9]{5,20}$/),
     interval: z.enum(["5m", "15m", "1h", "4h"]),
   })).query(({ input }) => binance.getCandles(input.symbol, input.interval, 300)),
-  scan: publicQuery.mutation(() => engine.scan(true)),
-  saveSettings: publicQuery.input(settingsInput).mutation(async ({ input }) => {
+  scan: adminQuery.mutation(() => engine.scan(true)),
+  saveSettings: adminQuery.input(settingsInput).mutation(async ({ input }) => {
     await saveSettings(input as TradingSettings);
     return dashboard();
   }),
-  setAutoTrade: publicQuery.input(z.object({ enabled: z.boolean() })).mutation(async ({ input }) => {
+  setAutoTrade: adminQuery.input(z.object({ enabled: z.boolean() })).mutation(async ({ input }) => {
     const settings = await getSettings();
     await saveSettings({ ...settings, autoTrade: input.enabled });
     return { enabled: input.enabled };
   }),
-  closePosition: publicQuery.input(z.object({ positionId: z.string().uuid() })).mutation(({ input }) => closePaperPosition(input.positionId)),
-  emergencyStop: publicQuery.mutation(() => emergencyStop()),
-  reset: publicQuery.mutation(() => resetPaperSimulation()),
-  runBacktest: publicQuery.input(z.object({
+  closePosition: adminQuery.input(z.object({ positionId: z.string().uuid() })).mutation(({ input }) => closePaperPosition(input.positionId)),
+  emergencyStop: adminQuery.mutation(() => emergencyStop()),
+  reset: adminQuery.mutation(() => resetPaperSimulation()),
+  runBacktest: adminQuery.input(z.object({
     symbol: z.string().regex(/^[A-Z0-9]{5,20}$/),
     timeframe: z.enum(["5m", "15m"]),
     bars: z.number().int().min(300).max(1000),
   })).mutation(({ input }) => runPortfolioBacktest([input.symbol], input.timeframe, input.bars)),
-  runPortfolioBacktest: publicQuery.input(z.object({
+  runPortfolioBacktest: adminQuery.input(z.object({
     symbols: z.array(z.string().regex(/^[A-Z0-9]{5,20}$/)).min(1).max(10).refine((symbols) => new Set(symbols).size === symbols.length, "合约不得重复"),
     timeframe: z.enum(["5m", "15m"]),
     bars: z.number().int().min(300).max(1000),
@@ -142,7 +144,7 @@ export const tradingRouter = createRouter({
     const rows = await getDb().select().from(backtestRuns).orderBy(desc(backtestRuns.createdAt)).limit(10);
     return rows.map((row) => JSON.parse(row.resultJson));
   }),
-  deleteBacktest: publicQuery.input(z.object({ id: z.string().uuid() })).mutation(async ({ input }) => {
+  deleteBacktest: adminQuery.input(z.object({ id: z.string().uuid() })).mutation(async ({ input }) => {
     await getDb().delete(backtestRuns).where(eq(backtestRuns.id, input.id));
     return { ok: true };
   }),

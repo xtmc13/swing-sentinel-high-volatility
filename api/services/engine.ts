@@ -470,7 +470,8 @@ export class TradingEngine {
 
       if (this.deps.now() - this.lastSnapshot >= 300_000) {
         const snapshot = await this.deps.getAccountSnapshot();
-        await this.deps.saveEquitySnapshot(snapshot);
+        if (snapshot.valuationValid) await this.deps.saveEquitySnapshot(snapshot);
+        else log.error("equity snapshot skipped: position valuation unavailable", { issues: snapshot.valuationIssues });
         this.lastSnapshot = this.deps.now();
       }
     } catch (error) {
@@ -483,9 +484,10 @@ export class TradingEngine {
   async engineState(): Promise<EngineState> {
     if (!this.sourceHealthy()) return "DEGRADED";
     const settings = await this.deps.getSettings();
-    if (!settings.autoTrade) return "PAUSED";
     const account = await this.deps.getAccountSnapshot();
-    if (account.todayPnlPct <= -settings.dailyLossLimitPct) return "LOCKED";
+    if (!account.valuationValid) return "DEGRADED";
+    if (account.dailyLocked || account.todayPnlPct <= -settings.dailyLossLimitPct) return "LOCKED";
+    if (!settings.autoTrade) return "PAUSED";
     return "RUNNING";
   }
 

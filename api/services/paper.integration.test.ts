@@ -29,6 +29,8 @@ const pools: { end(): void | Promise<void> }[] = [];
 class FakeMarket {
   readonly sourceGeneration = 0;
   stale = false;
+  price = 100.05;
+  fundingRates: { symbol: string; fundingTime: number; fundingRate: number }[] = [];
   snapshotHook: (() => Promise<void>) | null = null;
 
   async getMarketSnapshot(symbol: string): Promise<MarketSnapshot> {
@@ -36,10 +38,10 @@ class FakeMarket {
     return {
       source: "MAINNET",
       symbol,
-      bid: 100.04,
-      ask: 100.06,
-      mid: 100.05,
-      markPrice: 100.05,
+      bid: this.price - 0.01,
+      ask: this.price + 0.01,
+      mid: this.price,
+      markPrice: this.price,
       spreadBps: 2,
       bookTime: NOW,
       markTime: NOW,
@@ -83,6 +85,10 @@ class FakeMarket {
       close: 100 + index * 0.1 + (index % 3) * 0.01,
       volume: 1000,
     }));
+  }
+
+  async getFundingRates(symbol: string, startTime: number, endTime: number) {
+    return this.fundingRates.filter((event) => event.symbol === symbol && event.fundingTime >= startTime && event.fundingTime <= endTime);
   }
 }
 
@@ -147,6 +153,7 @@ beforeEach(async () => {
   const db = connection.getDb();
   await db.delete(schema.executionOrders);
   await db.delete(schema.closedTrades);
+  await db.delete(schema.fundingSettlements);
   await db.delete(schema.positions);
   await db.delete(schema.volatilityStates);
   await db.delete(schema.systemEvents);
@@ -155,6 +162,7 @@ beforeEach(async () => {
     realizedPnl: 0,
     dayStartEquity: 100_000,
     dayKey: new Date(NOW).toISOString().slice(0, 10),
+    dailyLockDay: null,
   }).where(eq(schema.simulationAccounts.id, 1));
   await trading.saveSettings({
     ...DEFAULT_SETTINGS,
@@ -547,6 +555,42 @@ describeDatabase("Task 4 真实数据库原子执行", () => {
     expect(account.dayKey).toBe(new Date(NOW).toISOString().slice(0, 10));
     expect(account.dayStartEquity).toBeCloseTo(99_000.05, 10);
     expect(await db.select().from(schema.closedTrades)).toHaveLength(0);
+  });
+
+  it("资金费跨服务重启只结算一次并计入平仓净盈亏", async () => {
+    await seedState("BTCUSDT");
+    const db = independentDb();
+    const market = new FakeMarket();
+    const runner = service(db, market);
+    const opened = await runner.openPaperPosition(opportunity("BTCUSDT"));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    await db.update(schema.positions).set({ openedAt: new Date(NOW - 10_000) }).where(eq(schema.positions.id, opened.positionId));
+    market.fundingRates = [{ symbol: "BTCUSDT", fundingTime: NOW - 1_000, fundingRate: 0.01 }];
+    await runner.manageOpenPositions();
+    await service(db, market).manageOpenPositions();
+    const position = (await db.select().from(schema.positions).where(eq(schema.positions.id, opened.positionId)))[0];
+    const expectedFunding = -position.qty * 100.05 * 0.01;
+    expect(position.fundingPnl).toBeCloseTo(expectedFunding, 10);
+    expect(await db.select().from(schema.fundingSettlements)).toHaveLength(1);
+    const closed = await runner.closePaperPosition(opened.positionId);
+    expect(closed.ok).toBe(true);
+    const trade = (await db.select().from(schema.closedTrades).where(eq(schema.closedTrades.symbol, "BTCUSDT")))[0];
+    const account = (await db.select().from(schema.simulationAccounts).where(eq(schema.simulationAccounts.id, 1)))[0];
+    expect(trade.fundingPnl).toBeCloseTo(expectedFunding, 10);
+    expect(trade.pnl).toBeCloseTo(account.realizedPnl, 10);
+  });
+
+  it("当日锁存存在时即使账面恢复也拒绝新开仓", async () => {
+    await seedState("BTCUSDT");
+    const db = independentDb();
+    await db.update(schema.simulationAccounts).set({
+      cash: 100_000, dayStartEquity: 100_000,
+      dailyLockDay: new Date(NOW).toISOString().slice(0, 10),
+    }).where(eq(schema.simulationAccounts.id, 1));
+    const result = await service(db, new FakeMarket()).openPaperPosition(opportunity("BTCUSDT"));
+    expect(result).toMatchObject({ ok: false });
+    expect(result.reason).toContain("锁定至下一 UTC 日");
   });
 
   it("0003 升级迁移把高波动版之前已存在的 auto_trade=true 行暂停", async () => {

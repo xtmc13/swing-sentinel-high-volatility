@@ -29,6 +29,13 @@
       "when": 1793176196104,
       "tag": "0003_pause_existing_auto_trade",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1793232646858,
+      "tag": "0004_classy_loki",
+      "breakpoints": true
     }
   ]
 }

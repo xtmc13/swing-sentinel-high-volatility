@@ -334,6 +334,22 @@ describe("多标的同步组合回测事件语义", () => {
     expect(result.riskRejections.some((item) => item.symbol === "ETHUSDT" && item.reason.includes("当日亏损熔断"))).toBe(true);
   });
 
+  it("日亏触发后即使下一根价格恢复也不会在当天重新开仓", async () => {
+    const bars = candles([
+      [100, 101, 99, 100], [100, 101, 96, 97], [100, 101, 99, 100],
+      [100, 101, 99, 100], [100, 101, 99, 100],
+    ]);
+    const result = await run({
+      data: { BTCUSDT: data("BTCUSDT", bars), ETHUSDT: data("ETHUSDT", bars) },
+      settings: settings({ riskPerTradePct: 5, portfolioStopRiskPct: 100, correlatedDirectionRiskPct: 100 }),
+      signals: { BTCUSDT: { [bars[0].closeTime]: { side: "LONG" } }, ETHUSDT: { [bars[1].closeTime]: { side: "LONG" } } },
+    });
+    expect(result.dailyLossLocks).toHaveLength(1);
+    expect(result.tradesBySymbol.BTCUSDT[0].exitReason).toBe("日损熔断退出");
+    expect(result.tradesBySymbol.ETHUSDT ?? []).toHaveLength(0);
+    expect(result.riskRejections.some((item) => item.symbol === "ETHUSDT" && item.reason.includes("锁定至下一 UTC 日"))).toBe(true);
+  });
+
   it("EXTREME 立即禁止下一根新开仓并返回状态迁移", async () => {
     const bars = candles([[100, 101, 99, 100], [100, 101, 99, 100], [100, 101, 99, 100]]);
     const symbol = data("BTCUSDT", bars);

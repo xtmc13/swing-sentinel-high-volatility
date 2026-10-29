@@ -297,8 +297,30 @@ export interface PortfolioVolatilityTransition {
   reasons: string[];
 }
 
+export type SignalEvaluationStatus = "PENDING" | "FILLED" | "REJECTED" | "UNEXECUTED" | "EXPIRED";
+
+export interface SignalEvaluation {
+  id: string;
+  symbol: string;
+  side: Side;
+  signalCloseTime: number;
+  decisionTime: number | null;
+  expectedEntry: number;
+  actualEntry: number | null;
+  fillDeviationBps: number | null;
+  status: SignalEvaluationStatus;
+  reason: string;
+  entryTime: number | null;
+  exitTime: number | null;
+  pnl: number | null;
+  rMultiple: number | null;
+  mfeR: number | null;
+  maeR: number | null;
+}
+
 export interface PortfolioBacktestResult extends BacktestResult {
   symbol: "PORTFOLIO";
+  signals: SignalEvaluation[];
   symbols: string[];
   tradesBySymbol: Record<string, TradeView[]>;
   funding: PortfolioFundingSettlement[];

@@ -7,6 +7,7 @@ const MarketsPage = lazy(() => import("@/pages/MarketsPage"));
 const PositionsPage = lazy(() => import("@/pages/PositionsPage"));
 const RiskPage = lazy(() => import("@/pages/RiskPage"));
 const ReviewPage = lazy(() => import("@/pages/ReviewPage"));
+const ValidationPage = lazy(() => import("@/pages/ValidationPage"));
 const NotFound = lazy(() => import("@/pages/NotFound"));
 
 function page(element: ReactNode) {
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/positions" element={page(<PositionsPage />)} />
         <Route path="/risk" element={page(<RiskPage />)} />
         <Route path="/review" element={page(<ReviewPage />)} />
+        <Route path="/validation" element={page(<ValidationPage />)} />
         <Route path="*" element={page(<NotFound />)} />
       </Route>
     </Routes>

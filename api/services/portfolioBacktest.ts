@@ -7,6 +7,7 @@ import {
   type PortfolioFundingSettlement,
   type PortfolioRiskRejection,
   type PortfolioVolatilityTransition,
+  type SignalEvaluation,
   type Side,
   type TradeView,
   type TradingSettings,
@@ -32,6 +33,12 @@ export interface PortfolioSymbolData {
   candles: PortfolioCandles;
   volatility: HistoricalVolatilitySample[];
   funding: HistoricalFundingRate[];
+  analytics?: {
+    atr: number[];
+    tickReturns: number[];
+    tickCloseTimes: number[];
+    assumedSpread: number;
+  };
 }
 
 export interface PortfolioBacktestDependencies {
@@ -42,6 +49,7 @@ export interface PortfolioBacktestDependencies {
   evaluate?: typeof evaluateVolatility;
   persist?: boolean;
   now?: () => number;
+  window?: { startOpenTime: number; endCloseTime: number };
 }
 
 interface HistoricalPosition {
@@ -57,6 +65,9 @@ interface HistoricalPosition {
   openFee: number;
   initialRisk: number;
   maxFavorableR: number;
+  mfeR: number;
+  maeR: number;
+  evaluationId: string;
   trailing: boolean;
   fundingPnl: number;
   openedAt: number;
@@ -90,12 +101,29 @@ function validateCandles(symbol: string, timeframe: string, candles: Candle[]) {
 }
 
 function latestClosed(candles: Candle[], now: number) {
-  let index = -1;
-  for (let current = 0; current < candles.length; current += 1) {
-    if (candles[current].closeTime > now) break;
-    index = current;
+  let low = 0;
+  let high = candles.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (candles[middle].closeTime <= now) low = middle + 1;
+    else high = middle;
   }
-  return index;
+  return low - 1;
+}
+
+function latestTimeIndex(times: number[], now: number) {
+  let low = 0;
+  let high = times.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (times[middle] <= now) low = middle + 1;
+    else high = middle;
+  }
+  return low - 1;
+}
+
+function evaluationId(symbol: string, side: Side, signalCloseTime: number) {
+  return `${symbol}-${side}-${signalCloseTime}`;
 }
 
 function historicalMarket(data: PortfolioSymbolData, settings: TradingSettings, now: number): Market {
@@ -142,7 +170,45 @@ function emptyVolatility(symbol: string): EvaluateVolatilityInput {
   };
 }
 
-async function loadPortfolioData(
+function historicalVolatilitySample(item: PortfolioSymbolData, settings: TradingSettings, closeTime: number): HistoricalVolatilitySample {
+  const analytics = item.analytics!;
+  const fiveMinute = item.candles["5m"];
+  const atrIndex = latestClosed(fiveMinute, closeTime);
+  const tickIndex = latestTimeIndex(analytics.tickCloseTimes, closeTime);
+  const valid = atrIndex >= 0 && tickIndex >= 0
+    && Number.isFinite(analytics.atr[atrIndex]) && Number.isFinite(analytics.tickReturns[tickIndex]);
+  return {
+    time: closeTime,
+    quality: {
+      valid,
+      reasons: valid ? [] : ["历史ATR或1M数据缺口"],
+      bookAgeMs: 0,
+      markAgeMs: 0,
+      candleAgeMs: 0,
+    },
+    currentAtr: analytics.atr[atrIndex] ?? Number.NaN,
+    atrBaseline: analytics.atr.slice(Math.max(0, atrIndex + 1 - settings.atrBaselineMinSamples), atrIndex + 1),
+    currentTickReturn: analytics.tickReturns[tickIndex] ?? Number.NaN,
+    tickReturnBaseline: analytics.tickReturns.slice(Math.max(1, tickIndex - 121), tickIndex).filter(Number.isFinite),
+    currentSpreadBps: analytics.assumedSpread,
+    spreadBaselineBps: Array.from({ length: Math.max(120, settings.spreadBaselineMinSamples) }, () => analytics.assumedSpread),
+  };
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>) {
+  const results = new Array<R>(items.length);
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await worker(items[index]);
+    }
+  });
+  await Promise.all(runners);
+  return results as R[];
+}
+
+export async function loadPortfolioData(
   symbols: string[],
   timeframe: PortfolioTimeframe,
   bars: number,
@@ -154,7 +220,7 @@ async function loadPortfolioData(
   const firstOpen = endTime - bars * interval + 1;
   const rangeMs = bars * interval;
   const markets = await binance.getMarkets(settings);
-  const entries = await Promise.all(symbols.map(async (symbol) => {
+  const entries = await mapWithConcurrency(symbols, 2, async (symbol) => {
     const market = markets.find((item) => item.symbol === symbol);
     if (!market) throw new Error(`${symbol} 不在当前模拟合约元数据中`);
     const count = (unit: keyof typeof INTERVAL_MS, lookback: number) => Math.ceil(rangeMs / INTERVAL_MS[unit]) + lookback;
@@ -174,32 +240,8 @@ async function loadPortfolioData(
     validateCandles(symbol, "15m", fifteenMinute);
     validateCandles(symbol, "1h", oneHour);
     validateCandles(symbol, "4h", fourHour);
-    const primary = timeframe === "5m" ? fiveMinute.slice(-bars) : fifteenMinute;
     const atr = atrSeries(fiveMinute);
     const returns = oneMinute.map((bar, index) => index === 0 ? Number.NaN : bar.close / oneMinute[index - 1].close - 1);
-    const assumedSpread = settings.maxSpreadBps / 2;
-    const volatility = primary.map((bar): HistoricalVolatilitySample => {
-      const atrIndex = latestClosed(fiveMinute, bar.closeTime);
-      const tickIndex = latestClosed(oneMinute, bar.closeTime);
-      const valid = atrIndex >= 0 && tickIndex >= 0
-        && Number.isFinite(atr[atrIndex]) && Number.isFinite(returns[tickIndex]);
-      return {
-        time: bar.closeTime,
-        quality: {
-          valid,
-          reasons: valid ? [] : ["历史ATR或1M数据缺口"],
-          bookAgeMs: 0,
-          markAgeMs: 0,
-          candleAgeMs: 0,
-        },
-        currentAtr: atr[atrIndex] ?? Number.NaN,
-        atrBaseline: atr.slice(Math.max(0, atrIndex + 1 - settings.atrBaselineMinSamples), atrIndex + 1),
-        currentTickReturn: returns[tickIndex] ?? Number.NaN,
-        tickReturnBaseline: returns.slice(Math.max(1, tickIndex - 121), tickIndex).filter(Number.isFinite),
-        currentSpreadBps: assumedSpread,
-        spreadBaselineBps: Array.from({ length: Math.max(120, settings.spreadBaselineMinSamples) }, () => assumedSpread),
-      };
-    });
     const item: PortfolioSymbolData = {
       symbol,
       market,
@@ -210,11 +252,17 @@ async function loadPortfolioData(
         "15m": fifteenMinute,
         "5m": fiveMinute,
       },
-      volatility,
+      volatility: [],
+      analytics: {
+        atr,
+        tickReturns: returns,
+        tickCloseTimes: oneMinute.map((bar) => bar.closeTime),
+        assumedSpread: settings.maxSpreadBps / 2,
+      },
       funding,
     };
     return [symbol, item] as const;
-  }));
+  });
   return Object.fromEntries(entries);
 }
 
@@ -236,7 +284,10 @@ export async function runPortfolioBacktest(
   const primary = symbols.map((symbol) => {
     const item = data[symbol];
     if (!item) throw new Error(`${symbol} 缺少历史数据，回测失败关闭`);
-    const series = item.candles[timeframe];
+    const fullSeries = item.candles[timeframe];
+    const series = dependencies.window
+      ? fullSeries.filter((bar) => bar.time * 1000 >= dependencies.window!.startOpenTime && bar.closeTime <= dependencies.window!.endCloseTime)
+      : fullSeries;
     if (series.length < 2) throw new Error(`${symbol} ${timeframe} K线不足，回测失败关闭`);
     validateCandles(symbol, timeframe, series);
     return series;
@@ -281,6 +332,11 @@ export async function runPortfolioBacktest(
   const positions = new Map<string, HistoricalPosition>();
   const states = new Map<string, VolatilityState>();
   const pending = new Map<string, ReturnType<typeof analyzeClosedCandles>>();
+  const evaluations = new Map<string, SignalEvaluation>();
+  const rejectEvaluation = (opportunity: ReturnType<typeof analyzeClosedCandles>, reason: string, time: number) => {
+    const evaluation = evaluations.get(evaluationId(opportunity.symbol, opportunity.side, opportunity.signalCloseTime));
+    if (evaluation) Object.assign(evaluation, { status: "REJECTED" as const, reason, decisionTime: time });
+  };
   const trades: TradeView[] = [];
   const tradesBySymbol: Record<string, TradeView[]> = {};
   const funding: PortfolioFundingSettlement[] = [];
@@ -292,6 +348,11 @@ export async function runPortfolioBacktest(
 
   const equityAt = (price: (position: HistoricalPosition) => number) => cash + [...positions.values()]
     .reduce((sum, position) => sum + (price(position) - position.entryPrice) * position.qty * direction(position.side), 0);
+  const updateExcursions = (position: HistoricalPosition, price: number) => {
+    const r = (price - position.entryPrice) * direction(position.side) / position.initialRisk;
+    position.mfeR = Math.max(position.mfeR, r);
+    position.maeR = Math.min(position.maeR, r);
+  };
 
   const closePosition = (position: HistoricalPosition, rawExit: number, time: number, reason: string) => {
     const exit = applyAdverseSlippage(rawExit, position.side, settings.slippageBps, "CLOSE");
@@ -300,6 +361,15 @@ export async function runPortfolioBacktest(
     cash += gross - closeFee;
     totalFees += closeFee;
     const pnl = gross - position.openFee - closeFee + position.fundingPnl;
+    updateExcursions(position, rawExit);
+    const evaluation = evaluations.get(position.evaluationId);
+    if (evaluation) Object.assign(evaluation, {
+      exitTime: time,
+      pnl,
+      rMultiple: pnl / (position.qty * position.initialRisk),
+      mfeR: position.mfeR,
+      maeR: position.maeR,
+    });
     const trade: TradeView = {
       id: crypto.randomUUID(),
       symbol: position.symbol,
@@ -343,12 +413,14 @@ export async function runPortfolioBacktest(
       if (!opportunity) continue;
       pending.delete(symbol);
       if (dailyLossLocked) {
+        rejectEvaluation(opportunity, "当日亏损熔断已触发并锁定至下一 UTC 日", openTime);
         riskRejections.push({ time: openTime, symbol, reason: "当日亏损熔断已触发并锁定至下一 UTC 日" });
         continue;
       }
       const bar = currentBars.get(symbol)!;
       const state = states.get(symbol);
       if (!state) {
+        rejectEvaluation(opportunity, "缺少历史波动状态", openTime);
         riskRejections.push({ time: openTime, symbol, reason: "缺少历史波动状态" });
         continue;
       }
@@ -389,9 +461,20 @@ export async function runPortfolioBacktest(
         fillPrice: applyAdverseSlippage(bar.open, opportunity.side, settings.slippageBps, "OPEN"),
       });
       if (!approved.ok) {
+        rejectEvaluation(opportunity, approved.reason, openTime);
         riskRejections.push({ time: openTime, symbol, reason: approved.reason });
         continue;
       }
+      const id = evaluationId(symbol, opportunity.side, opportunity.signalCloseTime);
+      const deviation = (approved.fillPrice - opportunity.entry) * direction(opportunity.side) / opportunity.entry * 10_000;
+      Object.assign(evaluations.get(id)!, {
+        status: "FILLED",
+        reason: "已成交",
+        decisionTime: openTime,
+        entryTime: openTime,
+        actualEntry: approved.fillPrice,
+        fillDeviationBps: deviation,
+      });
       cash -= approved.openFee;
       totalFees += approved.openFee;
       positions.set(symbol, {
@@ -407,6 +490,9 @@ export async function runPortfolioBacktest(
         openFee: approved.openFee,
         initialRisk: approved.initialRisk,
         maxFavorableR: 0,
+        mfeR: 0,
+        maeR: 0,
+        evaluationId: id,
         trailing: false,
         fundingPnl: 0,
         openedAt: openTime,
@@ -437,6 +523,7 @@ export async function runPortfolioBacktest(
       const bar = currentBars.get(symbol)!;
       const dir = direction(position.side);
       position.barsHeld += 1;
+      updateExcursions(position, bar.open);
       const managementInput = {
         side: position.side,
         entryPrice: position.entryPrice,
@@ -462,6 +549,7 @@ export async function runPortfolioBacktest(
       }
 
       const adversePrice = position.side === "LONG" ? bar.low : bar.high;
+      updateExcursions(position, adversePrice);
       const adverse = managePositionPrice({ ...managementInput, price: adversePrice });
       if (adverse.action === "CLOSE") {
         const liquidation = adverse.reason === "强平保护模拟";
@@ -472,6 +560,7 @@ export async function runPortfolioBacktest(
       }
 
       const favorablePrice = position.side === "LONG" ? bar.high : bar.low;
+      updateExcursions(position, favorablePrice);
       const favorable = managePositionPrice({ ...managementInput, price: favorablePrice });
       if (favorable.action === "CLOSE") {
         const cashBefore = cash;
@@ -481,6 +570,7 @@ export async function runPortfolioBacktest(
         continue;
       }
 
+      updateExcursions(position, bar.close);
       const atClose = managePositionPrice({
         ...managementInput,
         price: bar.close,
@@ -510,7 +600,9 @@ export async function runPortfolioBacktest(
 
     for (const symbol of symbols) {
       const item = data[symbol];
-      const sample = item.volatility.find((entry) => entry.time === closeTime);
+      const sample = item.analytics
+        ? historicalVolatilitySample(item, settings, closeTime)
+        : item.volatility.find((entry) => entry.time === closeTime);
       const evaluationInput: EvaluateVolatilityInput = sample
         ? { ...sample, symbol, settings }
         : { ...emptyVolatility(symbol), settings };
@@ -539,7 +631,28 @@ export async function runPortfolioBacktest(
         now: closeTime,
         stateVersion: state.version,
       });
-      if (opportunity.status === "READY") pending.set(symbol, opportunity);
+      if (opportunity.status === "READY") {
+        const id = evaluationId(symbol, opportunity.side, opportunity.signalCloseTime);
+        if (!evaluations.has(id)) evaluations.set(id, {
+          id,
+          symbol,
+          side: opportunity.side,
+          signalCloseTime: opportunity.signalCloseTime,
+          decisionTime: null,
+          expectedEntry: opportunity.entry,
+          actualEntry: null,
+          fillDeviationBps: null,
+          status: "PENDING",
+          reason: "等待下一根开盘审批",
+          entryTime: null,
+          exitTime: null,
+          pnl: null,
+          rMultiple: null,
+          mfeR: null,
+          maeR: null,
+        });
+        pending.set(symbol, opportunity);
+      }
     }
   }
 
@@ -555,6 +668,7 @@ export async function runPortfolioBacktest(
   const result: PortfolioBacktestResult = {
     id: crypto.randomUUID(),
     symbol: "PORTFOLIO",
+    signals: [...evaluations.values()],
     symbols: [...symbols],
     timeframe,
     bars: timeline.length,

@@ -17,6 +17,8 @@ import { backtestRuns } from "@db/schema";
 import type { DashboardData, TradingSettings } from "@contracts/trading";
 import { runPortfolioBacktest } from "./services/portfolioBacktest";
 import { portfolioRisk } from "./services/risk";
+import { startValidationJob, getValidationJob } from "./services/validationJobs";
+import { getValidationReport, listValidationReports } from "./queries/validation";
 
 export const settingsInput = z.object({
   autoTrade: z.boolean(),
@@ -148,4 +150,13 @@ export const tradingRouter = createRouter({
     await getDb().delete(backtestRuns).where(eq(backtestRuns.id, input.id));
     return { ok: true };
   }),
+  startValidation: adminQuery.input(z.object({
+    symbols: z.array(z.string().regex(/^[A-Z0-9]{5,20}$/)).min(1).max(5)
+      .refine((symbols) => new Set(symbols).size === symbols.length, "合约不得重复"),
+    timeframe: z.enum(["5m", "15m"]),
+    bars: z.number().int().min(900).max(10_000),
+  })).mutation(({ input }) => startValidationJob(input.symbols, input.timeframe, input.bars)),
+  validationJob: publicQuery.input(z.object({ id: z.string().uuid() })).query(({ input }) => getValidationJob(input.id)),
+  validationReports: publicQuery.query(() => listValidationReports()),
+  validationReport: publicQuery.input(z.object({ id: z.string().uuid() })).query(({ input }) => getValidationReport(input.id)),
 });

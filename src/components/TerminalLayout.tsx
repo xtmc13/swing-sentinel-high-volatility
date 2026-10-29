@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router";
 import {
-  Activity, ChartCandlestick, ChartNoAxesCombined, LayoutDashboard,
+  Activity, ChartCandlestick, ChartNoAxesCombined, FlaskConical, LayoutDashboard,
   ListFilter, Pause, Play, RefreshCw, Settings2, ShieldCheck, WalletCards,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -15,6 +15,7 @@ const navItems = [
   { to: "/positions", label: "订单与持仓", code: "POSITIONS", icon: WalletCards },
   { to: "/risk", label: "风险与执行", code: "RISK", icon: ShieldCheck },
   { to: "/review", label: "回测与复盘", code: "REVIEW", icon: ChartNoAxesCombined },
+  { to: "/validation", label: "信号验证", code: "VALIDATE", icon: FlaskConical },
 ];
 
 export default function TerminalLayout() {
@@ -169,7 +170,7 @@ export default function TerminalLayout() {
         ) : context ? <Outlet context={context} /> : null}
       </main>
 
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-5 border-t border-[#1a2540] bg-[#080d17]/98 pb-[env(safe-area-inset-bottom)] lg:hidden" aria-label="移动导航">
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-6 border-t border-[#1a2540] bg-[#080d17]/98 pb-[env(safe-area-inset-bottom)] lg:hidden" aria-label="移动导航">
         {navItems.map((item) => {
           const Icon = item.icon;
           return <NavLink key={item.to} to={item.to} end={item.to === "/"} className={({ isActive }) => `flex min-h-[62px] flex-col items-center justify-center gap-1 text-[9px] ${isActive ? "text-[#22d3ee]" : "text-[#8290aa]"}`}><Icon size={18} /><span>{item.label.replace("流动性", "").replace("与执行", "")}</span></NavLink>;

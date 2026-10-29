@@ -3,6 +3,7 @@ import {
   bigint,
   varchar,
   text,
+  longtext,
   timestamp,
   int,
   double,
@@ -157,6 +158,15 @@ export const equitySnapshots = mysqlTable("equity_snapshots", {
   unrealized: double("unrealized").notNull(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
+
+export const validationReports = mysqlTable("validation_reports", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  symbolsJson: text("symbols_json").notNull(),
+  timeframe: varchar("timeframe", { length: 8 }).notNull(),
+  bars: int("bars").notNull(),
+  reportJson: longtext("report_json").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (table) => ({ createdIdx: index("validation_reports_created_idx").on(table.createdAt) }));
 
 export const backtestRuns = mysqlTable("backtest_runs", {
   id: varchar("id", { length: 36 }).primaryKey(),

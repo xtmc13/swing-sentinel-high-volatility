@@ -36,6 +36,13 @@
       "when": 1793232646858,
       "tag": "0004_classy_loki",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1793258610100,
+      "tag": "0005_past_valkyrie",
+      "breakpoints": true
     }
   ]
 }

@@ -75,6 +75,17 @@ describe("仓位、组合风险与持仓管理", () => {
     }
   });
 
+  it.each([
+    ["负止损价格", { stopPrice: -1 }],
+    ["负滑点", { slippageBps: -1 }],
+    ["NaN步长", { stepSize: Number.NaN }],
+    ["负最小数量", { minQty: -1 }],
+    ["NaN信号时间", { now: Number.NaN }],
+    ["负最小名义价值", { minNotional: -1 }],
+  ])("%s 必须失败关闭", (_name, overrides) => {
+    expect(sizePosition(sizeInput(overrides))).toMatchObject({ ok: false, reason: "仓位输入无效" });
+  });
+
   it("HIGH 风险预算减半，EXTREME 不开新仓", () => {
     const high = sizePosition(sizeInput({ mode: "HIGH" }));
     const configured = sizePosition(sizeInput({ mode: "HIGH", highVolatilityRiskMultiplier: 0.25 }));

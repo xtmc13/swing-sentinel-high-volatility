@@ -113,7 +113,7 @@ async function dashboard(): Promise<DashboardData> {
 }
 
 export const tradingRouter = createRouter({
-  dashboard: publicQuery.query(dashboard),
+  dashboard: adminQuery.query(dashboard),
   adminStatus: adminQuery.query(() => ({ ok: true as const })),
   candles: publicQuery.input(z.object({
     symbol: z.string().regex(/^[A-Z0-9]{5,20}$/),
@@ -142,7 +142,7 @@ export const tradingRouter = createRouter({
     timeframe: z.enum(["5m", "15m"]),
     bars: z.number().int().min(300).max(1000),
   })).mutation(({ input }) => runPortfolioBacktest(input.symbols, input.timeframe, input.bars)),
-  backtests: publicQuery.query(async () => {
+  backtests: adminQuery.query(async () => {
     const rows = await getDb().select().from(backtestRuns).orderBy(desc(backtestRuns.createdAt)).limit(10);
     return rows.map((row) => JSON.parse(row.resultJson));
   }),
@@ -156,7 +156,7 @@ export const tradingRouter = createRouter({
     timeframe: z.enum(["5m", "15m"]),
     bars: z.number().int().min(900).max(10_000),
   })).mutation(({ input }) => startValidationJob(input.symbols, input.timeframe, input.bars)),
-  validationJob: publicQuery.input(z.object({ id: z.string().uuid() })).query(({ input }) => getValidationJob(input.id)),
-  validationReports: publicQuery.query(() => listValidationReports()),
-  validationReport: publicQuery.input(z.object({ id: z.string().uuid() })).query(({ input }) => getValidationReport(input.id)),
+  validationJob: adminQuery.input(z.object({ id: z.string().uuid() })).query(({ input }) => getValidationJob(input.id)),
+  validationReports: adminQuery.query(() => listValidationReports()),
+  validationReport: adminQuery.input(z.object({ id: z.string().uuid() })).query(({ input }) => getValidationReport(input.id)),
 });

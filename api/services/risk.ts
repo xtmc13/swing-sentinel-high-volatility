@@ -14,7 +14,7 @@ export interface SizePositionInput {
   usedMargin: number;
   takerFeeBps: number;
   slippageBps: number;
-  // True when entryPrice already includes modeled adverse entry slippage (historical fills).
+  // True when entryPrice already includes modeled adverse entry slippage (live or historical fills).
   entrySlippageIncluded?: boolean;
   stepSize: number;
   minQty: number;
@@ -47,9 +47,16 @@ export function sizePosition(input: SizePositionInput): PositionSize {
   const numbers = [
     input.equity, input.entryPrice, input.stopPrice, input.leverage,
     input.riskPerTradePct, input.highVolatilityRiskMultiplier, input.marginPerTradePct, input.totalMarginCapPct,
-    input.usedMargin, input.takerFeeBps, input.slippageBps,
+    input.usedMargin, input.takerFeeBps, input.slippageBps, input.stepSize, input.minQty, input.minNotional,
+    input.signalCloseTime, input.now, input.maxSignalAgeSeconds,
   ];
-  if (!numbers.every(Number.isFinite) || input.equity <= 0 || input.entryPrice <= 0 || input.leverage <= 0) {
+  if (!numbers.every(Number.isFinite)
+    || input.equity <= 0 || input.entryPrice <= 0 || input.stopPrice <= 0 || input.leverage <= 0
+    || input.riskPerTradePct <= 0 || input.highVolatilityRiskMultiplier <= 0
+    || input.marginPerTradePct <= 0 || input.totalMarginCapPct <= 0 || input.usedMargin < 0
+    || input.takerFeeBps < 0 || input.slippageBps < 0
+    || input.stepSize < 0 || input.minQty < 0 || input.minNotional < 0
+    || input.signalCloseTime <= 0 || input.now <= 0 || input.maxSignalAgeSeconds <= 0) {
     return { ok: false, reason: "仓位输入无效" };
   }
   const direction = input.side === "LONG" ? 1 : -1;

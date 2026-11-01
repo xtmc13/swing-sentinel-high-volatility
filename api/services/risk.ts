@@ -154,7 +154,8 @@ export function portfolioRisk(input: PortfolioRiskInput): PortfolioRiskResult {
     const breakeven = position.side === "LONG"
       ? position.stopPrice >= position.entryPrice
       : position.stopPrice <= position.entryPrice;
-    if (breakeven) return { symbol: position.symbol, risk: 0, breakeven };
+    // A breakeven-or-better stop removes price-loss exposure, not the cost of executing the stop.
+    // Always reserve stop-exit taker fees and adverse slippage, including after moving to breakeven.
     const adverseDistance = Math.max(0, (position.markPrice - position.stopPrice) * direction);
     const exitCost = position.stopPrice * (input.takerFeeBps + input.slippageBps) / 10_000;
     const risk = Math.max(0, position.qty * (adverseDistance + exitCost));

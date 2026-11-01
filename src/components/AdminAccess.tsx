@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { LoaderCircle, LockKeyhole, UnlockKeyhole } from "lucide-react";
 import { toast } from "sonner";
-import { trpc } from "@/providers/trpc";
+import { queryClient, trpc } from "@/providers/trpc";
 import { clearAdminToken, getAdminToken, setAdminToken } from "@/lib/adminAuth";
 
 export default function AdminAccess() {
@@ -16,6 +16,7 @@ export default function AdminAccess() {
       await utils.trading.adminStatus.fetch();
       setUnlocked(true);
       setSecret("");
+      await utils.trading.invalidate();
       if (notify) toast.success("管理员控制已解锁；关闭标签页后会自动锁定");
       return true;
     } catch (error) {
@@ -37,6 +38,7 @@ export default function AdminAccess() {
   };
   const lock = () => {
     clearAdminToken();
+    queryClient.clear();
     setUnlocked(false);
     setSecret("");
     toast.info("已退出管理员控制，当前为只读模式");

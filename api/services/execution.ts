@@ -183,7 +183,9 @@ export function approveAndPriceEntry(input: EntryApprovalInput): EntryApproval {
   return approvePricedEntry({
     ...input,
     currentPrice: snapshot.mid,
+    // fillPrice already includes modeled adverse entry slippage; reserve only exit slippage in sizing.
     fillPrice: applyAdverseSlippage(rawFill, input.opportunity.side, input.settings.slippageBps, "OPEN"),
+    entrySlippageIncluded: true,
     snapshotQualityValid: input.snapshot.quality.valid,
     snapshotQualityReasons: input.snapshot.quality.reasons,
   }, snapshot);

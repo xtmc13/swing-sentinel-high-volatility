@@ -64,10 +64,14 @@ describe("仓位、组合风险与持仓管理", () => {
     expect(result.estimatedRisk).toBeCloseTo(35, 10);
     expect(result.targetPrice).toBeCloseTo(113);
 
+    const liveFill = sizePosition(sizeInput({ entrySlippageIncluded: true }));
     const historicalFill = sizePosition(sizeInput({ entrySlippageIncluded: true }));
-    expect(historicalFill.ok).toBe(true);
-    if (historicalFill.ok) {
-      expect(historicalFill.qty).toBeCloseTo(35 / (5 + 199 * 0.0005 + 97 * 0.0002), 10);
+    for (const fill of [liveFill, historicalFill]) {
+      expect(fill.ok).toBe(true);
+      if (fill.ok) {
+        // Entry price already contains adverse slippage; only stop-exit slippage remains.
+        expect(fill.qty).toBeCloseTo(35 / (5 + 199 * 0.0005 + 97 * 0.0002), 10);
+      }
     }
   });
 

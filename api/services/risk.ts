@@ -58,8 +58,8 @@ export function sizePosition(input: SizePositionInput): PositionSize {
 
   const multiplier = input.mode === "HIGH" ? input.highVolatilityRiskMultiplier : 1;
   const riskBudget = input.equity * input.riskPerTradePct / 100 * multiplier;
-  // Fees apply on both sides. Historical fills already include entry slippage;
-  // live quotes do not, so reserve entry slippage only for live-priced entries.
+  // Fees apply on both sides. The supplied entry price already includes modeled adverse entry slippage,
+  // so reserve only stop-exit slippage here for both live and historical fills.
   const twoSidedCostPerUnit = (input.entryPrice + input.stopPrice) * input.takerFeeBps / 10_000
     + (input.stopPrice + (input.entrySlippageIncluded ? 0 : input.entryPrice)) * input.slippageBps / 10_000;
   const riskPerUnit = stopDistance + twoSidedCostPerUnit;

@@ -16,8 +16,9 @@ export default function AdminAccess() {
       await utils.trading.adminStatus.fetch();
       setUnlocked(true);
       setSecret("");
-      await utils.trading.invalidate();
-      if (notify) toast.success("管理员控制已解锁；关闭标签页后会自动锁定");
+      // Authentication succeeded. A background refresh failure must not revoke a valid token.
+      void utils.trading.invalidate().catch(() => undefined);
+      if (notify) toast.success("管理员控制已解锁；刷新页面或关闭标签页后会自动锁定");
       return true;
     } catch (error) {
       clearAdminToken();
@@ -38,9 +39,10 @@ export default function AdminAccess() {
   };
   const lock = () => {
     clearAdminToken();
-    queryClient.clear();
     setUnlocked(false);
     setSecret("");
+    // Abort in-flight requests before removing cached private account data.
+    void queryClient.cancelQueries().finally(() => queryClient.clear());
     toast.info("已退出管理员控制，当前为只读模式");
   };
   return (

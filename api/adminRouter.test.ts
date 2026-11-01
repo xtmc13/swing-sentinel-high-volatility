@@ -12,6 +12,7 @@ describe("tRPC 管理操作鉴权", () => {
   });
   it("账户与验证数据读取接口必须拒绝匿名访问", async () => {
     const anonymous = caller();
+    await expect(anonymous.trading.adminStatus()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
     await expect(anonymous.trading.dashboard()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
     await expect(anonymous.trading.backtests()).rejects.toMatchObject({ code: "UNAUTHORIZED" });
     await expect(anonymous.trading.validationReports()).rejects.toMatchObject({ code: "UNAUTHORIZED" });

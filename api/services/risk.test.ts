@@ -157,17 +157,23 @@ describe("仓位、组合风险与持仓管理", () => {
     expect(first.approved).toBe(true);
   });
 
-  it("止损达到或越过保本后组合风险贡献为零", () => {
+  it("止损达到或越过保本后仍计入止损退出手续费与滑点", () => {
     const long = portfolioRisk({ ...portfolioInput(), candidate: undefined, positions: [{ ...portfolioInput().positions[0], stopPrice: 100 }] });
+    const longAboveBreakeven = portfolioRisk({
+      ...portfolioInput(),
+      candidate: undefined,
+      positions: [{ ...portfolioInput().positions[0], stopPrice: 102 }],
+    });
     const short = portfolioRisk({
       ...portfolioInput(),
       candidate: undefined,
       positions: [{ symbol: "SHORT", side: "SHORT" as const, qty: 2, entryPrice: 100, markPrice: 100, stopPrice: 99 }],
     });
 
-    expect(long.totalRisk).toBe(0);
-    expect(long.positions[0].risk).toBe(0);
-    expect(short.totalRisk).toBe(0);
+    expect(long.totalRisk).toBeCloseTo(100 * 0.0007, 10);
+    expect(long.positions[0].breakeven).toBe(true);
+    expect(longAboveBreakeven.totalRisk).toBeCloseTo(102 * 0.0007, 10);
+    expect(short.totalRisk).toBeCloseTo(2 * 99 * 0.0007, 10);
   });
 
   it("相关性需要 60 个收益样本并只使用最近窗口", () => {

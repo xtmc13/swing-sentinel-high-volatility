@@ -70,3 +70,22 @@
 - 代码提交前 `git diff --check` / staged diff check：exit 0。
 
 本节取代上一版“快速退出仅进程内、Rust 只发送候选”的限制：现已有持久化恢复和连续 frame 路径。真实 DB integration 仍因任务边界保持 skipped；参数校准和不盈利保证的限制不变。
+
+
+## Review fix round 2
+
+代码/测试/迁移提交 SHA：`be8682e480c041225a69daa1071a6b75837801a6`（`fix: recover live momentum fills and exit claims`）。报告更新单独提交；未 push，未使用真实凭据、真实订单、preview DB/server 或真实交易调用。
+
+### RED / GREEN
+
+- 私有成交元数据 RED：通过实际 `UserDataStream` socket `ORDER_TRADE_UPDATE` 路由创建的持仓没有 signal/strategy/breakout；该路径直接调用 `machine.handleFill`，绕过 adapter enrichment。GREEN：新增 `loadLiveIntentMetadata` 从事务库 `live_intents` 读取持久化元数据，并作为 `UserDataStream` 必需 loader 与基础风险 seed 合并；实际私有事件测试确认新持仓为 MOMENTUM 且 breakout=99.9。Focused userDataStream：16 passed。
+- 原子退出 RED：两个共享状态的 coordinator 同时接收反转 frame 时实际调用两次 close；crash 后 pending 没有恢复 API。GREEN：`MomentumStateStore.claimExit` 使用持仓行锁，仅 OPEN 可声明；同一事务检查 paper `execution_orders.purpose=CLOSE` 或 live reduceOnly MARKET 已存在时拒绝重发。claim ID + 5 秒 lease 防止并发双平仓，crash 留下但未提交订单的过期 claim 可重新获取；明确未提交的结果才释放 claim，transport 异常不盲目释放。
+- 恢复回归：两个 coordinator 竞争仅一笔 close；过期且无 close order 的 claim 重试一次，随后已有提交记录不再重发。测试恢复时使用新鲜 frame，避免把陈旧 frame 拒绝误判为 claim 故障。Focused coordinator：19 passed。
+- 离线生成 `db/migrations/0010_momentum_exit_claims.sql` 和 snapshot，为 paper/live positions 增加 `exit_claim_id`、`exit_claimed_at`；未执行迁移或连接数据库。
+
+### Final verification
+
+- `npm test`：38 files passed，4 skipped；**369 passed，53 skipped，0 failed**。
+- `npm run check`：exit 0；`npm run lint`：exit 0。
+- `git diff --check` 与 staged diff check：exit 0。
+- 本轮未修改 Rust；上一轮 Rust 35 passed / 1 ignored 的证据不变。数据库 integration 仍按授权边界 skipped，参数校准和不盈利保证的限制不变。

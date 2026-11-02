@@ -4,10 +4,10 @@ import { evaluateMomentumExhaustion } from "./momentumExhaustion";
 
 const NOW = 1_800_000_000_000;
 
-function series(count: number, interval: number, offset = 0): Candle[] {
+function series(count: number, interval: number): Candle[] {
   return Array.from({ length: count }, (_, index) => {
     const close = 100 + index * 0.12 + Math.sin(index / 3) * 0.2;
-    const time = NOW - (count - index + offset) * interval;
+    const time = NOW - (count - index) * interval;
     return {
       time: time / 1000,
       closeTime: time + interval - 1,

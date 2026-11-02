@@ -1,4 +1,4 @@
-import type { Side } from "@contracts/trading";
+import type { Side, VolatilityMode } from "@contracts/trading";
 import type { BinanceLeverageBracket } from "./binanceSigned";
 import {
   addDecimals,
@@ -27,6 +27,8 @@ export interface LiveRiskInput {
   leverageMode: "SYMBOL_MAX" | "FIXED";
   fixedLeverage: number;
   riskPerTradePct: number;
+  mode: VolatilityMode;
+  highVolatilityRiskMultiplier: number;
   marginPerTradePct: number;
   totalMarginCapPct: number;
   takerFeeBps: number;
@@ -66,6 +68,11 @@ function minimum(...values: DecimalString[]): DecimalString {
 }
 
 export function calculateLivePositionRisk(input: LiveRiskInput): LiveRiskResult {
+  if (input.mode === "EXTREME") return { ok: false, reason: "EXTREME禁止新增风险" };
+  if (!Number.isFinite(input.highVolatilityRiskMultiplier)
+    || input.highVolatilityRiskMultiplier <= 0 || input.highVolatilityRiskMultiplier > 1) {
+    return { ok: false, reason: "HIGH 风险倍率无效" };
+  }
   if (input.leverageMode !== "FIXED") return { ok: false, reason: "主网禁止 SYMBOL_MAX，必须明确固定杠杆" };
   if (!Number.isInteger(input.fixedLeverage) || input.fixedLeverage < 1 || input.fixedLeverage > 20) {
     return { ok: false, reason: "主网固定杠杆必须在 1–20 之间" };
@@ -104,7 +111,11 @@ export function calculateLivePositionRisk(input: LiveRiskInput): LiveRiskResult 
 
     const reservedMargin = addDecimals(...input.pendingIntents.map((intent) => intent.margin));
     const reservedRisk = addDecimals(...input.pendingIntents.map((intent) => intent.risk));
-    const remainingRisk = subtractDecimals(percentage(input.walletBalance, input.riskPerTradePct), reservedRisk);
+    const configuredRisk = percentage(input.walletBalance, input.riskPerTradePct);
+    const riskBudget = input.mode === "HIGH"
+      ? multiplyDecimals(configuredRisk, String(input.highVolatilityRiskMultiplier))
+      : configuredRisk;
+    const remainingRisk = subtractDecimals(riskBudget, reservedRisk);
     const remainingCap = subtractDecimals(
       percentage(input.walletBalance, input.totalMarginCapPct),
       addDecimals(input.existingPositionMargin, reservedMargin),

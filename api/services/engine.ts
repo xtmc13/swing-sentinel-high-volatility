@@ -34,6 +34,7 @@ import {
   momentumCandidateSchema,
   type MomentumCandidate,
   type MomentumEvaluation,
+  type MomentumFeatureFrame,
 } from "./momentum";
 
 async function mapWithConcurrency<T, R>(
@@ -367,6 +368,10 @@ export class TradingEngine {
       && this.symbolQuality(item.symbol).valid;
   }
 
+  async receiveMomentumFrame(frame: MomentumFeatureFrame): Promise<void> {
+    await this.executionCoordinator.receiveMomentumFrame(frame);
+  }
+
   async receiveMomentumCandidate(input: MomentumCandidate): Promise<MomentumEvaluation> {
     const settings = await this.deps.getSettings();
     if (!settings.momentumEnabled || settings.strategyMode === "SWING") {
@@ -375,7 +380,7 @@ export class TradingEngine {
     const parsed = momentumCandidateSchema.safeParse(input);
     if (!parsed.success) return { ok: false, reason: "动量候选格式无效" };
     const candidate = parsed.data;
-    this.executionCoordinator.observeMomentumFrame(candidate.frame);
+    await this.executionCoordinator.observeMomentumFrame(candidate.frame);
 
     let market = this.markets.find((item) => item.symbol === candidate.symbol);
     if (!market) {

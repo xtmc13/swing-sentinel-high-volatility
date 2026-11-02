@@ -2,7 +2,7 @@ import type { AccountSnapshot, Opportunity, PositionView } from "@contracts/trad
 import { DEFAULT_MOMENTUM_CONFIG } from "../services/momentum";
 import type { BinanceAccountResponse, LiveOrderGateway } from "./binanceSigned";
 import { withFullUserTradePagination } from "./accounting";
-import { divideDecimals, multiplyDecimals, subtractDecimals, type DecimalString } from "./decimal";
+import { compareDecimals, decimal, divideDecimals, multiplyDecimals, subtractDecimals, type DecimalString } from "./decimal";
 import {
   claimLiveIntent,
   createLiveIntent,
@@ -13,6 +13,7 @@ import {
   type CreateLiveIntentOptions,
   type CreateLiveIntentResult,
   type LiveDatabase,
+  type LiveFinalGateContext,
   type LiveFinalGateResult,
   type LiveTransaction,
 } from "./livePersistence";
@@ -50,6 +51,7 @@ export interface MainnetLiveExecutionDependencies {
     opportunity: Opportunity,
     input: CreateLiveIntentInput,
     tx: LiveTransaction,
+    context: LiveFinalGateContext,
   ) => LiveFinalGateResult | Promise<LiveFinalGateResult>;
   pauseAutoTrade: () => Promise<void>;
   alert?: (message: string) => unknown;
@@ -71,11 +73,36 @@ async function serializeOpenAndEmergency<T>(operation: () => Promise<T>): Promis
   }
 }
 
+function acceptedMomentumEntryCap(opportunity: Opportunity): DecimalString | null {
+  const breakout = opportunity.breakoutPrice;
+  const atr = opportunity.atr15;
+  if (breakout === undefined || atr === undefined
+    || ![breakout, atr, opportunity.limitPrice].every(Number.isFinite)
+    || breakout <= 0 || atr <= 0 || opportunity.limitPrice <= 0) return null;
+  const direction = opportunity.side === "LONG" ? 1 : -1;
+  const bpsLimit = breakout * (1 + direction * DEFAULT_MOMENTUM_CONFIG.maxChaseBps / 10_000);
+  const atrLimit = breakout + direction * atr * DEFAULT_MOMENTUM_CONFIG.maxChaseAtr;
+  const cap = opportunity.side === "LONG" ? Math.min(bpsLimit, atrLimit) : Math.max(bpsLimit, atrLimit);
+  try {
+    const accepted = decimal(String(opportunity.limitPrice));
+    return exceedsDirectionalLimit(accepted, decimal(String(cap)), opportunity.side) ? null : accepted;
+  } catch {
+    return null;
+  }
+}
+
+function exceedsDirectionalLimit(price: DecimalString, cap: DecimalString, side: Opportunity["side"]): boolean {
+  const comparison = compareDecimals(price, cap);
+  return side === "LONG" ? comparison > 0 : comparison < 0;
+}
+
 export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   readonly machine: OrderStateMachine;
   private readonly now: () => number;
   private readonly id: () => string;
   private readonly replacementCounts = new Map<string, number>();
+  private readonly entryMetadata = new Map<string,
+    Pick<LivePositionSeed, "signalId" | "strategyType" | "breakoutPrice">>();
 
   constructor(private readonly dependencies: MainnetLiveExecutionDependencies) {
     this.now = dependencies.now ?? Date.now;
@@ -96,18 +123,37 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     const input: CreateLiveIntentInput = {
       ...this.dependencies.prepareIntent(opportunity),
       id: this.id(),
+      signalId: opportunity.signalId,
+      strategyType: opportunity.strategyType,
+      breakoutPrice: opportunity.breakoutPrice === undefined ? undefined : String(opportunity.breakoutPrice),
       workerId: this.dependencies.workerId,
     };
+    const entryCap = opportunity.strategyType === "MOMENTUM"
+      ? acceptedMomentumEntryCap(opportunity)
+      : input.limitPrice;
+    if (!entryCap) return { ok: false, reason: "动量限价或 bps/ATR 上限无效" };
+    try {
+      if (exceedsDirectionalLimit(decimal(input.limitPrice), entryCap, opportunity.side)) {
+        return { ok: false, reason: "prepareIntent 限价超过动量机会或 bps/ATR 上限" };
+      }
+    } catch {
+      return { ok: false, reason: "prepareIntent 限价无效" };
+    }
     const approvals: Extract<LiveFinalGateResult, { approved: true }>[] = [];
     const created = await this.dependencies.createIntent(input, {
       requireAutoTrade: true,
-      finalGate: async (tx) => {
-        const approval = await this.dependencies.finalGate(opportunity, input, tx);
+      finalGate: async (tx, context) => {
+        const approval = await this.dependencies.finalGate(opportunity, input, tx, context);
         if (approval.approved) approvals.push(approval);
         return approval;
       },
     });
     if (!created.ok) return { ok: false, reason: created.reason };
+    this.entryMetadata.set(input.id, {
+      signalId: input.signalId,
+      strategyType: input.strategyType,
+      breakoutPrice: input.breakoutPrice,
+    });
     const approval = approvals[0];
     if (!approval) return { ok: false, reason: "final gate 未返回已持久化的批准值" };
     const claimed = await this.dependencies.claimIntent({
@@ -129,6 +175,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       type: "LIMIT",
       status: "PENDING_SEND",
       price: input.limitPrice,
+      maxEntryPrice: entryCap,
       stopPrice: null,
       originalQuantity: approval.quantity,
       executedQuantity: "0",
@@ -150,18 +197,38 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     return { ok: true, positionId: input.id, reason: "live IOC 已提交，等待实际成交回报" };
   }
 
+  private withEntryMetadata(seed: LivePositionSeed): LivePositionSeed {
+    const metadata = this.entryMetadata.get(seed.id);
+    return {
+      ...seed,
+      signalId: seed.signalId ?? metadata?.signalId,
+      strategyType: seed.strategyType ?? metadata?.strategyType,
+      breakoutPrice: seed.breakoutPrice ?? metadata?.breakoutPrice,
+      exitPending: seed.exitPending ?? false,
+    };
+  }
+
   handleFill(clientOrderId: string, fill: LiveFill, seed: LivePositionSeed) {
-    return this.machine.handleFill(clientOrderId, fill, seed);
+    return this.machine.handleFill(clientOrderId, fill, this.withEntryMetadata(seed));
   }
 
   recover(clientOrderId: string, seed: LivePositionSeed) {
-    return this.machine.recover(clientOrderId, seed);
+    return this.machine.recover(clientOrderId, this.withEntryMetadata(seed));
   }
 
   async replaceOrder(clientOrderId: string, newLimitPrice: DecimalString) {
     const order = await this.dependencies.store.getOrder(clientOrderId);
     if (!order) throw new Error("Live order not found");
     if (order.type === "LIMIT" && !order.reduceOnly) {
+      if (!order.maxEntryPrice) throw new Error("缺少持久化动量限价");
+      try {
+        if (exceedsDirectionalLimit(decimal(newLimitPrice), order.maxEntryPrice, order.side)) {
+          throw new Error("改单限价超过持久化动量上限");
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.includes("限价")) throw error;
+        throw new Error("改单限价无效");
+      }
       let attempts = this.replacementCounts.get(order.intentId);
       if (attempts === undefined) {
         const orders = await this.dependencies.store.listOrders();
@@ -250,6 +317,11 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     const initialRisk = Math.abs(Number(position.initialQuantity) * stopDistance);
     return {
       id: position.id,
+      signalId: position.signalId,
+      strategyType: position.strategyType,
+      breakoutPrice: position.breakoutPrice === null || position.breakoutPrice === undefined
+        ? undefined : Number(position.breakoutPrice),
+      exitPending: position.exitPending ?? false,
       symbol: position.symbol,
       side: position.side,
       qty: quantity,

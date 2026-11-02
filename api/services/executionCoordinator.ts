@@ -26,6 +26,10 @@ import {
   momentumFeatureFrameSchema,
   type MomentumFeatureFrame,
 } from "./momentum";
+import {
+  drizzleMomentumStateStore,
+  type MomentumStateStore,
+} from "./momentumState";
 
 export type OpenExecutionResult =
   | { ok: true; positionId: string; reason: string }
@@ -65,6 +69,7 @@ export interface ExecutionCoordinatorDependencies {
   market?: { readonly dataSource: DataSource };
   env?: Record<string, string | undefined>;
   now?: () => number;
+  momentumStore?: MomentumStateStore;
 }
 
 export const paperExecutionAdapter: ExecutionAdapter = {
@@ -103,9 +108,6 @@ async function defaultOutstandingRisk(positionViews: Promise<PositionView[]>): P
 
 export class ExecutionCoordinator {
   private readonly consumedMomentumSignals = new Set<string>();
-  private readonly momentumEntries = new Map<string, Opportunity>();
-  private readonly momentumFrames = new Map<string, MomentumFeatureFrame>();
-  private readonly momentumExitPending = new Set<string>();
   private readonly dependencies: ExecutionCoordinatorDependencies;
   private openSwitchTail: Promise<void> = Promise.resolve();
 
@@ -115,6 +117,10 @@ export class ExecutionCoordinator {
 
   private get paper() {
     return this.dependencies.paper ?? paperExecutionAdapter;
+  }
+
+  private get momentumStore() {
+    return this.dependencies.momentumStore ?? drizzleMomentumStateStore;
   }
 
   private get marketSource(): DataSource {
@@ -148,9 +154,15 @@ export class ExecutionCoordinator {
     }
   }
 
-  observeMomentumFrame(frame: MomentumFeatureFrame) {
+  async observeMomentumFrame(frame: MomentumFeatureFrame) {
     const parsed = momentumFeatureFrameSchema.safeParse(frame);
-    if (parsed.success) this.momentumFrames.set(parsed.data.symbol, parsed.data);
+    if (!parsed.success) throw new Error("动量特征格式无效");
+    await this.momentumStore.saveFrame(parsed.data);
+  }
+
+  async receiveMomentumFrame(frame: MomentumFeatureFrame) {
+    await this.observeMomentumFrame(frame);
+    await this.manageMomentumExits();
   }
 
   async open(opportunity: Opportunity, executionHealthy?: () => boolean): Promise<OpenExecutionResult> {
@@ -184,7 +196,6 @@ export class ExecutionCoordinator {
     try {
       const result = await this.adapter(settings).open(opportunity, executionHealthy);
       if (!result.ok && guardedMomentumSignal) this.consumedMomentumSignals.delete(opportunity.signalId);
-      if (result.ok && guardedMomentumSignal) this.momentumEntries.set(result.positionId, opportunity);
       return result;
     } catch (error) {
       if (guardedMomentumSignal) this.consumedMomentumSignals.delete(opportunity.signalId);
@@ -199,30 +210,40 @@ export class ExecutionCoordinator {
   async manage(): Promise<void> {
     const adapter = this.adapter(await this.settings());
     await adapter.manage();
-    if (!this.momentumEntries.size) return;
+    await this.manageMomentumExits();
+  }
+
+  async manageMomentumExits(): Promise<void> {
+    const settings = await this.settings();
+    const adapter = this.adapter(settings);
     const openPositions = await adapter.positions();
-    const byId = new Map(openPositions.map((position) => [position.id, position]));
-    for (const [positionId, opportunity] of this.momentumEntries) {
-      const position = byId.get(positionId);
-      if (!position) {
-        if (this.momentumExitPending.delete(positionId)) this.momentumEntries.delete(positionId);
-        continue;
-      }
-      if (this.momentumExitPending.has(positionId) || opportunity.breakoutPrice === undefined
-        || !position.valuationValid) continue;
+    for (const position of openPositions) {
+      if (position.strategyType !== "MOMENTUM" || position.breakoutPrice === undefined
+        || position.exitPending || !position.valuationValid) continue;
+      const frame = await this.momentumStore.latestFrame(position.symbol);
+      const now = this.now();
+      const freshFramePrice = frame?.quality === "GOOD" && frame.received_time >= frame.event_time
+        && now >= frame.event_time && now - frame.event_time <= 750 && now - frame.received_time <= 750
+        ? frame.mark_price : null;
       const reason = evaluateMomentumExit({
         symbol: position.symbol,
         side: position.side,
         entryPrice: position.entryPrice,
-        price: position.markPrice,
-        breakoutPrice: opportunity.breakoutPrice,
+        price: freshFramePrice ?? position.markPrice,
+        breakoutPrice: position.breakoutPrice,
         openedAt: Date.parse(position.openedAt),
-        now: this.now(),
-        frame: this.momentumFrames.get(position.symbol) ?? null,
+        now,
+        frame,
       });
       if (!reason) continue;
-      const result = await adapter.close(positionId, reason);
-      if (result.ok || result.unsettled) this.momentumExitPending.add(positionId);
+      await this.momentumStore.setExitPending(settings.executionMode, position.id, true, reason);
+      try {
+        const result = await adapter.close(position.id, reason);
+        if (!result.ok) await this.momentumStore.setExitPending(settings.executionMode, position.id, false);
+      } catch (error) {
+        await this.momentumStore.setExitPending(settings.executionMode, position.id, false);
+        throw error;
+      }
     }
   }
 

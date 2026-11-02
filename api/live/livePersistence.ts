@@ -1,7 +1,7 @@
 import { and, eq, gt, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import type { MySql2Database } from "drizzle-orm/mysql2";
-import { liveControls, liveIntents, tradingSettings } from "@db/schema";
-import type { Side } from "@contracts/trading";
+import { liveControls, liveIntents, tradingSettings, volatilityStates } from "@db/schema";
+import type { Side, StrategyType, VolatilityMode } from "@contracts/trading";
 import {
   addDecimals,
   compareDecimals,
@@ -18,6 +18,8 @@ export type LiveTransaction = Parameters<Parameters<LiveDatabase["transaction"]>
 export interface CreateLiveIntentInput {
   id: string;
   signalId: string;
+  strategyType?: StrategyType;
+  breakoutPrice?: DecimalString;
   symbol: string;
   side: Side;
   quantity: DecimalString;
@@ -46,8 +48,13 @@ export type LiveFinalGateResult =
     }
   | { approved: false; reason: string };
 
+export interface LiveFinalGateContext {
+  mode: VolatilityMode;
+  highVolatilityRiskMultiplier: number;
+}
+
 export interface CreateLiveIntentOptions {
-  finalGate: (tx: LiveTransaction) => Promise<LiveFinalGateResult>;
+  finalGate: (tx: LiveTransaction, context: LiveFinalGateContext) => Promise<LiveFinalGateResult>;
   requireAutoTrade?: boolean;
 }
 
@@ -154,6 +161,7 @@ export async function createLiveIntent(
         id: tradingSettings.id,
         executionMode: tradingSettings.executionMode,
         autoTrade: tradingSettings.autoTrade,
+        highVolatilityRiskMultiplier: tradingSettings.highVolatilityRiskMultiplier,
       }).from(tradingSettings).where(eq(tradingSettings.id, 1)).for("update");
       if (!settingsLock[0]) throw new Error("Trading settings are missing");
       if (settingsLock[0].executionMode !== "LIVE_MAINNET") {
@@ -162,9 +170,18 @@ export async function createLiveIntent(
       if (options.requireAutoTrade && !settingsLock[0].autoTrade) {
         return { ok: false, reason: "自动交易已暂停" };
       }
+      const stateLock = await tx.select({ mode: volatilityStates.mode }).from(volatilityStates)
+        .where(eq(volatilityStates.symbol, input.symbol)).for("update");
+      const mode = stateLock[0]?.mode === "HIGH" || stateLock[0]?.mode === "EXTREME"
+        ? stateLock[0].mode
+        : stateLock[0]?.mode === "NORMAL" ? "NORMAL" : null;
+      if (!mode) return { ok: false, reason: "缺少当前波动状态，禁止开仓" };
       const emergencyGeneration = options.requireAutoTrade ? await lockEmergencyGeneration(tx) : 0;
 
-      const approval = await options.finalGate(tx);
+      const approval = await options.finalGate(tx, {
+        mode,
+        highVolatilityRiskMultiplier: settingsLock[0].highVolatilityRiskMultiplier,
+      });
       if (!approval.approved) return { ok: false, reason: approval.reason };
       const now = await databaseNow(tx);
       const invalidApproval = approvalError(input, approval, now);
@@ -173,6 +190,8 @@ export async function createLiveIntent(
       await tx.insert(liveIntents).values({
         id: input.id,
         signalId: input.signalId,
+        strategyType: input.strategyType ?? "SWING",
+        breakoutPrice: input.breakoutPrice ?? null,
         symbol: input.symbol,
         side: input.side,
         quantity: approval.quantity,

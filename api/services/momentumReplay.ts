@@ -4,6 +4,7 @@ import {
   DEFAULT_MOMENTUM_CONFIG,
   evaluateMomentumCandidate,
   momentumFeatureFrameSchema,
+  qualifiedMomentumSide,
   type MomentumAcceptanceContext,
   type MomentumCandidate,
   type MomentumConfig,
@@ -92,7 +93,8 @@ class ReplayFeatureEngine {
       : null;
     const spread = validBook && mid > 0 ? (book.ask.price - book.bid.price) / mid * 10_000 : null;
     const imbalance = validBook ? (book.bid.quantity - book.ask.quantity) / quantitySum : null;
-    const flowCutoff = book.eventTime - 5_000;
+    const flowCutoff = book.eventTime - this.config.flowWindowMs;
+    const returnCutoff = book.eventTime - this.config.returnWindowMs;
     let buy = 0;
     let sell = 0;
     for (const trade of this.trades) {
@@ -100,7 +102,7 @@ class ReplayFeatureEngine {
       if (trade.isBuyerMaker) sell += trade.quantity;
       else buy += trade.quantity;
     }
-    const marks = this.marks.filter((mark) => mark.eventTime >= flowCutoff && mark.eventTime <= book.eventTime);
+    const marks = this.marks.filter((mark) => mark.eventTime >= returnCutoff && mark.eventTime <= book.eventTime);
     const shortReturn = marks.length >= 2 && marks[0].price > 0
       ? marks.at(-1)!.price / marks[0].price - 1
       : null;
@@ -176,9 +178,7 @@ class ReplayCandidateDetector {
     }
     if (frame.sequence <= this.sequence) return null;
     this.sequence = frame.sequence;
-    const side = frame.quality === "GOOD" && frame.short_return !== null
-      ? frame.short_return > 0 ? "LONG" : frame.short_return < 0 ? "SHORT" : null
-      : null;
+    const side = qualifiedMomentumSide(frame, this.config);
     if (!side) {
       this.streak = 0;
       this.streakSide = null;

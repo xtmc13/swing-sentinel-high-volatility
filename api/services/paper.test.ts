@@ -178,6 +178,11 @@ describe("数据库结果与不可变初始风险", () => {
   it("R 倍数使用保存的 initialRisk，不从可修改目标反推", () => {
     const row: PositionRow = {
       id: crypto.randomUUID(),
+      signalId: "persisted-momentum",
+      strategyType: "MOMENTUM",
+      breakoutPrice: 99,
+      exitPending: true,
+      exitReason: "等待平仓",
       symbol: "BTCUSDT",
       side: "LONG",
       status: "OPEN",
@@ -199,7 +204,13 @@ describe("数据库结果与不可变初始风险", () => {
       closedAt: null,
     };
 
-    expect(toPositionView(row)).toMatchObject({ valuationValid: false });
+    expect(toPositionView(row)).toMatchObject({
+      valuationValid: false,
+      signalId: "persisted-momentum",
+      strategyType: "MOMENTUM",
+      breakoutPrice: 99,
+      exitPending: true,
+    });
     expect(toPositionView(row).rMultiple).toBeNaN();
     expect(toPositionView(row).unrealizedPnl).toBeNaN();
     expect(toPositionView(row, {

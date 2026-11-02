@@ -9,7 +9,11 @@ import { log } from "./lib/logger";
 import { handleClientLog } from "./lib/clientlog";
 import { REQUEST_ID_HEADER, runWithRequestId } from "./lib/requestcontext";
 import { engine, startAutomation } from "./services/engine";
-import { isLoopbackRemoteAddress, type MomentumCandidate } from "./services/momentum";
+import {
+  isLoopbackRemoteAddress,
+  type MomentumCandidate,
+  type MomentumFeatureFrame,
+} from "./services/momentum";
 
 startAutomation();
 
@@ -67,6 +71,24 @@ app.post(
       return c.json({ ok: false, reason: "候选 JSON 无效" }, 400);
     }
     return c.json(await engine.receiveMomentumCandidate(body as MomentumCandidate));
+  },
+);
+
+app.post(
+  "/v1/momentum/frame",
+  bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.body(null, 413) }),
+  async (c) => {
+    if (!isLoopbackRemoteAddress(c.env?.incoming?.socket?.remoteAddress)) {
+      return c.json({ ok: false, reason: "仅允许回环特征接收" }, 403);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ ok: false, reason: "特征 JSON 无效" }, 400);
+    }
+    await engine.receiveMomentumFrame(body as MomentumFeatureFrame);
+    return c.json({ ok: true });
   },
 );
 

@@ -13,6 +13,8 @@ function input(overrides: Partial<LiveRiskInput> = {}): LiveRiskInput {
     leverageMode: "FIXED",
     fixedLeverage: 5,
     riskPerTradePct: 1,
+    mode: "NORMAL",
+    highVolatilityRiskMultiplier: 0.5,
     marginPerTradePct: 10,
     totalMarginCapPct: 20,
     takerFeeBps: 0,
@@ -150,6 +152,16 @@ describe("主网精确风险与预留", () => {
       maintenanceMargin: "1950",
       bracket: 2,
     });
+  });
+
+  it("HIGH 使用配置的减半风险，NORMAL 保持不变且 EXTREME 拒绝", () => {
+    const budget = { marginPerTradePct: 100, totalMarginCapPct: 100 };
+    const normal = calculateLivePositionRisk(input(budget));
+    const high = calculateLivePositionRisk(input({ ...budget, mode: "HIGH" }));
+
+    expect(normal).toMatchObject({ ok: true, quantity: "100" });
+    expect(high).toMatchObject({ ok: true, quantity: "50", estimatedRisk: "50" });
+    expect(calculateLivePositionRisk(input({ ...budget, mode: "EXTREME" }))).toMatchObject({ ok: false });
   });
 
   it("止损没有位于真实强平价之前时失败关闭", () => {

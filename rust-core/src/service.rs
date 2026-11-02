@@ -173,6 +173,7 @@ async fn run_session(
         }
         if let Some(frame) = output.frame {
             diagnostics.note_frame(symbol, &frame);
+            sender.send_frame(frame).await?;
         }
         if let Some(candidate) = output.candidate {
             sender.send(candidate).await?;

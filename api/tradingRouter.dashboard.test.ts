@@ -68,6 +68,11 @@ const staleMarket: Market = {
 };
 const openRow: PositionRow = {
   id: crypto.randomUUID(),
+  signalId: null,
+  strategyType: "SWING",
+  breakoutPrice: null,
+  exitPending: false,
+  exitReason: null,
   symbol: "BTCUSDT",
   side: "LONG",
   status: "OPEN",

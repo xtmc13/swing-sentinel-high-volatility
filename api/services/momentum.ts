@@ -57,12 +57,17 @@ export interface MomentumAcceptanceContext {
 
 export interface MomentumConfig {
   rollingWindowMs: number;
+  returnWindowMs: number;
+  flowWindowMs: number;
   breakoutBufferBps: number;
   maxChaseBps: number;
   maxChaseAtr: number;
   minDepthImbalance: number;
   minAggressiveRatio: number;
   minBurstZ: number;
+  minShortReturn: number;
+  maxDetectorSpreadBps: number;
+  maxRealizedVolatility: number;
   signalTtlMs: number;
   maxReplacements: number;
   noFollowExitMs: number;
@@ -81,12 +86,17 @@ export function isLoopbackRemoteAddress(address: string | undefined): boolean {
 
 export const DEFAULT_MOMENTUM_CONFIG: MomentumConfig = {
   rollingWindowMs: 120_000,
+  returnWindowMs: 10_000,
+  flowWindowMs: 10_000,
   breakoutBufferBps: 1,
   maxChaseBps: 4,
   maxChaseAtr: 0.1,
   minDepthImbalance: 0.15,
   minAggressiveRatio: 1.5,
   minBurstZ: 2,
+  minShortReturn: 0.0001,
+  maxDetectorSpreadBps: 50,
+  maxRealizedVolatility: 1,
   signalTtlMs: 750,
   maxReplacements: 1,
   noFollowExitMs: 120_000,
@@ -110,6 +120,25 @@ function reject(reason: string): MomentumEvaluation {
 
 function directionalRatio(sameSide: number, oppositeSide: number) {
   return oppositeSide === 0 ? sameSide > 0 ? Number.POSITIVE_INFINITY : 0 : sameSide / oppositeSide;
+}
+
+export function qualifiedMomentumSide(
+  frame: MomentumFeatureFrame,
+  config: MomentumConfig = DEFAULT_MOMENTUM_CONFIG,
+): "LONG" | "SHORT" | null {
+  const required = [frame.mark_price, frame.microprice, frame.spread_bps, frame.depth_imbalance,
+    frame.short_return, frame.burst_z, frame.realized_volatility];
+  if (frame.quality !== "GOOD" || required.some((value) => value === null)
+    || frame.spread_bps! > config.maxDetectorSpreadBps
+    || Math.abs(frame.short_return!) < config.minShortReturn
+    || frame.burst_z! < config.minBurstZ
+    || frame.realized_volatility! > config.maxRealizedVolatility) return null;
+  const side = frame.short_return! > 0 ? "LONG" : "SHORT";
+  const direction = side === "LONG" ? 1 : -1;
+  const sameSide = side === "LONG" ? frame.aggressive_buy_volume : frame.aggressive_sell_volume;
+  const opposite = side === "LONG" ? frame.aggressive_sell_volume : frame.aggressive_buy_volume;
+  return frame.depth_imbalance! * direction >= config.minDepthImbalance
+    && directionalRatio(sameSide, opposite) >= config.minAggressiveRatio ? side : null;
 }
 
 export interface MomentumExitInput {
@@ -173,14 +202,9 @@ export function evaluateMomentumCandidate(input: EvaluateMomentumCandidateInput)
   if (required.some((value) => value === null)) return reject("动量特征不完整");
   if (candidate.reference_price !== frame.mark_price) return reject("候选参考价格与特征标记价格不一致");
   if (frame.spread_bps! > settings.maxSpreadBps) return reject("动量特征点差超过开仓上限");
-  const depth = frame.depth_imbalance!;
-  const sameSideFlow = candidate.side === "LONG" ? frame.aggressive_buy_volume : frame.aggressive_sell_volume;
-  const oppositeFlow = candidate.side === "LONG" ? frame.aggressive_sell_volume : frame.aggressive_buy_volume;
-  if (depth * direction < config.minDepthImbalance
-    || !directionalRatio(sameSideFlow, oppositeFlow)
-    || directionalRatio(sameSideFlow, oppositeFlow) < config.minAggressiveRatio
-    || frame.burst_z! < config.minBurstZ
-    || frame.short_return! * direction <= 0) return reject("深度、主动量、burst 或短期方向未确认");
+  if (qualifiedMomentumSide(frame, config) !== candidate.side) {
+    return reject("深度、主动量、burst 或短期方向未确认");
+  }
   if (!Number.isFinite(context.volatilityP80) || context.volatilityP80 < 0
     || frame.realized_volatility! < context.volatilityP80) return reject("波动未达到 P80 确认阈值");
 

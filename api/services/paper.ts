@@ -50,6 +50,10 @@ export function toPositionView(row: PositionRow, market?: Market, snapshot?: Mar
   const unrealizedPnl = valuationValid ? (markPrice - row.entryPrice) * row.qty * direction : Number.NaN;
   return {
     id: row.id, symbol: row.symbol, side: row.side as Side,
+    signalId: row.signalId ?? undefined,
+    strategyType: row.strategyType === "MOMENTUM" ? "MOMENTUM" : "SWING",
+    breakoutPrice: row.breakoutPrice ?? undefined,
+    exitPending: row.exitPending,
     qty: row.qty, initialQty: row.initialQty, entryPrice: row.entryPrice,
     markPrice, stopPrice: row.stopPrice, targetPrice: row.targetPrice,
     liquidationPrice: row.liquidationPrice, leverage: row.leverage,
@@ -278,6 +282,11 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const preflightSettings = await getSettings();
       if (!preflightSettings.autoTrade) return { ok: false as const, reason: "自动交易已暂停" };
+      if (opportunity.strategyType === "MOMENTUM") {
+        const existing = await db.select({ id: positions.id }).from(positions)
+          .where(eq(positions.signalId, opportunity.signalId)).limit(1);
+        if (existing.length) return { ok: false as const, reason: "动量信号已执行" };
+      }
       const preflightRows = await db.select().from(positions).where(eq(positions.status, "OPEN"));
       const symbols = [...new Set([opportunity.symbol, ...preflightRows.map((row) => row.symbol)])];
       const snapshots = new Map(await Promise.all(symbols.map(async (symbol) => {
@@ -388,6 +397,10 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         const positionId = crypto.randomUUID();
         await tx.insert(positions).values({
           id: positionId,
+          signalId: opportunity.signalId,
+          strategyType: opportunity.strategyType,
+          breakoutPrice: opportunity.breakoutPrice ?? null,
+          exitPending: false,
           symbol: opportunity.symbol,
           side: opportunity.side,
           initialQty: approved.qty,

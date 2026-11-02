@@ -2,7 +2,7 @@ use std::{net::IpAddr, time::Duration};
 
 use reqwest::{redirect::Policy, Url};
 
-use crate::model::Candidate;
+use crate::model::{Candidate, FeatureFrame};
 
 const MAX_CANDIDATE_BYTES: usize = 64 * 1024;
 
@@ -45,15 +45,13 @@ impl CandidateSender {
         candidate.validate()
     }
 
-    pub async fn send(&self, candidate: Candidate) -> Result<(), String> {
-        self.validate_payload(&candidate).map_err(str::to_owned)?;
-        let payload = serde_json::to_vec(&candidate).map_err(|error| error.to_string())?;
+    async fn post(&self, endpoint: Url, payload: Vec<u8>) -> Result<(), String> {
         if payload.len() > MAX_CANDIDATE_BYTES {
             return Err("candidate payload exceeds 64 KiB".into());
         }
         let response = self
             .client
-            .post(self.endpoint.clone())
+            .post(endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(payload)
             .send()
@@ -64,5 +62,20 @@ impl CandidateSender {
         } else {
             Err(format!("candidate endpoint returned {}", response.status()))
         }
+    }
+
+    pub async fn send(&self, candidate: Candidate) -> Result<(), String> {
+        self.validate_payload(&candidate).map_err(str::to_owned)?;
+        let payload = serde_json::to_vec(&candidate).map_err(|error| error.to_string())?;
+        self.post(self.endpoint.clone(), payload).await
+    }
+
+    pub async fn send_frame(&self, frame: FeatureFrame) -> Result<(), String> {
+        let payload = serde_json::to_vec(&frame).map_err(|error| error.to_string())?;
+        let mut endpoint = self.endpoint.clone();
+        if endpoint.path() == "/v1/momentum/candidate" {
+            endpoint.set_path("/v1/momentum/frame");
+        }
+        self.post(endpoint, payload).await
     }
 }

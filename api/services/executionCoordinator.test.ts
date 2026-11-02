@@ -12,6 +12,7 @@ import {
   liveTradingEnabled,
   type ExecutionAdapter,
 } from "./executionCoordinator";
+import { InMemoryMomentumStateStore } from "./momentumState";
 
 const account: AccountSnapshot = {
   equity: 100_000,
@@ -107,10 +108,12 @@ function setup(options: {
   risk?: { openPositions: number; pendingIntents: number; unfinishedOrders: number };
   riskLoader?: () => Promise<{ openPositions: number; pendingIntents: number; unfinishedOrders: number }>;
   now?: () => number;
+  momentumStore?: InMemoryMomentumStateStore;
 } = {}) {
   const settings: TradingSettings = { ...DEFAULT_SETTINGS, autoTrade: true, ...options.settings };
   const paper = options.paper ?? adapter();
   const live = options.live ?? adapter();
+  const momentumStore = options.momentumStore ?? new InMemoryMomentumStateStore();
   const saveSettings = vi.fn(async (next: TradingSettings) => {
     Object.assign(settings, next);
   });
@@ -124,8 +127,9 @@ function setup(options: {
     market: { dataSource: options.source ?? "MAINNET" },
     env: options.env ?? {},
     now: options.now ?? (() => 1_800_000_001_000),
+    momentumStore,
   });
-  return { coordinator, settings, paper, live, saveSettings };
+  return { coordinator, settings, paper, live, saveSettings, momentumStore };
 }
 
 describe("执行配置安全默认值", () => {
@@ -282,23 +286,18 @@ describe("ExecutionCoordinator", () => {
     expect(swingOnly.paper.open).not.toHaveBeenCalled();
   });
 
-  it("120 秒无跟随通过现有 coordinator close 退出，同时保留原持仓管理", async () => {
-    const stagnant = {
+  it("重启后仅凭持久化持仓元数据执行 120 秒无跟随退出", async () => {
+    const stagnant: PositionView = {
       ...position,
+      signalId: "persisted-momentum",
+      strategyType: "MOMENTUM",
+      breakoutPrice: 99,
       entryPrice: 100,
       markPrice: 100,
       openedAt: new Date(1_799_999_880_999).toISOString(),
     };
-    const paper = adapter({
-      open: vi.fn(async () => ({ ok: true as const, positionId: stagnant.id, reason: "模拟开仓成交" })),
-      positions: vi.fn(async () => [stagnant]),
-    });
-    const h = setup({
-      settings: { momentumEnabled: true, strategyMode: "MOMENTUM" },
-      paper,
-    });
-    const signal = opportunity({ strategyType: "MOMENTUM", breakoutPrice: 99 });
-    await h.coordinator.open(signal);
+    const paper = adapter({ positions: vi.fn(async () => [stagnant]) });
+    const h = setup({ paper });
 
     await h.coordinator.manage();
 
@@ -306,21 +305,28 @@ describe("ExecutionCoordinator", () => {
     expect(paper.close).toHaveBeenCalledWith(stagnant.id, "120 秒无跟随退出");
   });
 
-  it("跌回突破位且流向反转通过现有 close 退出，未结算时不重复平仓", async () => {
-    const failed = {
+  it("非候选反转 frame 立即退出，持久化 pending 在重启后防止重复平仓", async () => {
+    const failed: PositionView = {
       ...position,
+      signalId: "persisted-momentum",
+      strategyType: "MOMENTUM",
+      breakoutPrice: 100,
+      exitPending: false,
       entryPrice: 100.02,
-      markPrice: 99.99,
+      markPrice: 100.02,
       openedAt: new Date(1_800_000_001_000).toISOString(),
     };
     const paper = adapter({
-      open: vi.fn(async () => ({ ok: true as const, positionId: failed.id, reason: "模拟开仓成交" })),
       positions: vi.fn(async () => [failed]),
-      close: vi.fn(async () => ({ ok: true as const, reason: "等待平仓", pnl: Number.NaN, unsettled: true as const, alreadyClosed: false as const })),
+      close: vi.fn(async () => {
+        failed.exitPending = true;
+        return { ok: true as const, reason: "等待平仓", pnl: Number.NaN, unsettled: true as const, alreadyClosed: false as const };
+      }),
     });
-    const h = setup({ settings: { momentumEnabled: true, strategyMode: "MOMENTUM" }, paper });
-    await h.coordinator.open(opportunity({ strategyType: "MOMENTUM", breakoutPrice: 100 }));
-    h.coordinator.observeMomentumFrame({
+    const momentumStore = new InMemoryMomentumStateStore();
+    const first = setup({ paper, momentumStore });
+
+    await first.coordinator.receiveMomentumFrame({
       symbol: "BTCUSDT",
       event_time: 1_800_000_000_990,
       received_time: 1_800_000_001_000,
@@ -339,11 +345,13 @@ describe("ExecutionCoordinator", () => {
       realized_volatility: 0.02,
     });
 
-    await h.coordinator.manage();
-    await h.coordinator.manage();
-
-    expect(paper.close).toHaveBeenCalledTimes(1);
+    expect(paper.manage).not.toHaveBeenCalled();
     expect(paper.close).toHaveBeenCalledWith(failed.id, "跌回突破位且流向反转");
+    expect(await momentumStore.latestFrame("BTCUSDT")).toMatchObject({ sequence: 3 });
+
+    const restarted = setup({ paper, momentumStore });
+    await restarted.coordinator.manage();
+    expect(paper.close).toHaveBeenCalledTimes(1);
   });
 
   it("过期动量信号和重复 signalId 不进入 adapter", async () => {

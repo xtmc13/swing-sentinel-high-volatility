@@ -154,6 +154,10 @@ export interface Opportunity {
 
 export interface PositionView {
   id: string;
+  signalId?: string;
+  strategyType?: StrategyType;
+  breakoutPrice?: number;
+  exitPending?: boolean;
   symbol: string;
   side: Side;
   qty: number;

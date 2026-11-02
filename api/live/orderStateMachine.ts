@@ -1,4 +1,4 @@
-import type { Side } from "@contracts/trading";
+import type { Side, StrategyType } from "@contracts/trading";
 import type {
   BinanceOpenOrder,
   LiveOrderGateway,
@@ -35,6 +35,7 @@ export interface LiveOrder {
   type: "LIMIT" | "MARKET" | "STOP_MARKET";
   status: LiveOrderStatus;
   price: DecimalString;
+  maxEntryPrice?: DecimalString | null;
   stopPrice: DecimalString | null;
   originalQuantity: DecimalString;
   executedQuantity: DecimalString;
@@ -46,6 +47,10 @@ export interface LiveOrder {
 
 export interface LivePositionSeed {
   id: string;
+  signalId?: string;
+  strategyType?: StrategyType;
+  breakoutPrice?: DecimalString | null;
+  exitPending?: boolean;
   symbol: string;
   side: Side;
   stopPrice: DecimalString;

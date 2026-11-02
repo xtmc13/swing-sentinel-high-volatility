@@ -311,9 +311,11 @@ function momentumEngineHarness(autoTrade: boolean) {
     return { ok: true as const, positionId: "momentum-position", reason: "模拟开仓成交" };
   });
   const observeMomentumFrame = vi.fn();
+  const receiveMomentumFrame = vi.fn(async () => undefined);
   const coordinator = {
     open,
     observeMomentumFrame,
+    receiveMomentumFrame,
     positions: vi.fn(async () => []),
   };
   const oneMinute: Candle[] = [
@@ -339,7 +341,7 @@ function momentumEngineHarness(autoTrade: boolean) {
       },
     },
   });
-  return { h, open, observeMomentumFrame };
+  return { h, open, observeMomentumFrame, receiveMomentumFrame };
 }
 
 describe("三态引擎编排", () => {
@@ -362,6 +364,16 @@ describe("三态引擎编排", () => {
     expect(result).toMatchObject({ ok: true });
     expect(open).not.toHaveBeenCalled();
     expect(h.engine.opportunities).toHaveLength(1);
+  });
+
+  it("非候选 frame 通过独立 ingress 立即进入退出评估而不触发开仓", async () => {
+    const { h, open, receiveMomentumFrame } = momentumEngineHarness(false);
+
+    await h.engine.receiveMomentumFrame(momentumCandidateForTest().frame);
+
+    expect(receiveMomentumFrame).toHaveBeenCalledWith(momentumCandidateForTest().frame);
+    expect(open).not.toHaveBeenCalled();
+    expect(h.analyses()).toBe(0);
   });
 
   it("引擎状态复用已估值账户快照而不重复请求", async () => {

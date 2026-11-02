@@ -75,6 +75,11 @@ export const liveControls = mysqlTable("live_controls", {
 
 export const positions = mysqlTable("positions", {
   id: varchar("id", { length: 36 }).primaryKey(),
+  signalId: varchar("signal_id", { length: 160 }),
+  strategyType: varchar("strategy_type", { length: 16 }).notNull().default("SWING"),
+  breakoutPrice: double("breakout_price"),
+  exitPending: boolean("exit_pending").notNull().default(false),
+  exitReason: varchar("exit_reason", { length: 64 }),
   symbol: varchar("symbol", { length: 24 }).notNull(),
   side: varchar("side", { length: 8 }).notNull(),
   status: varchar("status", { length: 12 }).notNull().default("OPEN"),
@@ -94,7 +99,10 @@ export const positions = mysqlTable("positions", {
   openedAt: timestamp("opened_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
   closedAt: timestamp("closed_at"),
-}, (table) => ({ statusIdx: index("positions_status_idx").on(table.status) }));
+}, (table) => ({
+  statusIdx: index("positions_status_idx").on(table.status),
+  signalUnique: uniqueIndex("positions_signal_unique").on(table.signalId),
+}));
 
 export const volatilityStates = mysqlTable("volatility_states", {
   symbol: varchar("symbol", { length: 24 }).primaryKey(),
@@ -106,6 +114,26 @@ export const volatilityStates = mysqlTable("volatility_states", {
   spreadRatio: double("spread_ratio"),
   lastDataAt: bigint("last_data_at", { mode: "number" }).notNull(),
   version: int("version").notNull().default(0),
+  updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
+});
+
+export const momentumFrames = mysqlTable("momentum_frames", {
+  symbol: varchar("symbol", { length: 24 }).primaryKey(),
+  eventTime: bigint("event_time", { mode: "number" }).notNull(),
+  receivedTime: bigint("received_time", { mode: "number" }).notNull(),
+  sequence: bigint("sequence", { mode: "number" }).notNull(),
+  generation: bigint("generation", { mode: "number" }).notNull(),
+  quality: varchar("quality", { length: 32 }).notNull(),
+  configHash: varchar("config_hash", { length: 64 }).notNull(),
+  markPrice: double("mark_price"),
+  microprice: double("microprice"),
+  spreadBps: double("spread_bps"),
+  depthImbalance: double("depth_imbalance"),
+  aggressiveBuyVolume: double("aggressive_buy_volume").notNull(),
+  aggressiveSellVolume: double("aggressive_sell_volume").notNull(),
+  shortReturn: double("short_return"),
+  burstZ: double("burst_z"),
+  realizedVolatility: double("realized_volatility"),
   updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
 });
 
@@ -200,6 +228,8 @@ const money = (name: string) => decimal(name, { precision: 65, scale: 30 }).notN
 export const liveIntents = mysqlTable("live_intents", {
   id: varchar("id", { length: 36 }).primaryKey(),
   signalId: varchar("signal_id", { length: 160 }).notNull(),
+  strategyType: varchar("strategy_type", { length: 16 }).notNull().default("SWING"),
+  breakoutPrice: decimal("breakout_price", { precision: 65, scale: 30 }),
   symbol: varchar("symbol", { length: 24 }).notNull(),
   side: varchar("side", { length: 8 }).notNull(),
   status: varchar("status", { length: 24 }).notNull().default("PENDING_SEND"),
@@ -234,6 +264,7 @@ export const liveOrders = mysqlTable("live_orders", {
   type: varchar("type", { length: 24 }).notNull(),
   status: varchar("status", { length: 24 }).notNull(),
   price: money("price"),
+  maxEntryPrice: decimal("max_entry_price", { precision: 65, scale: 30 }),
   originalQuantity: money("original_quantity"),
   executedQuantity: money("executed_quantity"),
   reduceOnly: boolean("reduce_only").notNull().default(false),
@@ -270,6 +301,11 @@ export const liveFills = mysqlTable("live_fills", {
 
 export const livePositions = mysqlTable("live_positions", {
   id: varchar("id", { length: 36 }).primaryKey(),
+  signalId: varchar("signal_id", { length: 160 }),
+  strategyType: varchar("strategy_type", { length: 16 }).notNull().default("SWING"),
+  breakoutPrice: decimal("breakout_price", { precision: 65, scale: 30 }),
+  exitPending: boolean("exit_pending").notNull().default(false),
+  exitReason: varchar("exit_reason", { length: 64 }),
   symbol: varchar("symbol", { length: 24 }).notNull(),
   side: varchar("side", { length: 8 }).notNull(),
   status: varchar("status", { length: 16 }).notNull().default("OPEN"),

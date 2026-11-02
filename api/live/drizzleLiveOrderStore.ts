@@ -46,6 +46,7 @@ function orderFromRows(row: OrderRow, fills: FillRow[]): LiveOrder {
     type: row.type as LiveOrder["type"],
     status: row.status as LiveOrderStatus,
     price: row.price,
+    maxEntryPrice: row.maxEntryPrice,
     stopPrice: row.type === "STOP_MARKET" ? row.price : null,
     originalQuantity: row.originalQuantity,
     executedQuantity,
@@ -60,6 +61,10 @@ function orderFromRows(row: OrderRow, fills: FillRow[]): LiveOrder {
 function positionFromRow(row: PositionRow, stopPrice: string): LivePosition {
   return {
     id: row.id,
+    signalId: row.signalId ?? undefined,
+    strategyType: row.strategyType === "MOMENTUM" ? "MOMENTUM" : "SWING",
+    breakoutPrice: row.breakoutPrice,
+    exitPending: row.exitPending,
     symbol: row.symbol,
     side: row.side as Side,
     status: row.status as LivePosition["status"],
@@ -112,6 +117,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       type: order.type,
       status: order.status,
       price: order.price,
+      maxEntryPrice: order.maxEntryPrice ?? null,
       originalQuantity: order.originalQuantity,
       executedQuantity: "0",
       reduceOnly: order.reduceOnly,
@@ -172,6 +178,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
           type: replacement.type,
           status: replacement.status,
           price: replacement.price,
+          maxEntryPrice: replacement.maxEntryPrice ?? null,
           originalQuantity: replacement.originalQuantity,
           executedQuantity: "0",
           reduceOnly: replacement.reduceOnly,
@@ -250,6 +257,10 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       }
       await tx.insert(livePositions).values({
         id: next.position.id,
+        signalId: next.position.signalId ?? null,
+        strategyType: next.position.strategyType ?? "SWING",
+        breakoutPrice: next.position.breakoutPrice ?? null,
+        exitPending: next.position.exitPending ?? false,
         symbol: next.position.symbol,
         side: next.position.side,
         status: next.position.status,

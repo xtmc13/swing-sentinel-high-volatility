@@ -95,6 +95,8 @@ const opportunity: Opportunity = {
   expiryTime: 9_999_999_999_999,
   triggerPrice: 100,
   limitPrice: 100,
+  breakoutPrice: 100,
+  atr15: 1,
   stateVersion: 1,
   sourceGeneration: 1,
   detectorVersion: "test",
@@ -116,18 +118,22 @@ function seedFor(input: CreateLiveIntentInput): LivePositionSeed {
   };
 }
 
-function setup() {
+function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH" } = {}) {
   const store = new InMemoryLiveOrderStore({ emergencyGeneration: 7 });
   const gateway = new AdapterGateway();
   const created: CreateLiveIntentInput[] = [];
   const claims: ClaimLiveIntentInput[] = [];
+  let finalMode: string | undefined;
   const createIntent = vi.fn<(
     input: CreateLiveIntentInput,
     options: CreateLiveIntentOptions,
-  ) => Promise<CreateLiveIntentResult>>(async (input, options) => {
+  ) => Promise<CreateLiveIntentResult>>(async (input, createOptions) => {
     expect(gateway.placed).toHaveLength(0);
     created.push(input);
-    const gate = await options.finalGate({} as never);
+    const gate = await createOptions.finalGate({} as never, {
+      mode: options.mode ?? "NORMAL",
+      highVolatilityRiskMultiplier: 0.5,
+    });
     expect(gate.approved).toBe(true);
     return { ok: true as const, id: input.id, version: 1 as const, emergencyGeneration: 7 };
   });
@@ -149,7 +155,7 @@ function setup() {
       symbol: signal.symbol,
       side: signal.side,
       quantity: "2",
-      limitPrice: "100",
+      limitPrice: options.limitPrice ?? "100",
       tickSize: "0.01",
       stopPrice: "99",
       liquidationPrice: "50",
@@ -160,17 +166,22 @@ function setup() {
       expiresAt: new Date(9_999_999_999_999),
       leaseDurationMs: 5_000,
     }),
-    finalGate: (signal): LiveFinalGateResult => ({
-      approved: true,
-      signalId: signal.signalId,
-      quantity: "2",
-      notional: "200",
-      reservedMargin: "40",
-      reservedRisk: "2",
-      validUntil: new Date(9_999_999_999_999),
-    }),
+    finalGate: (signal, _input, _tx, context): LiveFinalGateResult => {
+      void _input;
+      void _tx;
+      finalMode = context.mode;
+      return {
+        approved: true,
+        signalId: signal.signalId,
+        quantity: "2",
+        notional: "200",
+        reservedMargin: "40",
+        reservedRisk: "2",
+        validUntil: new Date(9_999_999_999_999),
+      };
+    },
   });
-  return { store, gateway, created, claims, createIntent, claimIntent, pauseAutoTrade, adapter };
+  return { store, gateway, created, claims, createIntent, claimIntent, pauseAutoTrade, adapter, finalMode: () => finalMode };
 }
 
 describe("mainnet live execution adapter", () => {
@@ -184,6 +195,13 @@ describe("mainnet live execution adapter", () => {
     expect(h.createIntent.mock.calls[0]?.[1].requireAutoTrade).toBe(true);
     expect(h.gateway.placed[0]).toMatchObject({ type: "LIMIT", timeInForce: "IOC", quantity: "2" });
     expect(await h.store.getPosition(h.created[0].id)).toBeNull();
+  });
+
+  it("passes the transactionally selected HIGH mode into the final gate", async () => {
+    const h = setup({ mode: "HIGH" });
+
+    await expect(h.adapter.open(opportunity)).resolves.toMatchObject({ ok: true });
+    expect(h.finalMode()).toBe("HIGH");
   });
 
   it("a duplicate signal rejected by persistence never reaches the transport", async () => {
@@ -283,7 +301,15 @@ describe("mainnet live execution adapter", () => {
     expect(fromIds.slice(0, 2)).toEqual([undefined, 3]);
   });
 
-  it("allows at most one IOC entry replacement, including after adapter restart", async () => {
+  it("rejects a prepared initial limit above the accepted opportunity cap", async () => {
+    const h = setup({ limitPrice: "100.01" });
+
+    await expect(h.adapter.open(opportunity)).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("限价") });
+    expect(h.createIntent).not.toHaveBeenCalled();
+    expect(h.gateway.placed).toHaveLength(0);
+  });
+
+  it("enforces the persisted price cap and at most one replacement across restart", async () => {
     const h = setup();
     await h.adapter.open(opportunity);
     const entryClientId = `${h.created[0].id}-entry`;
@@ -299,17 +325,19 @@ describe("mainnet live execution adapter", () => {
       type: "LIMIT",
     });
 
-    const replacement = await h.adapter.replaceOrder(entryClientId, "100.01");
-    await expect(h.adapter.replaceOrder(replacement.clientOrderId, "100.02"))
-      .rejects.toThrow("最多改单 1 次");
-
+    await expect(h.adapter.replaceOrder(entryClientId, "100.01")).rejects.toThrow("限价");
     const restarted = new MainnetLiveExecutionAdapter({
       ...h,
       workerId: "worker-b",
       prepareIntent: () => { throw new Error("not used by replacement cap"); },
       finalGate: () => { throw new Error("not used by replacement cap"); },
     });
-    await expect(restarted.replaceOrder(replacement.clientOrderId, "100.02"))
+    await expect(restarted.replaceOrder(entryClientId, "100.01")).rejects.toThrow("限价");
+
+    const replacement = await h.adapter.replaceOrder(entryClientId, "100");
+    await expect(h.adapter.replaceOrder(replacement.clientOrderId, "100"))
+      .rejects.toThrow("最多改单 1 次");
+    await expect(restarted.replaceOrder(replacement.clientOrderId, "100"))
       .rejects.toThrow("最多改单 1 次");
   });
 
@@ -388,6 +416,12 @@ describe("mainnet live execution adapter", () => {
       isMaker: false,
       executedAt: 10,
     }, seedFor(h.created[0]));
+    expect(await coordinator.positions()).toMatchObject([{
+      signalId: opportunity.signalId,
+      strategyType: "MOMENTUM",
+      breakoutPrice: 100,
+      exitPending: false,
+    }]);
     settings = { ...settings, autoTrade: false };
 
     await expect(coordinator.open({ ...opportunity, signalId: "signal-2" })).resolves.toMatchObject({ ok: false });

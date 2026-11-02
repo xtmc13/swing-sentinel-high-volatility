@@ -142,3 +142,43 @@ async fn candidate_sender_posts_strict_json_to_real_loopback_endpoint() {
     assert_eq!(decoded, candidate());
     server.abort();
 }
+
+#[tokio::test]
+async fn every_feature_frame_can_be_posted_to_the_loopback_frame_endpoint() {
+    use axum::{body::Bytes, http::StatusCode, routing::post, Router};
+    use tokio::sync::oneshot;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (tx, rx) = oneshot::channel();
+    let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+    let app = Router::new().route(
+        "/v1/momentum/frame",
+        post(move |body: Bytes| {
+            let tx = tx.clone();
+            async move {
+                if let Some(tx) = tx.lock().unwrap().take() {
+                    tx.send(body).unwrap();
+                }
+                StatusCode::ACCEPTED
+            }
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let sender = CandidateSender::new(
+        format!("http://{address}/v1/momentum/candidate"),
+        Duration::from_millis(500),
+    )
+    .unwrap();
+
+    sender.send_frame(candidate().frame).await.unwrap();
+    let body = tokio::time::timeout(Duration::from_millis(500), rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let decoded: FeatureFrame = serde_json::from_slice(&body).unwrap();
+    assert_eq!(decoded, candidate().frame);
+    server.abort();
+}

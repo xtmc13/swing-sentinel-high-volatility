@@ -181,6 +181,8 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
       leverageMode: "FIXED",
       fixedLeverage: 5,
       riskPerTradePct: 1,
+      mode: "NORMAL",
+      highVolatilityRiskMultiplier: 0.5,
       marginPerTradePct: 10,
       totalMarginCapPct: 20,
       takerFeeBps: 0,

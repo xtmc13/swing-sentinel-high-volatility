@@ -113,6 +113,40 @@ describe("timestamped momentum replay", () => {
     expect(result.accepted[0]).toMatchObject({ signalId: expect.stringContaining("BTCUSDT:4:2:LONG") });
   });
 
+  it("matches Rust by resetting confirmation for a fully nonqualifying GOOD frame", () => {
+    const result = replayMomentum({
+      events: [
+        { type: "feature_frame", frame: { ...frame(1, NOW - 100), depth_imbalance: 0.1 } },
+        { type: "feature_frame", frame: frame(2, NOW - 20) },
+      ],
+      context: context(),
+      settings,
+    });
+
+    expect(result.accepted).toEqual([]);
+    expect(result.rejected).toEqual([]);
+  });
+
+  it("uses the Rust ten-second flow window", () => {
+    const result = replayMomentum({
+      events: [
+        { type: "trade", eventTime: NOW - 6_000, price: 100, quantity: 3, isBuyerMaker: false },
+        {
+          type: "order_book", eventTime: NOW - 6_000, receivedTime: NOW - 5_990, sequence: 1, generation: 4,
+          markPrice: 100, bid: { price: 99.99, quantity: 3 }, ask: { price: 100.01, quantity: 1 },
+        },
+        {
+          type: "order_book", eventTime: NOW, receivedTime: NOW + 10, sequence: 2, generation: 4,
+          markPrice: 100.02, bid: { price: 100.01, quantity: 3 }, ask: { price: 100.03, quantity: 1 },
+        },
+      ],
+      context: context(),
+      settings,
+    });
+
+    expect(result.frames[1]).toMatchObject({ aggressive_buy_volume: 3, aggressive_sell_volume: 0 });
+  });
+
   it("resets confirmation after a feature-stream gap instead of accepting stale continuation", () => {
     const result = replayMomentum({
       events: [

@@ -57,6 +57,7 @@ export interface PricedEntryApprovalInput extends Omit<EntryApprovalInput, "snap
   fillPrice: number;
   snapshotQualityValid?: boolean;
   snapshotQualityReasons?: string[];
+  entrySlippageIncluded?: boolean;
 }
 
 function approvePricedEntry(input: PricedEntryApprovalInput, snapshot?: MarketSnapshot): EntryApproval {
@@ -107,6 +108,7 @@ function approvePricedEntry(input: PricedEntryApprovalInput, snapshot?: MarketSn
     usedMargin: input.usedMargin,
     takerFeeBps: settings.takerFeeBps,
     slippageBps: settings.slippageBps,
+    entrySlippageIncluded: input.entrySlippageIncluded,
     stepSize: input.symbolMeta.stepSize,
     minQty: input.symbolMeta.minQty,
     minNotional: input.symbolMeta.minNotional,
@@ -164,7 +166,7 @@ export function approveHistoricalEntry(input: PricedEntryApprovalInput): EntryAp
     || !Number.isFinite(input.fillPrice) || input.fillPrice <= 0) {
     return { ok: false, reason: "历史成交价格无效" };
   }
-  return approvePricedEntry({ ...input, settings: { ...input.settings, autoTrade: true } });
+  return approvePricedEntry({ ...input, entrySlippageIncluded: true, settings: { ...input.settings, autoTrade: true } });
 }
 
 export function approveAndPriceEntry(input: EntryApprovalInput): EntryApproval {

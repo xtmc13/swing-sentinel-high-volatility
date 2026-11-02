@@ -14,6 +14,8 @@ export interface SizePositionInput {
   usedMargin: number;
   takerFeeBps: number;
   slippageBps: number;
+  // True when the supplied entryPrice already includes modeled adverse entry slippage (historical fills).
+  entrySlippageIncluded?: boolean;
   stepSize: number;
   minQty: number;
   minNotional: number;
@@ -56,8 +58,10 @@ export function sizePosition(input: SizePositionInput): PositionSize {
 
   const multiplier = input.mode === "HIGH" ? input.highVolatilityRiskMultiplier : 1;
   const riskBudget = input.equity * input.riskPerTradePct / 100 * multiplier;
-  const twoSidedCostPerUnit = (input.entryPrice + input.stopPrice)
-    * (input.takerFeeBps + input.slippageBps) / 10_000;
+  // Fees apply on both sides. Historical fill prices already include entry slippage;
+  // live ask/bid quotes do not, so reserve entry slippage only for live-priced entries.
+  const twoSidedCostPerUnit = (input.entryPrice + input.stopPrice) * input.takerFeeBps / 10_000
+    + (input.stopPrice + (input.entrySlippageIncluded ? 0 : input.entryPrice)) * input.slippageBps / 10_000;
   const riskPerUnit = stopDistance + twoSidedCostPerUnit;
   const qtyByRisk = riskBudget / riskPerUnit;
   const qtyByMargin = input.equity * input.marginPerTradePct / 100 * input.leverage / input.entryPrice;
@@ -165,8 +169,10 @@ export function portfolioRisk(input: PortfolioRiskInput): PortfolioRiskResult {
     }
     const correlatedPositions = input.positions.filter((position, index) => {
       const value = correlations[index];
+      // Only strong positive correlation concentrates same-direction exposure;
+      // strong negative correlation is a hedge relationship, not a concentration signal.
       return position.side === input.candidate!.side && value !== null && value !== undefined
-        && Math.abs(value) >= input.correlationThreshold;
+        && value >= input.correlationThreshold;
     });
     if (correlatedPositions.length > 0) {
       correlatedRisk = candidateRisk + correlatedPositions.reduce((sum, position) => {

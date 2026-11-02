@@ -558,7 +558,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
     if (!dailyBaseline) return;
     const dailyLocked = dailyBaseline.dailyLocked;
     for (const row of rows) {
-      const snapshot = snapshots.get(row.symbol);
+      const snapshot = managementSnapshots.get(row.symbol);
       if (!snapshot?.quality.valid) continue;
       const state = (await db.select().from(volatilityStates).where(eq(volatilityStates.symbol, row.symbol)).limit(1))[0];
       const mode: VolatilityMode = state?.mode === "HIGH" || state?.mode === "EXTREME" ? state.mode : "NORMAL";

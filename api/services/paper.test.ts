@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, type Opportunity, type TradingSettings, type VolatilityState } from "@contracts/trading";
 import { applyAdverseSlippage, approveAndPriceEntry, type EntryApprovalInput } from "./execution";
 import { assertAffectedRows } from "../queries/trading";
-import { toPositionView, type PositionRow } from "./paper";
+import { sameOpenPositionSet, toPositionView, type PositionRow } from "./paper";
 import type { MarketSnapshot } from "./binance";
 
 const NOW = 1_800_000_000_000;
@@ -81,6 +81,15 @@ function input(overrides: Partial<EntryApprovalInput> = {}): EntryApprovalInput 
     ...overrides,
   };
 }
+
+describe("账户快照持仓一致性", () => {
+  it("行情估值前后持仓ID集合变化时必须判定快照不一致", () => {
+    expect(sameOpenPositionSet([{ id: "A" }, { id: "B" }], [{ id: "B" }, { id: "A" }])).toBe(true);
+    expect(sameOpenPositionSet([{ id: "A" }], [])).toBe(false);
+    expect(sameOpenPositionSet([{ id: "A" }], [{ id: "B" }])).toBe(false);
+    expect(sameOpenPositionSet([{ id: "A" }, { id: "A" }], [{ id: "A" }, { id: "A" }])).toBe(false);
+  });
+});
 
 describe("实时与回测共用不利滑点方向", () => {
   it("开平仓均让成交价向不利于持仓方向移动", () => {

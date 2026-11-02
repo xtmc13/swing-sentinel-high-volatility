@@ -726,6 +726,7 @@ export async function runPortfolioBacktest(
     transitions,
     dailyLossLocks,
     dataGaps: [],
+    momentumExhaustion,
   };
   if (dependencies.persist !== false) await persistBacktestResult(result);
   return result;

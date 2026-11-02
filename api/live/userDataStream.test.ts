@@ -336,6 +336,44 @@ describe("private user-data lifecycle", () => {
     expect((await h.orders.getOrder("client-1"))?.executedQuantity).toBe("0");
   });
 
+  it("invalidates admission ownership when stop abandons an in-flight reconciliation", async () => {
+    const admission = new LiveEntryAdmission(true);
+    let release!: () => void;
+    let markStarted!: () => void;
+    const accountGate = new Promise<void>((resolve) => { release = resolve; });
+    const accountStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+    const h = harness({
+      withOrder: false,
+      pause: () => admission.suspend(),
+      reconcile: () => service.reconcile(),
+    });
+    const service = new ReconciliationService({
+      client: {
+        account: async () => {
+          markStarted();
+          await accountGate;
+          return { assets: [] };
+        },
+        positionRisk: async () => [],
+        openOrders: async () => [],
+      },
+      orders: h.orders,
+      store: h.store,
+      recovery: { recover: async () => { throw new Error("unexpected"); } },
+      accounting: { synchronize: async () => undefined },
+      pauseNewEntries: () => admission.pauseForReconciliation(),
+    });
+    running.push(h.stream);
+    const starting = h.stream.start();
+    await accountStarted;
+
+    await h.stream.stop();
+    release();
+    await starting;
+
+    expect(admission.allowed).toBe(false);
+  });
+
   it("installs exactly one keepalive when the start generation changes during reconciliation", async () => {
     vi.useFakeTimers();
     let attempts = 0;

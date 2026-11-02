@@ -219,7 +219,15 @@ export class LiveEntryAdmission {
   }
 
   async suspend(): Promise<void> {
-    if (!this.operatorPaused && this.allowedState && !this.resumeOwner) this.retryResume = true;
+    if (this.operatorPaused) {
+      this.allowedState = false;
+      return;
+    }
+    if (this.allowedState || this.resumeOwner) this.retryResume = true;
+    if (this.resumeOwner) {
+      this.resumeOwner = null;
+      this.generation += 1;
+    }
     this.allowedState = false;
   }
 

@@ -271,6 +271,19 @@ describe("entry admission resume ownership", () => {
     expect(gate.allowed).toBe(true);
   });
 
+  it("invalidates abandoned A so current B owns admission and failed B stays paused", async () => {
+    const gate = new LiveEntryAdmission(true);
+    const attemptA = await gate.pauseForReconciliation();
+
+    await gate.suspend();
+    const attemptB = await gate.pauseForReconciliation();
+
+    expect(attemptB).not.toBeNull();
+    expect(await attemptA?.resume()).toBe(false);
+    await attemptB?.discard();
+    expect(gate.allowed).toBe(false);
+  });
+
   it("invalidates a stale resume token when an operator pauses during REST", async () => {
     const gate = new LiveEntryAdmission(true);
     const token = await gate.pauseForReconciliation();

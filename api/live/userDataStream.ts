@@ -128,6 +128,7 @@ export class UserDataStream {
 
   async stop(): Promise<void> {
     this.running = false;
+    await this.options.pauseNewEntries();
     this.generation += 1;
     this.reconnecting = null;
     if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);

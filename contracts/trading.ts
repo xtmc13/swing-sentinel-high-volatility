@@ -126,6 +126,7 @@ export interface Opportunity {
   stateVersion: number;
   sourceGeneration: number;
   atr15?: number;
+  momentumExhaustion?: { score: number; resonanceCount: number; resonant: boolean; protection: string; structureBreak: boolean };
   createdAt: string;
 }
 
@@ -318,7 +319,17 @@ export interface SignalEvaluation {
   maeR: number | null;
 }
 
-export interface MomentumExhaustionEvent {\n  time: number;\n  symbol: string;\n  side: Side;\n  score: number;\n  resonanceCount: number;\n  protection: string;\n  structureBreak: boolean;\n}\n\nexport interface PortfolioBacktestResult extends BacktestResult {
+export interface MomentumExhaustionEvent {
+  time: number;
+  symbol: string;
+  side: Side;
+  score: number;
+  resonanceCount: number;
+  protection: string;
+  structureBreak: boolean;
+}
+
+export interface PortfolioBacktestResult extends BacktestResult {
   symbol: "PORTFOLIO";
   signals: SignalEvaluation[];
   symbols: string[];

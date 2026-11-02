@@ -201,7 +201,7 @@ export interface PaperServiceDependencies {
   beforeVolatilityStateLock?: (symbol: string) => Promise<void>;
 }
 
-function revalidateSnapshot(snapshot: MarketSnapshot, settings: TradingSettings, now: number) {
+export function revalidateSnapshot(snapshot: MarketSnapshot, settings: TradingSettings, now: number) {
   const current = createMarketSnapshot({
     source: snapshot.source,
     symbol: snapshot.symbol,
@@ -241,7 +241,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
 
   const fundingCheckedAt = new Map<string, number>();
 
-  async function settlePositionFunding(row: PositionRow, snapshot: MarketSnapshot) {
+  async function settlePositionFunding(row: PositionRow, snapshot: MarketSnapshot, settings: TradingSettings) {
     if (!market.getFundingRates || !snapshot.quality.valid) return;
     const lastCheck = fundingCheckedAt.get(row.id) ?? 0;
     if (now() - lastCheck < 60_000) return;
@@ -259,8 +259,13 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
           eq(fundingSettlements.fundingTime, event.fundingTime),
         )).limit(1);
         if (existing.length) return false;
+        // Funding history is fetched asynchronously. Revalidate the original quote only
+        // after acquiring the account lock so a slow API call or lock wait cannot apply
+        // funding using a stale mark price.
+        const currentSnapshot = revalidateSnapshot(snapshot, settings, now());
+        if (!currentSnapshot.quality.valid) return false;
         const direction = current.side === "LONG" ? 1 : -1;
-        const notional = current.qty * snapshot.markPrice;
+        const notional = current.qty * currentSnapshot.markPrice;
         const amount = -direction * notional * event.fundingRate;
         if (!Number.isFinite(notional) || !Number.isFinite(amount)) throw new Error(`${row.symbol} 资金费结算金额无效`);
         await tx.insert(fundingSettlements).values({ id: crypto.randomUUID(), positionId: current.id, symbol: current.symbol, fundingTime: event.fundingTime, rate: event.fundingRate, notional, amount });
@@ -518,14 +523,20 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       const snapshot = snapshots.get(row.symbol);
       if (!snapshot?.quality.valid) continue;
       try {
-        await settlePositionFunding(row, snapshot);
+        await settlePositionFunding(row, snapshot, settings);
       } catch (error) {
         log.error("funding settlement failed", { symbol: row.symbol, error: String(error) });
       }
     }
-    const valuationValid = rows.every((row) => snapshots.get(row.symbol)?.quality.valid);
+    // Funding lookups above may take time. Recompute quote freshness immediately before
+    // account valuation and stop/target decisions; never trust quality from fetch time.
+    const managementSnapshots = new Map([...snapshots].map(([symbol, snapshot]) => [
+      symbol,
+      revalidateSnapshot(snapshot, settings, now()),
+    ] as const));
+    const valuationValid = rows.every((row) => managementSnapshots.get(row.symbol)?.quality.valid);
     const unrealizedPnl = valuationValid ? rows.reduce((sum, row) => {
-      const snapshot = snapshots.get(row.symbol)!;
+      const snapshot = managementSnapshots.get(row.symbol)!;
       return sum + (snapshot.markPrice - row.entryPrice) * row.qty * (row.side === "LONG" ? 1 : -1);
     }, 0) : Number.NaN;
     const dailyBaseline = await db.transaction(async (tx) => {

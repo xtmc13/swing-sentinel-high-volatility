@@ -140,11 +140,50 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
         status: patch.status ?? current.status,
         exchangeOrderId: patch.exchangeOrderId === undefined ? current.exchangeOrderId : patch.exchangeOrderId,
       }).where(eq(liveOrders.id, current.id));
-      if (patch.status) {
+      if (patch.status && !current.reduceOnly) {
         await tx.update(liveIntents).set({ status: patch.status }).where(eq(liveIntents.id, current.intentId));
       }
       return readOrder(tx, clientOrderId);
     });
+  }
+
+  async createReplacement(
+    parentClientOrderId: string,
+    expectedExecutedQuantity: string,
+    replacement: LiveOrder,
+    expectedPositionQuantity?: string,
+  ): Promise<LiveOrder | null> {
+    try {
+      return await this.db.transaction(async (tx) => {
+        const parent = await readOrder(tx, parentClientOrderId, true);
+        if (!parent || parent.status !== "CANCEL"
+          || compareDecimals(parent.executedQuantity, expectedExecutedQuantity) !== 0) return null;
+        if (expectedPositionQuantity !== undefined) {
+          const position = await readPosition(tx, parent.intentId, true);
+          if (!position || compareDecimals(position.quantity, expectedPositionQuantity) !== 0) return null;
+        }
+        await tx.insert(liveOrders).values({
+          id: replacement.id,
+          intentId: replacement.intentId,
+          clientOrderId: replacement.clientOrderId,
+          exchangeOrderId: replacement.exchangeOrderId,
+          symbol: replacement.symbol,
+          side: replacement.side,
+          type: replacement.type,
+          status: replacement.status,
+          price: replacement.price,
+          originalQuantity: replacement.originalQuantity,
+          executedQuantity: "0",
+          reduceOnly: replacement.reduceOnly,
+          createdAt: new Date(replacement.createdAt),
+        });
+        return replacement;
+      });
+    } catch (error) {
+      const existing = await this.getOrder(replacement.clientOrderId);
+      if (existing) return existing;
+      throw error;
+    }
   }
 
   async applyFill(orderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication> {
@@ -184,7 +223,9 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
         exchangeOrderId: next.order.exchangeOrderId,
         executedQuantity: next.order.executedQuantity,
       }).where(eq(liveOrders.id, orderId));
-      await tx.update(liveIntents).set({ status: next.order.status }).where(eq(liveIntents.id, next.order.intentId));
+      if (!next.order.reduceOnly) {
+        await tx.update(liveIntents).set({ status: next.order.status }).where(eq(liveIntents.id, next.order.intentId));
+      }
       await tx.insert(livePositions).values({
         id: next.position.id,
         symbol: next.position.symbol,

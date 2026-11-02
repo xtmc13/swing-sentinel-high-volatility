@@ -69,6 +69,7 @@ export const tradingSettings = mysqlTable("trading_settings", {
 export const liveControls = mysqlTable("live_controls", {
   id: int("id").primaryKey().default(1),
   armed: boolean("armed").notNull().default(false),
+  emergencyGeneration: int("emergency_generation").notNull().default(0),
   updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
 });
 

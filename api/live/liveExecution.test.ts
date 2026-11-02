@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS, type Opportunity, type TradingSettings } from "@contracts/trading";
+import { liveControls, tradingSettings } from "@db/schema";
 import type {
   BinanceAccountResponse,
   BinanceOpenOrder,
@@ -126,12 +127,13 @@ function setup() {
     created.push(input);
     const gate = await options.finalGate({} as never);
     expect(gate.approved).toBe(true);
-    return { ok: true as const, id: input.id, version: 1 as const };
+    return { ok: true as const, id: input.id, version: 1 as const, emergencyGeneration: 7 };
   });
   const claimIntent = vi.fn(async (input: ClaimLiveIntentInput) => {
     claims.push(input);
     return { ok: true as const, version: input.expectedVersion + 1 };
   });
+  const assertSubmission = vi.fn(async () => undefined);
   const pauseAutoTrade = vi.fn(async () => undefined);
   const adapter = new MainnetLiveExecutionAdapter({
     store,
@@ -139,6 +141,7 @@ function setup() {
     workerId: "worker-a",
     createIntent,
     claimIntent,
+    assertSubmission,
     pauseAutoTrade,
     prepareIntent: (signal) => ({
       signalId: signal.signalId,
@@ -166,7 +169,7 @@ function setup() {
       validUntil: new Date(9_999_999_999_999),
     }),
   });
-  return { store, gateway, created, claims, createIntent, claimIntent, pauseAutoTrade, adapter };
+  return { store, gateway, created, claims, createIntent, claimIntent, assertSubmission, pauseAutoTrade, adapter };
 }
 
 describe("mainnet live execution adapter", () => {
@@ -177,6 +180,8 @@ describe("mainnet live execution adapter", () => {
     expect(result).toMatchObject({ ok: true, positionId: h.created[0].id });
     expect(h.created).toHaveLength(1);
     expect(h.claims).toHaveLength(1);
+    expect(h.createIntent.mock.calls[0]?.[1].requireAutoTrade).toBe(true);
+    expect(h.assertSubmission).toHaveBeenCalledWith(h.created[0].id, 7);
     expect(h.gateway.placed[0]).toMatchObject({ type: "LIMIT", timeInForce: "IOC", quantity: "2" });
     expect(await h.store.getPosition(h.created[0].id)).toBeNull();
   });
@@ -188,6 +193,47 @@ describe("mainnet live execution adapter", () => {
     await expect(h.adapter.open(opportunity)).resolves.toMatchObject({ ok: false });
     expect(h.claimIntent).not.toHaveBeenCalled();
     expect(h.gateway.placed).toHaveLength(0);
+  });
+
+  it("a changed emergency generation prevents transport", async () => {
+    const h = setup();
+    h.assertSubmission.mockRejectedValueOnce(new Error("emergency generation changed"));
+
+    await expect(h.adapter.open(opportunity)).rejects.toThrow("generation changed");
+    expect(h.gateway.placed).toHaveLength(0);
+  });
+
+  it("emergency serializes behind an in-flight open and then cancels its order", async () => {
+    const h = setup();
+    let release!: (order: BinanceOpenOrder) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    h.gateway.placeOrder = (request) => {
+      h.gateway.placed.push(request);
+      markStarted();
+      return new Promise<BinanceOpenOrder>((resolve) => { release = resolve; });
+    };
+    const opening = h.adapter.open(opportunity);
+    await started;
+    const emergency = h.adapter.emergency();
+    await Promise.resolve();
+    expect(h.pauseAutoTrade).not.toHaveBeenCalled();
+
+    release({
+      symbol: "BTCUSDT",
+      orderId: 500,
+      clientOrderId: `${h.created[0].id}-entry`,
+      price: "100",
+      origQty: "2",
+      executedQty: "0",
+      status: "NEW",
+      side: "BUY",
+      type: "LIMIT",
+    });
+    await opening;
+    await emergency;
+    expect(h.pauseAutoTrade).toHaveBeenCalledTimes(1);
+    expect(h.gateway.cancelled).toHaveLength(1);
   });
 
   it("autoTrade=false blocks only new opens; coordinator still permits live reduce-only close", async () => {
@@ -233,14 +279,24 @@ describe("mainnet live execution adapter", () => {
     await expect(h.adapter.resetPaperSimulation()).rejects.toThrow("禁止 paper reset");
   });
 
-  it("production factory emergency pauses autoTrade through the live database by default", async () => {
-    const updates: { autoTrade?: boolean }[] = [];
-    const db = {
-      update: () => ({
-        set: (values: { autoTrade?: boolean }) => ({
-          where: async () => { updates.push(values); },
+  it("production factory emergency pauses autoTrade and increments generation through the live database", async () => {
+    const updates: { table: unknown; values: { autoTrade?: boolean } }[] = [];
+    const tx = {
+      select: () => ({
+        from: (table: unknown) => ({
+          where: () => ({
+            for: async () => table === tradingSettings ? [{ id: 1 }] : table === liveControls ? [{ generation: 0 }] : [],
+          }),
         }),
       }),
+      update: (table: unknown) => ({
+        set: (values: { autoTrade?: boolean }) => ({
+          where: async () => { updates.push({ table, values }); },
+        }),
+      }),
+    };
+    const db = {
+      transaction: async (operation: (transaction: unknown) => Promise<void>) => operation(tx),
     } as unknown as LiveDatabase;
     const adapter = createMainnetLiveExecutionAdapter({
       db,
@@ -252,6 +308,7 @@ describe("mainnet live execution adapter", () => {
     });
 
     await adapter.emergency();
-    expect(updates).toEqual([{ autoTrade: false }]);
+    expect(updates.find((update) => update.table === tradingSettings)?.values).toEqual({ autoTrade: false });
+    expect(updates.some((update) => update.table === liveControls)).toBe(true);
   });
 });

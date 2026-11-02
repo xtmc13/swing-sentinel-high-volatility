@@ -158,7 +158,7 @@ describe("fill-driven live order state machine", () => {
       averagePrice: "100.666666666666666666666666666667",
       commission: "0.6",
     });
-    expect(await store.getPosition(seed.id)).toMatchObject({ quantity: "3", initialQuantity: "3" });
+    expect(await store.getPosition(seed.id)).toMatchObject({ quantity: "3", initialQuantity: "3", openedAt: 2 });
 
     const transportCalls = gateway.placed.length;
     const duplicate = await machine.handleFill("entry-1", fill({ quantity: "2", commission: "0.4" }), seed);
@@ -235,6 +235,89 @@ describe("fill-driven live order state machine", () => {
     expect((await store.getOrder("entry-1"))?.status).toBe("CANCEL");
   });
 
+  it("duplicate workers create and submit only one replacement for a parent", async () => {
+    const { store, gateway, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    await machine.handleFill("entry-1", fill(), seed);
+    const other = new OrderStateMachine(store, gateway);
+
+    await Promise.all([
+      machine.replaceOrder("entry-1", "101"),
+      other.replaceOrder("entry-1", "101"),
+    ]);
+    const replacements = (await store.listOrders()).filter((order) => order.type === "LIMIT"
+      && order.clientOrderId !== "entry-1" && order.status === "NEW");
+    expect(replacements).toHaveLength(1);
+    expect(gateway.placed.filter((order) => order.type === "LIMIT")).toHaveLength(2);
+  });
+
+  it("replacement reconciles delayed remote fills before calculating the remainder", async () => {
+    const { store, gateway, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    await machine.handleFill("entry-1", fill({ exchangeTradeId: "1" }), seed);
+    gateway.trades.push(
+      {
+        symbol: seed.symbol, id: 1, orderId: 100, side: "BUY", price: "100", qty: "1",
+        realizedPnl: "0", commission: "0.1", commissionAsset: "USDT", time: 2, buyer: true, maker: false,
+      },
+      {
+        symbol: seed.symbol, id: 2, orderId: 100, side: "BUY", price: "100", qty: "1",
+        realizedPnl: "0", commission: "0.1", commissionAsset: "USDT", time: 3, buyer: true, maker: false,
+      },
+    );
+
+    const replacement = await machine.replaceOrder("entry-1", "101");
+    expect(gateway.queries).toContain("entry-1");
+    expect((await store.getOrder("entry-1"))?.executedQuantity).toBe("2");
+    expect(gateway.placed.filter((order) => order.type === "LIMIT").at(-1))
+      .toMatchObject({ newClientOrderId: replacement.clientOrderId, quantity: "1" });
+  });
+
+  it("rejects late fills after CANCEL instead of changing a completed replacement basis", async () => {
+    const { store, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    await machine.handleFill("entry-1", fill(), seed);
+    await machine.replaceOrder("entry-1", "101");
+
+    await expect(machine.handleFill("entry-1", fill({ exchangeTradeId: "late-trade" }), seed))
+      .rejects.toThrow("CANCEL");
+    expect((await store.getOrder("entry-1"))?.executedQuantity).toBe("1");
+    expect((await store.getPosition(seed.id))?.quantity).toBe("1");
+  });
+
+  it("rejects replacement from UNKNOWN until explicit reconciliation", async () => {
+    const { store, gateway, machine } = setup();
+    entry(store);
+    gateway.failNextEntryAfterAccept = true;
+    await machine.submit("entry-1");
+
+    await expect(machine.replaceOrder("entry-1", "101")).rejects.toThrow("UNKNOWN");
+    expect(gateway.cancelled).toHaveLength(0);
+    expect(gateway.placed).toHaveLength(1);
+  });
+
+  it("maps terminal IOC acknowledgements to CANCEL rather than NEW", async () => {
+    const { store, gateway, machine } = setup();
+    entry(store);
+    gateway.placeOrder = async (request) => ({
+      symbol: request.symbol,
+      orderId: 100,
+      clientOrderId: "entry-1",
+      price: "100",
+      origQty: "3",
+      executedQty: "0",
+      status: "EXPIRED",
+      side: "BUY",
+      type: "LIMIT",
+    });
+
+    expect((await machine.submit("entry-1")).status).toBe("CANCEL");
+    expect(await store.getPosition(seed.id)).toBeNull();
+  });
+
   it("crash recovery reconciles UNKNOWN from query plus user trades without duplicate fills", async () => {
     const { store, gateway, machine } = setup();
     entry(store);
@@ -266,6 +349,95 @@ describe("fill-driven live order state machine", () => {
     expect((await store.getPosition(seed.id))?.quantity).toBe("1");
   });
 
+  it("validates fill symbol, exchange order, side, and intent ownership before persistence", async () => {
+    const { store, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+
+    for (const candidate of [
+      { event: fill({ symbol: "ETHUSDT" }), owner: seed },
+      { event: fill({ exchangeOrderId: "999" }), owner: seed },
+      { event: fill({ side: "SELL" as const }), owner: seed },
+      { event: fill(), owner: { ...seed, id: "other-intent" } },
+    ]) {
+      await expect(machine.handleFill("entry-1", candidate.event, candidate.owner)).rejects.toThrow();
+    }
+    expect((await store.getOrder("entry-1"))?.executedQuantity).toBe("0");
+    expect(await store.getPosition(seed.id)).toBeNull();
+  });
+
+  it("concurrent fills cannot shrink protection or trigger a duplicate-protection exit", async () => {
+    const { store, gateway, alerts, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    await machine.handleFill("entry-1", fill({ exchangeTradeId: "first" }), seed);
+    const cancel = gateway.cancelOrder.bind(gateway);
+    let release!: () => void;
+    let markStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let paused = false;
+    gateway.cancelOrder = async (request) => {
+      const order = await store.getOrder(request.origClientOrderId ?? "");
+      if (!paused && order?.type === "STOP_MARKET") {
+        paused = true;
+        markStarted();
+        await gate;
+      }
+      return cancel(request);
+    };
+
+    const second = machine.handleFill("entry-1", fill({ exchangeTradeId: "second" }), seed);
+    await started;
+    const third = machine.handleFill("entry-1", fill({ exchangeTradeId: "third" }), seed);
+    release();
+    await Promise.all([second, third]);
+
+    const protections = (await store.listOrders()).filter((order) => order.type === "STOP_MARKET" && order.status === "NEW");
+    expect(protections.at(-1)?.originalQuantity).toBe("3");
+    expect(alerts).toHaveLength(0);
+    expect(gateway.placed.filter((order) => order.type === "MARKET")).toHaveLength(0);
+  });
+
+  it("two workers creating the first deterministic protection do not exit on client ID collision", async () => {
+    const { store, gateway, alerts, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    const first = new OrderStateMachine(store, gateway, { alert: (message) => alerts.push(message) });
+    const second = new OrderStateMachine(store, gateway, { alert: (message) => alerts.push(message) });
+
+    await Promise.all([
+      first.handleFill("entry-1", fill({ exchangeTradeId: "worker-a" }), seed),
+      second.handleFill("entry-1", fill({ exchangeTradeId: "worker-b" }), seed),
+    ]);
+
+    const protections = (await store.listOrders()).filter((order) => order.type === "STOP_MARKET" && order.status === "NEW");
+    expect(protections.at(-1)?.originalQuantity).toBe("2");
+    expect(alerts).toHaveLength(0);
+    expect(gateway.placed.filter((order) => order.type === "MARKET")).toHaveLength(0);
+  });
+
+  it("a pending deterministic protection is submitted rather than replaced or treated as failed", async () => {
+    const { store, gateway, alerts, machine } = setup();
+    const parent = entry(store);
+    await machine.submit("entry-1");
+    store.addOrder({
+      ...parent,
+      id: "protection-row",
+      clientOrderId: `protect-${seed.id}`,
+      type: "STOP_MARKET",
+      price: "99",
+      stopPrice: "99",
+      originalQuantity: "1",
+      reduceOnly: true,
+    });
+
+    await machine.handleFill("entry-1", fill(), seed);
+    expect((await store.getOrder(`protect-${seed.id}`))?.status).toBe("NEW");
+    expect(alerts).toHaveLength(0);
+    expect(gateway.placed.filter((order) => order.type === "MARKET")).toHaveLength(0);
+  });
+
   it("protection failure alerts and attempts a reduce-only market exit", async () => {
     const { store, gateway, alerts, machine } = setup();
     entry(store);
@@ -290,6 +462,17 @@ describe("fill-driven live order state machine", () => {
 
     await Promise.all([first.submit("entry-1"), second.submit("entry-1")]);
     expect(gateway.placed).toHaveLength(1);
+  });
+
+  it("failed emergency cancels remain unresolved even without a position", async () => {
+    const { store, gateway, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    gateway.failCancel = true;
+
+    const emergency = await machine.emergency();
+    expect(emergency.unsettled).toHaveLength(1);
+    expect(emergency.unsettled[0]).toMatchObject({ positionId: seed.id, symbol: seed.symbol });
   });
 
   it("emergency cancels system orders and reports reduce-only exits unresolved until fills arrive", async () => {

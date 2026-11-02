@@ -105,21 +105,47 @@ describeDatabase("Task 4 dedicated durable order store", () => {
 
     await store.applyFill(order.id, fill({ price: "102" }), seed);
     await store.applyFill(order.id, fill({
-      exchangeTradeId: "task4-trade-2", quantity: "2", commission: "0.4", executedAt: 1_793_600_000_200,
+      exchangeTradeId: "task4-trade-2", quantity: "2", commission: "0.4", executedAt: 1_793_600_000_050,
     }), seed);
     await store.applyFill(order.id, fill({
-      exchangeTradeId: "task4-trade-2", quantity: "2", commission: "0.4", executedAt: 1_793_600_000_200,
+      exchangeTradeId: "task4-trade-2", quantity: "2", commission: "0.4", executedAt: 1_793_600_000_050,
     }), seed);
 
     const restarted = new DrizzleLiveOrderStore(db);
     expect(await restarted.getOrder(order.clientOrderId)).toMatchObject({
       status: "FILLED",
       executedQuantity: "3",
-      averagePrice: "101.333333333333333333333333333333",
+      averagePrice: "100.666666666666666666666666666667",
       commission: "0.5",
     });
-    expect(await restarted.getPosition(seed.id)).toMatchObject({ quantity: "3", initialQuantity: "3" });
+    expect(await restarted.getPosition(seed.id)).toMatchObject({
+      quantity: "3",
+      initialQuantity: "3",
+      openedAt: 1_793_600_000_050,
+    });
     expect((await db.select().from(schema.liveFills))).toHaveLength(2);
+    expect((await db.select().from(schema.liveIntents))[0]?.status).toBe("FILLED");
+
+    const protection: LiveOrder = {
+      ...order,
+      id: "task4-protection-row",
+      clientOrderId: "task4-protection",
+      exchangeOrderId: "901",
+      type: "STOP_MARKET",
+      status: "PENDING_SEND",
+      price: "99",
+      stopPrice: "99",
+      executedQuantity: "0",
+      reduceOnly: true,
+    };
+    await restarted.insertOrder(protection);
+    await restarted.transitionOrder(protection.clientOrderId, ["PENDING_SEND"], { status: "SUBMITTING" });
+    await restarted.applyFill(protection.id, fill({
+      exchangeTradeId: "task4-close-trade",
+      exchangeOrderId: "901",
+      side: "SELL",
+      quantity: "3",
+    }), seed);
     expect((await db.select().from(schema.liveIntents))[0]?.status).toBe("FILLED");
   });
 

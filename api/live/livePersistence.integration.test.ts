@@ -9,9 +9,11 @@ import { calculateLivePositionRisk } from "./liveRisk";
 import { decimal } from "./decimal";
 import { getOutstandingOrderCounts } from "../queries/trading";
 import {
+  assertLiveSubmission,
   claimLiveIntent,
   createLiveIntent,
   getLiveIntentReservations,
+  pauseLiveExecution,
   type CreateLiveIntentInput,
   type LiveDatabase,
 } from "./livePersistence";
@@ -534,5 +536,26 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
     await firstDb.insert(schema.liveLedgerEntries).values({ id: crypto.randomUUID(), ...ledger });
     await expect(firstDb.insert(schema.liveLedgerEntries).values({ id: crypto.randomUUID(), ...ledger }))
       .rejects.toMatchObject({ cause: { code: "ER_DUP_ENTRY" } });
+  });
+
+  it("open generation 在提交前复核，emergency 递增世代并取消未提交意图", async () => {
+    if (!db) throw new Error("database required");
+    await db.insert(schema.liveControls).values({ id: 1, emergencyGeneration: 0 })
+      .onDuplicateKeyUpdate({ set: { emergencyGeneration: 0 } });
+    await db.update(schema.tradingSettings).set({ autoTrade: true }).where(eq(schema.tradingSettings.id, 1));
+    const input = intentInput(crypto.randomUUID(), "emergency-generation");
+    const created = await createLiveIntent(independentDb(), input, {
+      requireAutoTrade: true,
+      finalGate: finalGateFor(input),
+    });
+    expect(created).toMatchObject({ ok: true, emergencyGeneration: 0 });
+    await assertLiveSubmission(independentDb(), { intentId: input.id, expectedGeneration: 0 });
+
+    await pauseLiveExecution(independentDb());
+    await expect(assertLiveSubmission(independentDb(), { intentId: input.id, expectedGeneration: 0 }))
+      .rejects.toThrow("emergency or pause");
+    expect((await db.select().from(schema.liveControls))[0]?.emergencyGeneration).toBe(1);
+    expect((await db.select().from(schema.liveIntents))[0]?.status).toBe("CANCEL");
+    expect((await db.select().from(schema.tradingSettings))[0]?.autoTrade).toBe(false);
   });
 });

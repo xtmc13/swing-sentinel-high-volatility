@@ -1,11 +1,11 @@
-import { eq } from "drizzle-orm";
 import type { AccountSnapshot, Opportunity, PositionView } from "@contracts/trading";
-import { tradingSettings } from "@db/schema";
 import type { BinanceAccountResponse, LiveOrderGateway } from "./binanceSigned";
 import { divideDecimals, multiplyDecimals, subtractDecimals, type DecimalString } from "./decimal";
 import {
+  assertLiveSubmission,
   claimLiveIntent,
   createLiveIntent,
+  pauseLiveExecution,
   type ClaimLiveIntentInput,
   type ClaimLiveIntentResult,
   type CreateLiveIntentInput,
@@ -43,16 +43,31 @@ export interface MainnetLiveExecutionDependencies {
     options: CreateLiveIntentOptions,
   ) => Promise<CreateLiveIntentResult>;
   claimIntent: (input: ClaimLiveIntentInput) => Promise<ClaimLiveIntentResult>;
+  assertSubmission: (intentId: string, expectedGeneration: number) => Promise<void>;
   prepareIntent: PrepareLiveIntent;
   finalGate: (
     opportunity: Opportunity,
     input: CreateLiveIntentInput,
     tx: LiveTransaction,
   ) => LiveFinalGateResult | Promise<LiveFinalGateResult>;
-  pauseAutoTrade?: () => Promise<void>;
+  pauseAutoTrade: () => Promise<void>;
   alert?: (message: string) => unknown;
   now?: () => number;
   id?: () => string;
+}
+
+let executionTail: Promise<void> = Promise.resolve();
+
+async function serializeOpenAndEmergency<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = executionTail;
+  let release!: () => void;
+  executionTail = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
 }
 
 export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
@@ -70,6 +85,10 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   }
 
   async open(opportunity: Opportunity, executionHealthy?: () => boolean): Promise<OpenExecutionResult> {
+    return serializeOpenAndEmergency(() => this.openWhenSerialized(opportunity, executionHealthy));
+  }
+
+  private async openWhenSerialized(opportunity: Opportunity, executionHealthy?: () => boolean): Promise<OpenExecutionResult> {
     if (executionHealthy && !executionHealthy()) return { ok: false, reason: "实时执行健康检查未通过" };
     const input: CreateLiveIntentInput = {
       ...this.dependencies.prepareIntent(opportunity),
@@ -78,6 +97,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     };
     const approvals: Extract<LiveFinalGateResult, { approved: true }>[] = [];
     const created = await this.dependencies.createIntent(input, {
+      requireAutoTrade: true,
       finalGate: async (tx) => {
         const approval = await this.dependencies.finalGate(opportunity, input, tx);
         if (approval.approved) approvals.push(approval);
@@ -114,6 +134,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       reduceOnly: false,
       createdAt: this.now(),
     });
+    await this.dependencies.assertSubmission(input.id, created.emergencyGeneration);
     const submitted = await this.machine.submit(clientOrderId);
     if (submitted.status === "UNKNOWN") {
       return { ok: false, reason: "订单提交结果 UNKNOWN；必须先对账，禁止盲目重试" };
@@ -149,9 +170,11 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   }
 
   async emergency(): Promise<EmergencyExecutionResult> {
-    await this.dependencies.pauseAutoTrade?.();
-    const result = await this.machine.emergency();
-    return { ok: result.unsettled.length === 0, paused: true, settled: [], unsettled: result.unsettled };
+    return serializeOpenAndEmergency(async () => {
+      await this.dependencies.pauseAutoTrade();
+      const result = await this.machine.emergency();
+      return { ok: result.unsettled.length === 0, paused: true, settled: [], unsettled: result.unsettled };
+    });
   }
 
   async account(): Promise<AccountSnapshot> {
@@ -229,14 +252,21 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
 }
 
 export function createMainnetLiveExecutionAdapter(
-  dependencies: Omit<MainnetLiveExecutionDependencies, "createIntent" | "claimIntent"> & { db: LiveDatabase },
+  dependencies: Omit<
+    MainnetLiveExecutionDependencies,
+    "createIntent" | "claimIntent" | "assertSubmission" | "pauseAutoTrade"
+  > & {
+    db: LiveDatabase;
+    assertSubmission?: MainnetLiveExecutionDependencies["assertSubmission"];
+    pauseAutoTrade?: MainnetLiveExecutionDependencies["pauseAutoTrade"];
+  },
 ): MainnetLiveExecutionAdapter {
   return new MainnetLiveExecutionAdapter({
     ...dependencies,
     createIntent: (input, options) => createLiveIntent(dependencies.db, input, options),
     claimIntent: (input) => claimLiveIntent(dependencies.db, input),
-    pauseAutoTrade: dependencies.pauseAutoTrade ?? (async () => {
-      await dependencies.db.update(tradingSettings).set({ autoTrade: false }).where(eq(tradingSettings.id, 1));
-    }),
+    assertSubmission: dependencies.assertSubmission
+      ?? ((intentId, expectedGeneration) => assertLiveSubmission(dependencies.db, { intentId, expectedGeneration })),
+    pauseAutoTrade: dependencies.pauseAutoTrade ?? (() => pauseLiveExecution(dependencies.db)),
   });
 }

@@ -1,6 +1,6 @@
 import { and, eq, gt, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import type { MySql2Database } from "drizzle-orm/mysql2";
-import { liveIntents, tradingSettings } from "@db/schema";
+import { liveControls, liveIntents, tradingSettings } from "@db/schema";
 import type { Side } from "@contracts/trading";
 import {
   addDecimals,
@@ -48,10 +48,11 @@ export type LiveFinalGateResult =
 
 export interface CreateLiveIntentOptions {
   finalGate: (tx: LiveTransaction) => Promise<LiveFinalGateResult>;
+  requireAutoTrade?: boolean;
 }
 
 export type CreateLiveIntentResult =
-  | { ok: true; id: string; version: 1 }
+  | { ok: true; id: string; version: 1; emergencyGeneration: number }
   | { ok: false; reason: string };
 
 export interface ClaimLiveIntentInput {
@@ -117,6 +118,17 @@ function approvalError(
   return null;
 }
 
+async function lockEmergencyGeneration(tx: LiveTransaction): Promise<number> {
+  const locked = await tx.select({ generation: liveControls.emergencyGeneration }).from(liveControls)
+    .where(eq(liveControls.id, 1)).for("update");
+  if (locked[0]) return locked[0].generation;
+  await tx.insert(liveControls).values({ id: 1 });
+  const inserted = await tx.select({ generation: liveControls.emergencyGeneration }).from(liveControls)
+    .where(eq(liveControls.id, 1)).for("update");
+  if (!inserted[0]) throw new Error("Live controls are missing");
+  return inserted[0].generation;
+}
+
 export async function createLiveIntent(
   db: LiveDatabase,
   input: CreateLiveIntentInput,
@@ -141,11 +153,16 @@ export async function createLiveIntent(
       const settingsLock = await tx.select({
         id: tradingSettings.id,
         executionMode: tradingSettings.executionMode,
+        autoTrade: tradingSettings.autoTrade,
       }).from(tradingSettings).where(eq(tradingSettings.id, 1)).for("update");
       if (!settingsLock[0]) throw new Error("Trading settings are missing");
       if (settingsLock[0].executionMode !== "LIVE_MAINNET") {
         return { ok: false, reason: "只有 LIVE_MAINNET 模式可以创建 live 意图" };
       }
+      if (options.requireAutoTrade && !settingsLock[0].autoTrade) {
+        return { ok: false, reason: "自动交易已暂停" };
+      }
+      const emergencyGeneration = options.requireAutoTrade ? await lockEmergencyGeneration(tx) : 0;
 
       const approval = await options.finalGate(tx);
       if (!approval.approved) return { ok: false, reason: approval.reason };
@@ -171,7 +188,7 @@ export async function createLiveIntent(
         leaseOwner: input.workerId,
         leaseExpiresAt: sql`DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL ${input.leaseDurationMs * 1000} MICROSECOND)`,
       });
-      return { ok: true, id: input.id, version: 1 };
+      return { ok: true, id: input.id, version: 1, emergencyGeneration };
     });
   } catch (error) {
     if (duplicateEntry(error)) return { ok: false, reason: "signalId 或意图 ID 已存在" };
@@ -210,7 +227,44 @@ export async function claimLiveIntent(
   return { ok: true, version: input.expectedVersion + 1 };
 }
 
-const TERMINAL_INTENT_STATUSES = new Set(["FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"]);
+export interface AssertLiveSubmissionInput {
+  intentId: string;
+  expectedGeneration: number;
+}
+
+export async function assertLiveSubmission(
+  db: LiveDatabase,
+  input: AssertLiveSubmissionInput,
+): Promise<void> {
+  if (!Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration < 0) {
+    throw new Error("Invalid emergency generation");
+  }
+  await db.transaction(async (tx) => {
+    const settings = await tx.select({ autoTrade: tradingSettings.autoTrade }).from(tradingSettings)
+      .where(eq(tradingSettings.id, 1)).for("update");
+    const generation = await lockEmergencyGeneration(tx);
+    const intent = await tx.select({ status: liveIntents.status }).from(liveIntents)
+      .where(eq(liveIntents.id, input.intentId)).for("update");
+    if (!settings[0]?.autoTrade || generation !== input.expectedGeneration || intent[0]?.status !== "PENDING_SEND") {
+      throw new Error("Live submission changed after emergency or pause");
+    }
+  });
+}
+
+export async function pauseLiveExecution(db: LiveDatabase): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.select({ id: tradingSettings.id }).from(tradingSettings)
+      .where(eq(tradingSettings.id, 1)).for("update");
+    await lockEmergencyGeneration(tx);
+    await tx.update(tradingSettings).set({ autoTrade: false }).where(eq(tradingSettings.id, 1));
+    await tx.update(liveControls).set({
+      emergencyGeneration: sql`${liveControls.emergencyGeneration} + 1`,
+    }).where(eq(liveControls.id, 1));
+    await tx.update(liveIntents).set({ status: "CANCEL" }).where(eq(liveIntents.status, "PENDING_SEND"));
+  });
+}
+
+const TERMINAL_INTENT_STATUSES = new Set(["FILLED", "CANCEL", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"]);
 
 export async function getLiveIntentReservations(db: LiveDatabase): Promise<LiveIntentReservation> {
   const rows = await db.select({

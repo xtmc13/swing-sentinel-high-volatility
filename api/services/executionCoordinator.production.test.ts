@@ -108,10 +108,10 @@ describe("生产默认未结风险查询", () => {
     expect(h.saveSettings).not.toHaveBeenCalled();
   });
 
-  it("EXPIRED intent/order 都是终态，不阻断空风险切换", async () => {
+  it("EXPIRED/CANCEL intent/order 都是终态，不阻断空风险切换", async () => {
     const h = setup({
-      intents: [{ status: "EXPIRED" }],
-      orders: [{ status: "EXPIRED" }, { status: "FILLED" }],
+      intents: [{ status: "EXPIRED" }, { status: "CANCEL" }],
+      orders: [{ status: "EXPIRED" }, { status: "FILLED" }, { status: "CANCEL" }],
     });
 
     await expect(h.coordinator.switchExecutionMode("LIVE_MAINNET")).resolves.toMatchObject({

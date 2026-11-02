@@ -57,6 +57,13 @@
       "when": 1793595144802,
       "tag": "0007_symbol_scoped_exchange_ids",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "5",
+      "when": 1793602997861,
+      "tag": "0008_live_emergency_generation",
+      "breakpoints": true
     }
   ]
 }

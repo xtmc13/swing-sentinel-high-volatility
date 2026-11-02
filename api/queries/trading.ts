@@ -129,7 +129,7 @@ export async function saveSettings(input: TradingSettings) {
   }).where(eq(tradingSettings.id, 1));
 }
 
-export const TERMINAL_EXECUTION_STATUSES = ["FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"] as const;
+export const TERMINAL_EXECUTION_STATUSES = ["FILLED", "CANCEL", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"] as const;
 
 export async function getOutstandingOrderCounts(db: Pick<ReturnType<typeof getDb>, "select"> = getDb()) {
   const terminal = new Set<string>(TERMINAL_EXECUTION_STATUSES);

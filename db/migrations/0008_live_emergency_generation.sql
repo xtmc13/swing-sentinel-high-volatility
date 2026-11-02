@@ -1,0 +1,1 @@
+ALTER TABLE `live_controls` ADD `emergency_generation` int DEFAULT 0 NOT NULL;

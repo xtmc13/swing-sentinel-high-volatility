@@ -6,11 +6,14 @@ import mysql from "mysql2/promise";
 import { fileURLToPath } from "node:url";
 import * as schema from "@db/schema";
 import { calculateLivePositionRisk } from "./liveRisk";
+import { decimal } from "./decimal";
+import { getOutstandingOrderCounts } from "../queries/trading";
 import {
   claimLiveIntent,
   createLiveIntent,
   getLiveIntentReservations,
   type CreateLiveIntentInput,
+  type LiveDatabase,
 } from "./livePersistence";
 
 const testDatabaseUrl = process.env.TASK3_TEST_DATABASE_URL;
@@ -39,6 +42,7 @@ function intentInput(id: string, signalId: string, workerId = "worker-a"): Creat
     side: "LONG",
     quantity: "40",
     limitPrice: "100",
+    tickSize: "0.01",
     stopPrice: "99",
     liquidationPrice: "50",
     leverage: 5,
@@ -49,6 +53,23 @@ function intentInput(id: string, signalId: string, workerId = "worker-a"): Creat
     workerId,
     leaseDurationMs: 5_000,
   };
+}
+
+function finalGateFor(input: CreateLiveIntentInput, overrides: Record<string, unknown> = {}) {
+  return async () => ({
+    approved: true as const,
+    signalId: input.signalId,
+    quantity: input.quantity,
+    notional: input.notional,
+    reservedMargin: input.reservedMargin,
+    reservedRisk: input.reservedRisk,
+    validUntil: input.expiresAt,
+    ...overrides,
+  });
+}
+
+function createApprovedIntent(db: LiveDatabase, input: CreateLiveIntentInput) {
+  return createLiveIntent(db, input, { finalGate: finalGateFor(input) });
 }
 
 beforeAll(async () => {
@@ -79,6 +100,8 @@ beforeEach(async () => {
   await db.delete(schema.liveAccountSnapshots);
   await db.delete(schema.liveLedgerEntries);
   await db.delete(schema.reconciliationIssues);
+  await db.update(schema.tradingSettings).set({ executionMode: "LIVE_MAINNET" })
+    .where(eq(schema.tradingSettings.id, 1));
 });
 
 afterAll(async () => {
@@ -110,8 +133,8 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
 
   it("跨独立 worker 连接相同 signalId 只能创建一个意图", async () => {
     const [first, second] = await Promise.all([
-      createLiveIntent(independentDb(), intentInput(crypto.randomUUID(), "shared-signal", "worker-a"), { now: () => NOW }),
-      createLiveIntent(independentDb(), intentInput(crypto.randomUUID(), "shared-signal", "worker-b"), { now: () => NOW }),
+      createApprovedIntent(independentDb(), intentInput(crypto.randomUUID(), "shared-signal", "worker-a")),
+      createApprovedIntent(independentDb(), intentInput(crypto.randomUUID(), "shared-signal", "worker-b")),
     ]);
 
     expect([first.ok, second.ok].filter(Boolean)).toHaveLength(1);
@@ -121,23 +144,28 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
 
   it("worker lease 到期前拒绝其他 worker，到期后原子接管并递增版本", async () => {
     const id = crypto.randomUUID();
-    await createLiveIntent(independentDb(), intentInput(id, "leased-signal"), { now: () => NOW });
+    await createApprovedIntent(independentDb(), intentInput(id, "leased-signal"));
+    if (!db) throw new Error("database required");
 
     expect(await claimLiveIntent(independentDb(), {
       id, workerId: "worker-b", expectedVersion: 1, leaseDurationMs: 5_000,
-    }, { now: () => NOW + 1_000 })).toMatchObject({ ok: false });
+    })).toMatchObject({ ok: false });
+    await db.execute(sql`UPDATE live_intents
+      SET lease_expires_at = DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 1 SECOND) WHERE id = ${id}`);
     expect(await claimLiveIntent(independentDb(), {
       id, workerId: "worker-b", expectedVersion: 1, leaseDurationMs: 5_000,
-    }, { now: () => NOW + 5_001 })).toMatchObject({ ok: true, version: 2 });
+    })).toMatchObject({ ok: true, version: 2 });
+    await db.execute(sql`UPDATE live_intents
+      SET expires_at = DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 1 SECOND) WHERE id = ${id}`);
     expect(await claimLiveIntent(independentDb(), {
       id, workerId: "worker-b", expectedVersion: 2, leaseDurationMs: 5_000,
-    }, { now: () => NOW + 61_000 })).toMatchObject({ ok: false });
+    })).toMatchObject({ ok: false });
   });
 
   it("持久化待单预留进入真实风险计算", async () => {
-    await createLiveIntent(independentDb(), intentInput(crypto.randomUUID(), "reserved-signal"), { now: () => NOW });
+    await createApprovedIntent(independentDb(), intentInput(crypto.randomUUID(), "reserved-signal"));
     if (!db) throw new Error("database required");
-    const reservation = await getLiveIntentReservations(db, NOW);
+    const reservation = await getLiveIntentReservations(db);
     expect(reservation).toEqual({ margin: "800", risk: "60" });
 
     const risk = calculateLivePositionRisk({
@@ -167,6 +195,8 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
         cum: "0",
       }],
       pendingIntents: [reservation],
+      existingPositionMargin: "0",
+      existingExposure: "0",
     });
     expect(risk).toMatchObject({ ok: true, quantity: "40", reservedMargin: "800", reservedRisk: "60" });
   });
@@ -174,8 +204,7 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
   it("提交前风险复核失败会回滚意图", async () => {
     const id = crypto.randomUUID();
     await expect(createLiveIntent(independentDb(), intentInput(id, "rejected-signal"), {
-      now: () => NOW,
-      recheckRisk: async () => { throw new Error("risk changed"); },
+      finalGate: async () => { throw new Error("risk changed"); },
     })).rejects.toThrow("risk changed");
     if (!db) throw new Error("database required");
     expect(await db.select().from(schema.liveIntents)).toHaveLength(0);
@@ -185,9 +214,10 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
     if (!db) throw new Error("database required");
     await db.delete(schema.tradingSettings).where(eq(schema.tradingSettings.id, 1));
     try {
-      await expect(createLiveIntent(independentDb(), intentInput(crypto.randomUUID(), "missing-settings-lock"), {
-        now: () => NOW,
-      })).rejects.toThrow("Trading settings are missing");
+      await expect(createApprovedIntent(
+        independentDb(),
+        intentInput(crypto.randomUUID(), "missing-settings-lock"),
+      )).rejects.toThrow("Trading settings are missing");
       expect(await db.select().from(schema.liveIntents)).toHaveLength(0);
     } finally {
       await db.insert(schema.tradingSettings).values({ id: 1 });
@@ -202,21 +232,23 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
     let secondCallbackEntered = false;
     let releaseSecond!: () => void;
     const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
-    const first = createLiveIntent(independentDb(), intentInput(crypto.randomUUID(), "risk-race-first"), {
-      now: () => NOW,
-      recheckRisk: async () => {
+    const firstInput = intentInput(crypto.randomUUID(), "risk-race-first");
+    const first = createLiveIntent(independentDb(), firstInput, {
+      finalGate: async () => {
         markFirstStarted();
         await gate;
+        return finalGateFor(firstInput)();
       },
     });
     await firstStarted;
-    const second = createLiveIntent(independentDb(), intentInput(crypto.randomUUID(), "risk-race-second", "worker-b"), {
-      now: () => NOW,
-      recheckRisk: async (tx) => {
-        const reservation = await getLiveIntentReservations(tx, NOW);
+    const secondInput = intentInput(crypto.randomUUID(), "risk-race-second", "worker-b");
+    const second = createLiveIntent(independentDb(), secondInput, {
+      finalGate: async (tx) => {
+        const reservation = await getLiveIntentReservations(tx);
         secondCallbackEntered = true;
         if (reservation.margin !== "0") throw new Error("risk changed");
         await secondGate;
+        return finalGateFor(secondInput)();
       },
     });
     for (let attempt = 0; attempt < 200 && !secondCallbackEntered; attempt += 1) {
@@ -233,11 +265,15 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
   });
 
   it("事务内提交前再次发现信号过期时不写入意图", async () => {
-    const id = crypto.randomUUID();
-    const times = [NOW, NOW + 61_000];
-    const result = await createLiveIntent(independentDb(), intentInput(id, "expires-during-recheck"), {
-      now: () => times.shift() ?? NOW + 61_000,
-      recheckRisk: async () => undefined,
+    const input = {
+      ...intentInput(crypto.randomUUID(), "expires-during-recheck"),
+      expiresAt: new Date(Date.now() + 40),
+    };
+    const result = await createLiveIntent(independentDb(), input, {
+      finalGate: async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 80));
+        return finalGateFor(input, { validUntil: new Date(Date.now() + 60_000) })();
+      },
     });
 
     expect(result.ok).toBe(false);
@@ -245,10 +281,173 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
     expect(await db.select().from(schema.liveIntents)).toHaveLength(0);
   });
 
+  it("缺少 final gate 时拒绝创建", async () => {
+    const result = await createLiveIntent(independentDb(), intentInput(crypto.randomUUID(), "missing-final-gate"), {} as never);
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("final gate 显式拒绝时不写入意图", async () => {
+    const result = await createLiveIntent(independentDb(), intentInput(crypto.randomUUID(), "rejected-final-gate"), {
+      finalGate: async () => ({ approved: false as const, reason: "stale risk" }),
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "stale risk" });
+  });
+
+  it("只持久化 final gate 批准的数量、名义价值、margin 和 risk", async () => {
+    if (!db) throw new Error("database required");
+    const input = intentInput(crypto.randomUUID(), "approved-values");
+    const result = await createLiveIntent(independentDb(), input, {
+      finalGate: finalGateFor(input, {
+        quantity: "12.345",
+        notional: "1234.5",
+        reservedMargin: "246.9",
+        reservedRisk: "7",
+      }),
+    });
+
+    expect(result.ok).toBe(true);
+    const row = (await db.select().from(schema.liveIntents))[0];
+    expect({
+      quantity: decimal(row.quantity),
+      notional: decimal(row.notional),
+      reservedMargin: decimal(row.reservedMargin),
+      reservedRisk: decimal(row.reservedRisk),
+    }).toEqual({ quantity: "12.345", notional: "1234.5", reservedMargin: "246.9", reservedRisk: "7" });
+  });
+
+  it.each([
+    { name: "wrong signal", values: { signalId: "other-signal" } },
+    { name: "inconsistent notional", values: { notional: "1" } },
+    { name: "inconsistent margin", values: { reservedMargin: "1" } },
+    { name: "stale approval", values: { validUntil: new Date(0) } },
+  ])("拒绝 $name 的 final gate 结果", async ({ values }) => {
+    const input = intentInput(crypto.randomUUID(), "invalid-approval");
+    const result = await createLiveIntent(independentDb(), input, { finalGate: finalGateFor(input, values) });
+
+    expect(result.ok).toBe(false);
+  });
+
+  it("PAPER 模式即使 final gate 批准也拒绝 live 意图", async () => {
+    if (!db) throw new Error("database required");
+    await db.update(schema.tradingSettings).set({ executionMode: "PAPER" }).where(eq(schema.tradingSettings.id, 1));
+    const input = intentInput(crypto.randomUUID(), "paper-mode");
+
+    const result = await createLiveIntent(independentDb(), input, { finalGate: finalGateFor(input) });
+
+    expect(result.ok).toBe(false);
+    expect(await db.select().from(schema.liveIntents)).toHaveLength(0);
+  });
+
+  it("limitPrice 不符合 tickSize 时在 final gate 前拒绝", async () => {
+    const input = { ...intentInput(crypto.randomUUID(), "invalid-tick"), limitPrice: "100.005" };
+    let gateCalled = false;
+
+    const result = await createLiveIntent(independentDb(), input, {
+      finalGate: async () => {
+        gateCalled = true;
+        return finalGateFor(input)();
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(gateCalled).toBe(false);
+  });
+
+  it("final gate 延迟超过 lease 时长时仍在复核后以 DB 时间开始 lease", async () => {
+    if (!db) throw new Error("database required");
+    const input = { ...intentInput(crypto.randomUUID(), "delayed-gate"), leaseDurationMs: 30 };
+    let gateFinished = false;
+
+    const result = await createLiveIntent(independentDb(), input, {
+      finalGate: async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 80));
+        gateFinished = true;
+        return finalGateFor(input)();
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(gateFinished).toBe(true);
+    const row = (await db.select().from(schema.liveIntents))[0];
+    expect(row.leaseExpiresAt!.getTime()).toBeGreaterThanOrEqual(row.createdAt.getTime());
+    expect(row.leaseExpiresAt!.getTime() - row.createdAt.getTime()).toBeLessThanOrEqual(30);
+  });
+
+  it("worker 时钟快进到未来也不能提前接管有效 DB lease", async () => {
+    const input = intentInput(crypto.randomUUID(), "clock-skew");
+    await createLiveIntent(independentDb(), input, { finalGate: finalGateFor(input) });
+
+    const claimed = await claimLiveIntent(independentDb(), {
+      id: input.id, workerId: "worker-b", expectedVersion: 1, leaseDurationMs: 5_000,
+    }, { now: () => Number.MAX_SAFE_INTEGER });
+
+    expect(claimed.ok).toBe(false);
+  });
+
+  it("相同 exchange order/trade ID 可存在于不同 symbol，但同 symbol 仍唯一", async () => {
+    const firstDb = independentDb();
+    const input = intentInput(crypto.randomUUID(), "symbol-scoped-ids");
+    await createLiveIntent(firstDb, input, { finalGate: finalGateFor(input) });
+    for (const symbol of ["BTCUSDT", "ETHUSDT"]) {
+      const orderId = crypto.randomUUID();
+      await firstDb.insert(schema.liveOrders).values({
+        id: orderId,
+        intentId: input.id,
+        clientOrderId: `client-${symbol}`,
+        exchangeOrderId: "shared-exchange-order",
+        symbol,
+        side: "BUY",
+        type: "LIMIT",
+        status: "NEW",
+        price: "100",
+        originalQuantity: "1",
+        executedQuantity: "0",
+      });
+      await firstDb.insert(schema.liveFills).values({
+        id: crypto.randomUUID(),
+        orderId,
+        exchangeTradeId: "shared-exchange-trade",
+        exchangeOrderId: "shared-exchange-order",
+        symbol,
+        side: "BUY",
+        price: "100",
+        quantity: "1",
+        quoteQuantity: "100",
+        commission: "0.01",
+        commissionAsset: "USDT",
+        realizedPnl: "0",
+        isMaker: false,
+        executedAt: new Date(NOW),
+      });
+    }
+  });
+
+  it("真实 DB 的切换风险计数包含 live intents 和 orders", async () => {
+    const firstDb = independentDb();
+    const input = intentInput(crypto.randomUUID(), "live-switch-count");
+    await createLiveIntent(firstDb, input, { finalGate: finalGateFor(input) });
+    await firstDb.insert(schema.liveOrders).values({
+      id: crypto.randomUUID(),
+      intentId: input.id,
+      clientOrderId: "live-switch-order",
+      symbol: "BTCUSDT",
+      side: "BUY",
+      type: "LIMIT",
+      status: "NEW",
+      price: "100",
+      originalQuantity: "1",
+      executedQuantity: "0",
+    });
+
+    expect(await getOutstandingOrderCounts(firstDb)).toEqual({ pendingIntents: 1, unfinishedOrders: 1 });
+  });
+
   it("clientOrderId 与 exchange order/trade/transaction ID 均由数据库拒绝重复", async () => {
     const firstDb = independentDb();
     const intentId = crypto.randomUUID();
-    await createLiveIntent(firstDb, intentInput(intentId, "unique-ids"), { now: () => NOW });
+    await createApprovedIntent(firstDb, intentInput(intentId, "unique-ids"));
     const orderId = crypto.randomUUID();
     await firstDb.insert(schema.liveOrders).values({
       id: orderId,

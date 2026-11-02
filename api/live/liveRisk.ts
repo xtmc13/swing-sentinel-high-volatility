@@ -36,6 +36,8 @@ export interface LiveRiskInput {
   minNotional: DecimalString;
   brackets: BinanceLeverageBracket["brackets"];
   pendingIntents: LiveIntentReservation[];
+  existingPositionMargin: DecimalString;
+  existingExposure: DecimalString;
 }
 
 export type LiveRiskResult =
@@ -44,6 +46,7 @@ export type LiveRiskResult =
       ok: true;
       quantity: DecimalString;
       notional: DecimalString;
+      totalExposure: DecimalString;
       initialMargin: DecimalString;
       maintenanceMargin: DecimalString;
       estimatedRisk: DecimalString;
@@ -102,7 +105,10 @@ export function calculateLivePositionRisk(input: LiveRiskInput): LiveRiskResult 
     const reservedMargin = addDecimals(...input.pendingIntents.map((intent) => intent.margin));
     const reservedRisk = addDecimals(...input.pendingIntents.map((intent) => intent.risk));
     const remainingRisk = subtractDecimals(percentage(input.walletBalance, input.riskPerTradePct), reservedRisk);
-    const remainingCap = subtractDecimals(percentage(input.walletBalance, input.totalMarginCapPct), reservedMargin);
+    const remainingCap = subtractDecimals(
+      percentage(input.walletBalance, input.totalMarginCapPct),
+      addDecimals(input.existingPositionMargin, reservedMargin),
+    );
     const remainingAvailable = subtractDecimals(input.availableBalance, reservedMargin);
     const marginLimit = minimum(
       percentage(input.walletBalance, input.marginPerTradePct),
@@ -137,19 +143,20 @@ export function calculateLivePositionRisk(input: LiveRiskInput): LiveRiskResult 
     if (compareDecimals(notional, input.minNotional) < 0) {
       return { ok: false, reason: "名义价值低于交易所最小值" };
     }
+    const totalExposure = addDecimals(input.existingExposure, notional);
     const bracket = [...input.brackets]
       .sort((left, right) => left.bracket - right.bracket)
-      .find((candidate) => compareDecimals(notional, candidate.notionalFloor) >= 0
-        && compareDecimals(notional, candidate.notionalCap) <= 0);
-    if (!bracket) return { ok: false, reason: "名义价值超出真实维持保证金档位" };
+      .find((candidate) => compareDecimals(totalExposure, candidate.notionalFloor) >= 0
+        && compareDecimals(totalExposure, candidate.notionalCap) <= 0);
+    if (!bracket) return { ok: false, reason: "总名义价值超出真实维持保证金档位" };
     if (input.fixedLeverage > bracket.initialLeverage) {
       return { ok: false, reason: "固定杠杆超过实际档位允许值" };
     }
 
     const initialMargin = divideDecimals(notional, String(input.fixedLeverage), EXACT_DIVISION);
     const maintenanceMargin = minimum(
-      subtractDecimals(multiplyDecimals(notional, bracket.maintMarginRatio), bracket.cum),
-      notional,
+      subtractDecimals(multiplyDecimals(totalExposure, bracket.maintMarginRatio), bracket.cum),
+      totalExposure,
     );
     if (compareDecimals(initialMargin, marginLimit) > 0) {
       return { ok: false, reason: "初始保证金超过可用预留额度" };
@@ -158,6 +165,7 @@ export function calculateLivePositionRisk(input: LiveRiskInput): LiveRiskResult 
       ok: true,
       quantity,
       notional,
+      totalExposure,
       initialMargin,
       maintenanceMargin: compareDecimals(maintenanceMargin, "0") < 0 ? "0" : maintenanceMargin,
       estimatedRisk: multiplyDecimals(quantity, riskPerUnit),

@@ -7,6 +7,9 @@ import {
   closedTrades,
   executionIntents,
   executionOrders,
+  liveIntents,
+  liveOrders,
+  livePositions,
   systemEvents,
   equitySnapshots,
 } from "@db/schema";
@@ -130,15 +133,19 @@ export const TERMINAL_EXECUTION_STATUSES = ["FILLED", "CANCELLED", "CANCELED", "
 
 export async function getOutstandingOrderCounts(db: Pick<ReturnType<typeof getDb>, "select"> = getDb()) {
   const terminal = new Set<string>(TERMINAL_EXECUTION_STATUSES);
-  const [intentRows, orderRows] = await Promise.all([
+  const [intentRows, orderRows, liveIntentRows, liveOrderRows] = await Promise.all([
     db.select({ status: executionIntents.status }).from(executionIntents)
       .where(notInArray(executionIntents.status, [...TERMINAL_EXECUTION_STATUSES])),
     db.select({ status: executionOrders.status }).from(executionOrders)
       .where(notInArray(executionOrders.status, [...TERMINAL_EXECUTION_STATUSES])),
+    db.select({ status: liveIntents.status }).from(liveIntents)
+      .where(notInArray(liveIntents.status, [...TERMINAL_EXECUTION_STATUSES])),
+    db.select({ status: liveOrders.status }).from(liveOrders)
+      .where(notInArray(liveOrders.status, [...TERMINAL_EXECUTION_STATUSES])),
   ]);
   return {
-    pendingIntents: intentRows.filter((row) => !terminal.has(row.status)).length,
-    unfinishedOrders: orderRows.filter((row) => !terminal.has(row.status)).length,
+    pendingIntents: [...intentRows, ...liveIntentRows].filter((row) => !terminal.has(row.status)).length,
+    unfinishedOrders: [...orderRows, ...liveOrderRows].filter((row) => !terminal.has(row.status)).length,
   };
 }
 
@@ -149,8 +156,10 @@ export async function switchExecutionModeAtomic(executionMode: TradingSettings["
       .where(eq(tradingSettings.id, 1)).limit(1).for("update"))[0];
     if (!settingsRow) throw new Error("Trading settings are missing");
     const openPositions = await tx.select().from(positions).where(eq(positions.status, "OPEN"));
+    const openLivePositions = await tx.select().from(livePositions).where(eq(livePositions.status, "OPEN"));
     const counts = await getOutstandingOrderCounts(tx);
-    if (openPositions.length > 0 || counts.pendingIntents > 0 || counts.unfinishedOrders > 0) {
+    if (openPositions.length > 0 || openLivePositions.length > 0
+      || counts.pendingIntents > 0 || counts.unfinishedOrders > 0) {
       throw new Error("存在未结持仓、意图或未完成订单，禁止切换执行模式");
     }
     await tx.update(tradingSettings).set({ executionMode }).where(eq(tradingSettings.id, 1));

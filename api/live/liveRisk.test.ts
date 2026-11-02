@@ -29,6 +29,8 @@ function input(overrides: Partial<LiveRiskInput> = {}): LiveRiskInput {
       cum: "0",
     }],
     pendingIntents: [],
+    existingPositionMargin: "0",
+    existingExposure: "0",
     ...overrides,
   };
 }
@@ -115,6 +117,39 @@ describe("主网精确风险与预留", () => {
     }));
 
     expect(result).toMatchObject({ ok: true, quantity: "99.406", estimatedRisk: "99.99945382" });
+  });
+
+  it("总保证金 cap 同时扣除签名实际持仓 margin 和待单预留", () => {
+    const result = calculateLivePositionRisk(input({
+      existingPositionMargin: "1300",
+      pendingIntents: [{ margin: "800", risk: "0" }],
+    }));
+
+    expect(result).toMatchObject({ ok: false });
+  });
+
+  it("维持保证金档位按已有 exposure 加候选名义价值选择", () => {
+    const result = calculateLivePositionRisk(input({
+      walletBalance: "100000",
+      availableBalance: "100000",
+      marginPerTradePct: 8,
+      totalMarginCapPct: 30,
+      existingPositionMargin: "12000",
+      existingExposure: "60000",
+      brackets: [
+        { bracket: 1, initialLeverage: 10, notionalCap: "50000", notionalFloor: "0", maintMarginRatio: "0.01", cum: "0" },
+        { bracket: 2, initialLeverage: 5, notionalCap: "100000", notionalFloor: "50000", maintMarginRatio: "0.02", cum: "50" },
+      ],
+    }));
+
+    expect(result).toMatchObject({
+      ok: true,
+      quantity: "400",
+      notional: "40000",
+      totalExposure: "100000",
+      maintenanceMargin: "1950",
+      bracket: 2,
+    });
   });
 
   it("止损没有位于真实强平价之前时失败关闭", () => {

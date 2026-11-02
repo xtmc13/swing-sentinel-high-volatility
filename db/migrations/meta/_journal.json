@@ -50,6 +50,13 @@
       "when": 1793591879724,
       "tag": "0006_live_persistence",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1793595144802,
+      "tag": "0007_symbol_scoped_exchange_ids",
+      "breakpoints": true
     }
   ]
 }

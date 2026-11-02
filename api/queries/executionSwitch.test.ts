@@ -3,6 +3,9 @@ import { DEFAULT_SETTINGS } from "@contracts/trading";
 import {
   executionIntents,
   executionOrders,
+  liveIntents,
+  liveOrders,
+  livePositions,
   positions,
   simulationAccounts,
   tradingSettings,
@@ -25,6 +28,9 @@ function nameFor(table: unknown) {
   if (table === positions) return "positions";
   if (table === executionIntents) return "intents";
   if (table === executionOrders) return "orders";
+  if (table === livePositions) return "livePositions";
+  if (table === liveIntents) return "liveIntents";
+  if (table === liveOrders) return "liveOrders";
   return "unknown";
 }
 
@@ -51,7 +57,7 @@ vi.mock("./connection", () => ({
                 Promise.resolve(rows).then(resolve, reject)
               ),
             };
-            if (name === "positions" || name === "intents" || name === "orders") {
+            if (["positions", "intents", "orders", "livePositions", "liveIntents", "liveOrders"].includes(name)) {
               database.events.push(`read-${name}`);
             }
             return result;
@@ -74,7 +80,14 @@ vi.mock("./connection", () => ({
   },
 }));
 
-function reset(options: { positions?: unknown[]; intents?: unknown[]; orders?: unknown[] } = {}) {
+function reset(options: {
+  positions?: unknown[];
+  intents?: unknown[];
+  orders?: unknown[];
+  livePositions?: unknown[];
+  liveIntents?: unknown[];
+  liveOrders?: unknown[];
+} = {}) {
   database.rows.clear();
   database.events.length = 0;
   database.updates.length = 0;
@@ -83,6 +96,9 @@ function reset(options: { positions?: unknown[]; intents?: unknown[]; orders?: u
   database.rows.set(positions, options.positions ?? []);
   database.rows.set(executionIntents, options.intents ?? []);
   database.rows.set(executionOrders, options.orders ?? []);
+  database.rows.set(livePositions, options.livePositions ?? []);
+  database.rows.set(liveIntents, options.liveIntents ?? []);
+  database.rows.set(liveOrders, options.liveOrders ?? []);
 }
 
 describe("原子执行模式切换", () => {
@@ -97,8 +113,11 @@ describe("原子执行模式切换", () => {
       "lock-account",
       "lock-settings",
       "read-positions",
+      "read-livePositions",
       "read-intents",
       "read-orders",
+      "read-liveIntents",
+      "read-liveOrders",
       "update-settings",
     ]);
     expect(database.updates[0]).toMatchObject({ executionMode: "LIVE_MAINNET" });
@@ -106,6 +125,17 @@ describe("原子执行模式切换", () => {
 
   it("锁内发现 pending intent 时拒绝且不写设置", async () => {
     reset({ intents: [{ status: "PENDING_SEND" }] });
+
+    await expect(switchExecutionModeAtomic("PAPER")).rejects.toThrow("未结");
+    expect(database.events).not.toContain("update-settings");
+  });
+
+  it.each([
+    { name: "live intent", rows: { liveIntents: [{ status: "PENDING_SEND" }] } },
+    { name: "live order", rows: { liveOrders: [{ status: "NEW" }] } },
+    { name: "live position", rows: { livePositions: [{ status: "OPEN" }] } },
+  ])("锁内发现 $name 时拒绝切换", async ({ rows }) => {
+    reset(rows);
 
     await expect(switchExecutionModeAtomic("PAPER")).rejects.toThrow("未结");
     expect(database.events).not.toContain("update-settings");

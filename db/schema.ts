@@ -240,7 +240,7 @@ export const liveOrders = mysqlTable("live_orders", {
   updatedAt: timestamp("updated_at", { fsp: 3 }).notNull().defaultNow().onUpdateNow(),
 }, (table) => ({
   clientOrderUnique: uniqueIndex("live_orders_client_order_unique").on(table.clientOrderId),
-  exchangeOrderUnique: uniqueIndex("live_orders_exchange_order_unique").on(table.exchangeOrderId),
+  exchangeOrderUnique: uniqueIndex("live_orders_exchange_order_unique").on(table.symbol, table.exchangeOrderId),
   intentIdx: index("live_orders_intent_idx").on(table.intentId),
   statusIdx: index("live_orders_status_idx").on(table.status),
 }));
@@ -262,7 +262,7 @@ export const liveFills = mysqlTable("live_fills", {
   executedAt: timestamp("executed_at", { fsp: 3 }).notNull(),
   createdAt: timestamp("created_at", { fsp: 3 }).notNull().defaultNow(),
 }, (table) => ({
-  tradeUnique: uniqueIndex("live_fills_trade_unique").on(table.exchangeTradeId),
+  tradeUnique: uniqueIndex("live_fills_trade_unique").on(table.symbol, table.exchangeTradeId),
   orderIdx: index("live_fills_order_idx").on(table.orderId),
   exchangeOrderIdx: index("live_fills_exchange_order_idx").on(table.exchangeOrderId),
 }));

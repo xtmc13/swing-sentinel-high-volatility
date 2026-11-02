@@ -342,7 +342,7 @@ export async function runPortfolioBacktest(
   const funding: PortfolioFundingSettlement[] = [];
   const riskRejections: PortfolioRiskRejection[] = [];
   const transitions: PortfolioVolatilityTransition[] = [];
-  const dailyLossLocks: PortfolioBacktestResult["dailyLossLocks"] = [];
+  const dailyLossLocks: PortfolioBacktestResult["dailyLossLocks"] = [];\n  const momentumExhaustion: PortfolioBacktestResult["momentumExhaustion"] = [];
   const curve: { time: number; equity: number }[] = [{ time: timeline[0].time, equity: initialEquity }];
   const timeoutBars = Math.max(1, Math.round(72 * 3_600_000 / INTERVAL_MS[timeframe]));
 
@@ -592,6 +592,28 @@ export async function runPortfolioBacktest(
       position.stopPrice = favorable.stopPrice;
       position.maxFavorableR = favorable.maxFavorableR;
       adverseAdjustment += (adversePrice - position.entryPrice) * position.qty * dir;
+    }
+
+    // Shadow-only protection telemetry: observations are recorded for carried positions,
+    // but they never alter stops, quantities, or exits in this validation phase.
+    for (const position of positions.values()) {
+      const item = data[position.symbol];
+      const assessment = evaluateMomentumExhaustion({
+        side: position.side,
+        candles15m: item.candles["15m"].filter((bar) => bar.closeTime <= closeTime),
+        candles1h: item.candles["1h"].filter((bar) => bar.closeTime <= closeTime),
+        candles4h: item.candles["4h"].filter((bar) => bar.closeTime <= closeTime),
+        now: closeTime,
+      });
+      if (assessment.protection !== "NONE") momentumExhaustion.push({
+        time: closeTime,
+        symbol: position.symbol,
+        side: position.side,
+        score: assessment.score,
+        resonanceCount: assessment.resonanceCount,
+        protection: assessment.protection,
+        structureBreak: assessment.structureBreak,
+      });
     }
 
     curve.push({ time: timeline[index].time, equity: cash + adverseAdjustment });

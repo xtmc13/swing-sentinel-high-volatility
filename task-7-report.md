@@ -45,3 +45,28 @@
 - 参数仍是待校准工程默认值；replay 不证明盈利能力，也没有用 5m K 线冒充微结构。P80 使用现有一分钟收益基线的绝对值，与 Rust 短窗 log-return realized volatility 的量纲/采样口径仍需后续校准。
 - 快速退出的 opportunity/frame 关联目前是 coordinator 进程内状态。进程重启后，交易所原生硬止损、现有对账和 emergency 仍保留，但 120 秒无跟随和流向反转的自动关联需要后续持久化恢复；Rust 当前只发送候选，因此流向反转退出也依赖收到新的有效候选 frame，而非持续全量 frame 流。
 - 未运行真实 DB migration/integration、服务器或任何真实网络/账户/订单调用；这些不在本任务的授权验证范围内。
+
+
+## Review fix round 1
+
+代码/测试/迁移提交 SHA：`a53e8e306838ff5f0d185220883f5c252658c890`（`fix: harden momentum live gates and recovery`）。本报告更新单独提交；未 push，未使用真实凭据、真实订单、preview DB/server 或真实交易调用。
+
+### RED / GREEN
+
+- Live 限价 RED：`prepareIntent=100.01` 超过已接受 `opportunity.limitPrice=100` 仍成功；`100→100.01` 改单也成功。修正旧测试的错误成功预期后，两个用例均先失败。GREEN：初次意图同时校验机会限价及方向一致的 bps/ATR 上限；验证后的上限写入 `live_orders.max_entry_price`，替换单继承并在重启后仍执行相同上限。原有一次改单/重启用例继续通过。
+- Live HIGH RED：相同输入 NORMAL quantity=100，HIGH 仍错误为 100；adapter  finalGate 也收不到事务模式。GREEN：`createLiveIntent` 在事务中锁定 `trading_settings` 和该 symbol 的 `volatility_states`，传递 `{mode, highVolatilityRiskMultiplier}`；精确风险计算在 HIGH 下数量/估计风险减半，EXTREME 拒绝。Focused liveRisk + liveExecution：21 passed。
+- Replay parity RED：深度不达标的 GOOD frame 后接合格 frame 被错误确认；6 秒前主动量被旧 5 秒窗口丢弃。GREEN：TS acceptance/replay 共用完整 `qualifiedMomentumSide` 门槛，return/flow 默认均为 10 秒；parity 和窗口回归通过。Focused momentum + replay：20 passed。
+- 持续退出/持久化 RED：durable store 和 frame 接收不存在；随后将持仓 mark 故意保持旧值、只让新 frame 跌回突破位，退出仍失败。GREEN：Rust 每个 feature frame 通过既有 no-proxy/no-redirect loopback client 发至 `/v1/momentum/frame`；TS 持久化 frame 并立即评估，使用新鲜 frame 的 mark，无需候选或 20 秒 tick。Coordinator focused：17 passed。
+- 重启状态：paper/live PositionView 现在携带持久化 signalId、strategyType、breakoutPrice、entryPrice、exitPending；最新 frame 存入 `momentum_frames`，pending 在 close 前写入并在明确失败时清除。测试使用未调用 open 的新 coordinator 验证元数据/frame 重hydrate，以及第二个 coordinator 不重复提交 pending exit。
+- Paper 幂等 RED：两个 service 实例面对已持久化 momentum signal 仍继续市场/开仓流程。GREEN：在行情工作前查询持久化 signalId，`positions_signal_unique` 为并发竞争提供数据库唯一兜底；focused 1/1 passed。
+- 离线生成 `db/migrations/0009_momentum_durability.sql` 及 snapshot；未执行迁移或连接数据库。
+
+### Final verification
+
+- `npm test`：38 files passed，4 skipped；**366 passed，53 skipped，0 failed**。
+- `npm run check`：exit 0；`npm run lint`：exit 0。
+- Rust `cargo test`：**35 passed，0 failed，1 ignored**（既有真实公共网络 smoke，未运行）。
+- Rust `cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings`：exit 0。
+- 代码提交前 `git diff --check` / staged diff check：exit 0。
+
+本节取代上一版“快速退出仅进程内、Rust 只发送候选”的限制：现已有持久化恢复和连续 frame 路径。真实 DB integration 仍因任务边界保持 skipped；参数校准和不盈利保证的限制不变。

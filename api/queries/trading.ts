@@ -1,10 +1,11 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, notInArray } from "drizzle-orm";
 import { getDb } from "./connection";
 import {
   simulationAccounts,
   tradingSettings,
   positions,
   closedTrades,
+  executionIntents,
   executionOrders,
   systemEvents,
   equitySnapshots,
@@ -87,7 +88,6 @@ export async function getSettings(): Promise<TradingSettings> {
 export async function saveSettings(input: TradingSettings) {
   await ensureInitialized();
   await getDb().update(tradingSettings).set({
-    executionMode: input.executionMode,
     strategyMode: input.strategyMode,
     momentumEnabled: input.momentumEnabled,
     autoTrade: input.autoTrade,
@@ -124,6 +124,38 @@ export async function saveSettings(input: TradingSettings) {
     spreadBaselineMinSamples: input.spreadBaselineMinSamples,
     universeSize: input.universeSize,
   }).where(eq(tradingSettings.id, 1));
+}
+
+export const TERMINAL_EXECUTION_STATUSES = ["FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"] as const;
+
+export async function getOutstandingOrderCounts(db: Pick<ReturnType<typeof getDb>, "select"> = getDb()) {
+  const terminal = new Set<string>(TERMINAL_EXECUTION_STATUSES);
+  const [intentRows, orderRows] = await Promise.all([
+    db.select({ status: executionIntents.status }).from(executionIntents)
+      .where(notInArray(executionIntents.status, [...TERMINAL_EXECUTION_STATUSES])),
+    db.select({ status: executionOrders.status }).from(executionOrders)
+      .where(notInArray(executionOrders.status, [...TERMINAL_EXECUTION_STATUSES])),
+  ]);
+  return {
+    pendingIntents: intentRows.filter((row) => !terminal.has(row.status)).length,
+    unfinishedOrders: orderRows.filter((row) => !terminal.has(row.status)).length,
+  };
+}
+
+export async function switchExecutionModeAtomic(executionMode: TradingSettings["executionMode"]): Promise<TradingSettings> {
+  return getDb().transaction(async (tx) => {
+    await tx.select().from(simulationAccounts).where(eq(simulationAccounts.id, 1)).limit(1).for("update");
+    const settingsRow = (await tx.select().from(tradingSettings)
+      .where(eq(tradingSettings.id, 1)).limit(1).for("update"))[0];
+    if (!settingsRow) throw new Error("Trading settings are missing");
+    const openPositions = await tx.select().from(positions).where(eq(positions.status, "OPEN"));
+    const counts = await getOutstandingOrderCounts(tx);
+    if (openPositions.length > 0 || counts.pendingIntents > 0 || counts.unfinishedOrders > 0) {
+      throw new Error("存在未结持仓、意图或未完成订单，禁止切换执行模式");
+    }
+    await tx.update(tradingSettings).set({ executionMode }).where(eq(tradingSettings.id, 1));
+    return settingsFromRow({ ...settingsRow, executionMode });
+  });
 }
 
 export async function getOpenPositions() {

@@ -1,4 +1,4 @@
-import { eq, notInArray } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { binance } from "./binance";
 import {
   DEFAULT_LIVE_CONTROLS,
@@ -10,9 +10,9 @@ import {
   type PositionView,
   type TradingSettings,
 } from "@contracts/trading";
-import { executionOrders, liveControls } from "@db/schema";
+import { liveControls } from "@db/schema";
 import { getDb } from "../queries/connection";
-import { getOpenPositions, getSettings, saveSettings } from "../queries/trading";
+import { getOutstandingOrderCounts, getSettings, switchExecutionModeAtomic } from "../queries/trading";
 import {
   closePaperPosition,
   emergencyStop,
@@ -84,26 +84,21 @@ async function defaultLiveControls(): Promise<LiveControls> {
   return { ...DEFAULT_LIVE_CONTROLS };
 }
 
-async function defaultOutstandingRisk(): Promise<OutstandingExecutionRisk> {
-  const [openPositions, unfinishedOrders] = await Promise.all([
-    getOpenPositions(),
-    getDb().select().from(executionOrders).where(notInArray(executionOrders.status, [
-      "FILLED",
-      "CANCELLED",
-      "CANCELED",
-      "REJECTED",
-    ])),
+async function defaultOutstandingRisk(positionViews: Promise<PositionView[]>): Promise<OutstandingExecutionRisk> {
+  const [openPositions, counts] = await Promise.all([
+    positionViews,
+    getOutstandingOrderCounts(),
   ]);
   return {
     openPositions: openPositions.length,
-    pendingIntents: 0,
-    unfinishedOrders: unfinishedOrders.length,
+    ...counts,
   };
 }
 
 export class ExecutionCoordinator {
   private readonly consumedMomentumSignals = new Set<string>();
   private readonly dependencies: ExecutionCoordinatorDependencies;
+  private openSwitchTail: Promise<void> = Promise.resolve();
 
   constructor(dependencies: ExecutionCoordinatorDependencies = {}) {
     this.dependencies = dependencies;
@@ -132,7 +127,23 @@ export class ExecutionCoordinator {
     return this.dependencies.live;
   }
 
+  private async serializeOpenSwitch<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.openSwitchTail;
+    let release!: () => void;
+    this.openSwitchTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   async open(opportunity: Opportunity, executionHealthy?: () => boolean): Promise<OpenExecutionResult> {
+    return this.serializeOpenSwitch(() => this.openWhenSerialized(opportunity, executionHealthy));
+  }
+
+  private async openWhenSerialized(opportunity: Opportunity, executionHealthy?: () => boolean): Promise<OpenExecutionResult> {
     const settings = await this.settings();
     if (settings.executionMode === "LIVE_MAINNET") {
       if (this.marketSource === "TESTNET") return { ok: false, reason: "TESTNET 行情禁止选择 LIVE_MAINNET" };
@@ -188,17 +199,24 @@ export class ExecutionCoordinator {
   }
 
   async switchExecutionMode(executionMode: ExecutionMode): Promise<TradingSettings> {
+    return this.serializeOpenSwitch(() => this.switchExecutionModeWhenSerialized(executionMode));
+  }
+
+  private async switchExecutionModeWhenSerialized(executionMode: ExecutionMode): Promise<TradingSettings> {
     const settings = await this.settings();
     if (settings.executionMode === executionMode) return settings;
     if (executionMode === "LIVE_MAINNET" && this.marketSource === "TESTNET") {
       throw new Error("TESTNET 行情禁止选择 LIVE_MAINNET");
     }
-    const risk = await (this.dependencies.getOutstandingRisk ?? defaultOutstandingRisk)();
+    const risk = this.dependencies.getOutstandingRisk
+      ? await this.dependencies.getOutstandingRisk()
+      : await defaultOutstandingRisk(this.adapter(settings).positions());
     if (risk.openPositions > 0 || risk.pendingIntents > 0 || risk.unfinishedOrders > 0) {
       throw new Error("存在未结持仓、意图或未完成订单，禁止切换执行模式");
     }
     const next = { ...settings, executionMode };
-    await (this.dependencies.saveSettings ?? saveSettings)(next);
+    if (this.dependencies.saveSettings) await this.dependencies.saveSettings(next);
+    else await switchExecutionModeAtomic(executionMode);
     return next;
   }
 }

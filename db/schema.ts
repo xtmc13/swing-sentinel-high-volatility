@@ -120,6 +120,13 @@ export const executionOrders = mysqlTable("execution_orders", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
 }, (table) => ({ positionIdx: index("orders_position_idx").on(table.positionId) }));
 
+export const executionIntents = mysqlTable("execution_intents", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  status: varchar("status", { length: 24 }).notNull().default("PENDING_SEND"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
+}, (table) => ({ statusIdx: index("execution_intents_status_idx").on(table.status) }));
+
 export const fundingSettlements = mysqlTable("funding_settlements", {
   id: varchar("id", { length: 36 }).primaryKey(),
   positionId: varchar("position_id", { length: 36 }).notNull(),

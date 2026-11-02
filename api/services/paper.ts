@@ -37,6 +37,10 @@ import type {
 export type PositionRow = typeof positions.$inferSelect;
 export type TradeRow = typeof closedTrades.$inferSelect;
 
+export function paperExecutionModeAllowed(settings: TradingSettings): boolean {
+  return settings.executionMode === "PAPER";
+}
+
 export function toPositionView(row: PositionRow, market?: Market, snapshot?: MarketSnapshot): PositionView {
   const direction = row.side === "LONG" ? 1 : -1;
   const candidate = snapshot ? snapshot.markPrice : market?.markPrice ?? market?.price;
@@ -310,6 +314,9 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         const settingsRow = (await tx.select().from(tradingSettings).where(eq(tradingSettings.id, 1)).limit(1))[0];
         if (!settingsRow) throw new Error("Trading settings are missing");
         const settings = settingsFromRow(settingsRow);
+        if (!paperExecutionModeAllowed(settings)) {
+          return { ok: false as const, reason: "执行模式已切换，禁止模拟开仓" };
+        }
         const openRows = await tx.select().from(positions).where(eq(positions.status, "OPEN"));
         if (settings.correlationWindow !== preflightSettings.correlationWindow
           || (openRows.length > 0 && preflightRows.length === 0)

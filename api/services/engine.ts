@@ -4,6 +4,7 @@ import type {
   Market,
   MarketQuality,
   Opportunity,
+  PositionView,
   TradingSettings,
   VolatilityState,
 } from "@contracts/trading";
@@ -15,7 +16,7 @@ import {
   paperExecutionAdapter,
   type ExecutionCoordinator,
 } from "./executionCoordinator";
-import { addEvent, getOpenPositions, getSettings } from "../queries/trading";
+import { addEvent, getSettings } from "../queries/trading";
 import { getVolatilityState, saveVolatilityState } from "../queries/volatility";
 import { getDb } from "../queries/connection";
 import { equitySnapshots } from "@db/schema";
@@ -82,7 +83,7 @@ export interface TradingEngineDependencies {
   market: EngineMarketClient;
   monitor: EngineMonitor;
   getSettings: typeof getSettings;
-  getOpenPositions: typeof getOpenPositions;
+  getOpenPositions: () => Promise<PositionView[]>;
   getAccountSnapshot: () => Promise<AccountSnapshot>;
   saveEquitySnapshot: (snapshot: AccountSnapshot) => Promise<void>;
   manageOpenPositions: () => Promise<void>;
@@ -145,7 +146,8 @@ export class TradingEngine {
     const now = dependencies.now ?? Date.now;
     const market = dependencies.market ?? binance;
     const hasPaperOverrides = Boolean(
-      dependencies.openPaperPosition || dependencies.manageOpenPositions || dependencies.getAccountSnapshot,
+      dependencies.openPaperPosition || dependencies.manageOpenPositions
+      || dependencies.getAccountSnapshot || dependencies.getOpenPositions,
     );
     const coordinator = dependencies.executionCoordinator ?? (hasPaperOverrides
       ? createExecutionCoordinator({
@@ -156,6 +158,7 @@ export class TradingEngine {
             ...(dependencies.openPaperPosition ? { open: dependencies.openPaperPosition } : {}),
             ...(dependencies.manageOpenPositions ? { manage: dependencies.manageOpenPositions } : {}),
             ...(dependencies.getAccountSnapshot ? { account: dependencies.getAccountSnapshot } : {}),
+            ...(dependencies.getOpenPositions ? { positions: dependencies.getOpenPositions } : {}),
           },
         })
       : executionCoordinator);
@@ -164,7 +167,7 @@ export class TradingEngine {
       market,
       monitor: dependencies.monitor ?? new MarketMonitor({ client: market, now }),
       getSettings: dependencies.getSettings ?? getSettings,
-      getOpenPositions: dependencies.getOpenPositions ?? getOpenPositions,
+      getOpenPositions: () => coordinator.positions(),
       getAccountSnapshot: () => coordinator.account(),
       saveEquitySnapshot: dependencies.saveEquitySnapshot ?? (async (snapshot) => {
         await getDb().insert(equitySnapshots).values({

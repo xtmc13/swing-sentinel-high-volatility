@@ -274,7 +274,7 @@ describe("三态引擎编排", () => {
     const h = harness({
       settings: { autoTrade: true },
       dependencies: {
-        executionCoordinator: { open } as never,
+        executionCoordinator: { open, positions: vi.fn(async () => []) } as never,
         openPaperPosition,
       },
     });
@@ -283,6 +283,25 @@ describe("三态引擎编排", () => {
 
     expect(open).toHaveBeenCalledTimes(1);
     expect(openPaperPosition).not.toHaveBeenCalled();
+  });
+
+  it("引擎持仓数量只读取 coordinator，包含 live positions", async () => {
+    const open = vi.fn(async () => ({ ok: true as const, positionId: "position", reason: "不应开仓" }));
+    const positions = vi.fn(async () => [{} as never]);
+    const getOpenPositions = vi.fn(async () => []);
+    const h = harness({
+      settings: { autoTrade: true, maxPositions: 1 },
+      dependencies: {
+        executionCoordinator: { open, positions } as never,
+        getOpenPositions,
+      },
+    });
+
+    await h.engine.scan(true);
+
+    expect(positions).toHaveBeenCalledTimes(1);
+    expect(getOpenPositions).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("NORMAL 只在 45 秒正式扫描生成并执行新信号，不因风险 tick 加速开仓", async () => {

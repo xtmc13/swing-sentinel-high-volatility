@@ -105,6 +105,7 @@ function setup(options: {
   env?: Record<string, string | undefined>;
   armed?: boolean;
   risk?: { openPositions: number; pendingIntents: number; unfinishedOrders: number };
+  riskLoader?: () => Promise<{ openPositions: number; pendingIntents: number; unfinishedOrders: number }>;
   now?: () => number;
 } = {}) {
   const settings: TradingSettings = { ...DEFAULT_SETTINGS, autoTrade: true, ...options.settings };
@@ -119,7 +120,7 @@ function setup(options: {
     getSettings: async () => settings,
     saveSettings,
     getLiveControls: async () => ({ armed: options.armed ?? false }),
-    getOutstandingRisk: async () => options.risk ?? { openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 },
+    getOutstandingRisk: options.riskLoader ?? (async () => options.risk ?? { openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
     market: { dataSource: options.source ?? "MAINNET" },
     env: options.env ?? {},
     now: options.now ?? (() => 1_800_000_001_000),
@@ -195,6 +196,50 @@ describe("ExecutionCoordinator", () => {
       executionMode: "LIVE_MAINNET",
     });
     expect(h.saveSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("switch 检查到写入期间 open 不能进入 adapter，完成后按新模式执行", async () => {
+    let riskStarted!: () => void;
+    const riskCheckStarted = new Promise<void>((resolve) => { riskStarted = resolve; });
+    let releaseRisk!: () => void;
+    const riskRelease = new Promise<void>((resolve) => { releaseRisk = resolve; });
+    const order: string[] = [];
+    const h = setup({
+      settings: { executionMode: "LIVE_MAINNET" },
+      env: { LIVE_TRADING_ENABLED: "true" },
+      armed: true,
+      riskLoader: async () => {
+        order.push("risk");
+        riskStarted();
+        await riskRelease;
+        return { openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 };
+      },
+    });
+    h.saveSettings.mockImplementation(async (next) => {
+      order.push("save");
+      Object.assign(h.settings, next);
+    });
+    vi.mocked(h.paper.open).mockImplementation(async () => {
+      order.push("paper-open");
+      return { ok: true as const, positionId: "paper-position", reason: "模拟开仓成交" };
+    });
+    vi.mocked(h.live.open).mockImplementation(async () => {
+      order.push("live-open");
+      return { ok: true as const, positionId: "live-position", reason: "不应提前开仓" };
+    });
+
+    const switching = h.coordinator.switchExecutionMode("PAPER");
+    await riskCheckStarted;
+    const opening = h.coordinator.open(opportunity());
+    await new Promise((resolve) => setImmediate(resolve));
+    const earlyAdapterCalls = vi.mocked(h.paper.open).mock.calls.length + vi.mocked(h.live.open).mock.calls.length;
+    releaseRisk();
+    await switching;
+    const result = await opening;
+
+    expect(earlyAdapterCalls).toBe(0);
+    expect(order).toEqual(["risk", "save", "paper-open"]);
+    expect(result).toMatchObject({ ok: true, positionId: "paper-position" });
   });
 
   it.each([

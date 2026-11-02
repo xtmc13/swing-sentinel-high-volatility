@@ -329,6 +329,7 @@ export interface MomentumExhaustionEvent {\n  time: number;\n  symbol: string;\n
   transitions: PortfolioVolatilityTransition[];
   dailyLossLocks: { time: number; day: string; equity: number; dayStartEquity: number }[];
   dataGaps: string[];
+  momentumExhaustion: MomentumExhaustionEvent[];
 }
 
 export const DEFAULT_SETTINGS: TradingSettings = {

@@ -102,13 +102,16 @@ export function analyzeClosedCandles(input: AnalyzeClosedCandlesInput): Opportun
   }
   const score = Math.round(
     (aligned ? 35 : 0) + (setup ? 20 : 0) + (trigger ? 20 : 0)
-    + market.liquidityScore * 0.15 + (momentumAligned ? 10 : Math.max(0, 5 - Math.abs(previous5.close - last5.close)))\n    - Math.round(exhaustion.score * 0.2),
+    + market.liquidityScore * 0.15 + (momentumAligned ? 10 : Math.max(0, 5 - Math.abs(previous5.close - last5.close)))
+    - Math.round(exhaustion.score * 0.2),
   );
   return {
     id: `${market.symbol}-${side}`, symbol: market.symbol, side, status, score,
     regime, entry, stop, target, stopDistancePct, rewardRisk: 2.2,
     leverage: settings.leverageMode === "FIXED" ? Math.min(settings.fixedLeverage, market.maxLeverage) : market.maxLeverage,
     marginPct: settings.marginPerTradePct, riskPct: settings.riskPerTradePct,
-    reasons, signalCloseTime, stateVersion: input.stateVersion, sourceGeneration: input.sourceGeneration ?? 0, atr15,\n    momentumExhaustion: { score: exhaustion.score, resonanceCount: exhaustion.resonanceCount, resonant: exhaustion.resonant, protection: exhaustion.protection, structureBreak: exhaustion.structureBreak },\n    createdAt: new Date(now).toISOString(),
+    reasons, signalCloseTime, stateVersion: input.stateVersion, sourceGeneration: input.sourceGeneration ?? 0, atr15,
+    momentumExhaustion: { score: exhaustion.score, resonanceCount: exhaustion.resonanceCount, resonant: exhaustion.resonant, protection: exhaustion.protection, structureBreak: exhaustion.structureBreak },
+    createdAt: new Date(now).toISOString(),
   };
 }

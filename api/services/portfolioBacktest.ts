@@ -12,7 +12,8 @@ import {
   type TradeView,
   type TradingSettings,
   type VolatilityState,
-} from "@contracts/trading";\nimport { evaluateMomentumExhaustion } from "./momentumExhaustion";
+} from "@contracts/trading";
+import { evaluateMomentumExhaustion } from "./momentumExhaustion";
 import { getSettings } from "../queries/trading";
 import { applyAdverseSlippage, approveHistoricalEntry, type EntryRiskPosition } from "./execution";
 import { persistBacktestResult } from "./backtest";
@@ -342,7 +343,8 @@ export async function runPortfolioBacktest(
   const funding: PortfolioFundingSettlement[] = [];
   const riskRejections: PortfolioRiskRejection[] = [];
   const transitions: PortfolioVolatilityTransition[] = [];
-  const dailyLossLocks: PortfolioBacktestResult["dailyLossLocks"] = [];\n  const momentumExhaustion: PortfolioBacktestResult["momentumExhaustion"] = [];
+  const dailyLossLocks: PortfolioBacktestResult["dailyLossLocks"] = [];
+  const momentumExhaustion: PortfolioBacktestResult["momentumExhaustion"] = [];
   const curve: { time: number; equity: number }[] = [{ time: timeline[0].time, equity: initialEquity }];
   const timeoutBars = Math.max(1, Math.round(72 * 3_600_000 / INTERVAL_MS[timeframe]));
 

@@ -645,13 +645,15 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
     }
     if (!unsettled.length) {
       const remaining = await db.transaction(async (tx) => {
-        await tx.select().from(simulationAccounts).where(eq(simulationAccounts.id, 1)).limit(1).for("update");
+        const account = (await tx.select().from(simulationAccounts)
+          .where(eq(simulationAccounts.id, 1)).limit(1).for("update"))[0];
+        if (!account) throw new Error("Simulation account is missing");
         const openRows = await tx.select().from(positions).where(eq(positions.status, "OPEN"));
         if (openRows.length) return openRows;
         await tx.update(simulationAccounts).set({
-          cash: 100_000,
+          cash: account.initialBalance,
           realizedPnl: 0,
-          dayStartEquity: 100_000,
+          dayStartEquity: account.initialBalance,
           dayKey: new Date(now()).toISOString().slice(0, 10),
           dailyLockDay: null,
         }).where(eq(simulationAccounts.id, 1));

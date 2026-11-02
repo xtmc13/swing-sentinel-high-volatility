@@ -1,4 +1,4 @@
-import { and, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import type { MySql2Database } from "drizzle-orm/mysql2";
 import { liveIntents, tradingSettings } from "@db/schema";
 import type { Side } from "@contracts/trading";
@@ -7,6 +7,7 @@ import {
   compareDecimals,
   divideDecimals,
   isMultipleOfStep,
+  multiplyDecimals,
   type DecimalString,
 } from "./decimal";
 import type { LiveIntentReservation } from "./liveRisk";
@@ -74,10 +75,6 @@ function validLease(workerId: string, leaseDurationMs: number): boolean {
   return workerId.trim().length > 0 && Number.isSafeInteger(leaseDurationMs) && leaseDurationMs > 0;
 }
 
-async function useUtcSession(db: Pick<LiveDatabase, "execute">): Promise<void> {
-  await db.execute(sql`SET SESSION time_zone = '+00:00'`);
-}
-
 async function databaseNow(db: Pick<LiveDatabase, "execute">): Promise<Date> {
   const result = await db.execute(sql`
     SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS UNSIGNED) AS db_now_ms
@@ -100,8 +97,12 @@ function approvalError(
   if (input.expiresAt.getTime() <= now.getTime()) return "意图在提交前复核时已过期";
   try {
     if (compareDecimals(approval.quantity, "0") <= 0 || compareDecimals(approval.notional, "0") <= 0
-      || compareDecimals(approval.reservedMargin, "0") <= 0 || compareDecimals(approval.reservedRisk, "0") < 0) {
-      return "final gate 数量、名义价值、margin 或 risk 无效";
+      || compareDecimals(approval.reservedMargin, "0") <= 0 || compareDecimals(approval.reservedRisk, "0") <= 0) {
+      return "final gate 数量、名义价值、margin 或 opening risk 无效";
+    }
+    const expectedNotional = multiplyDecimals(approval.quantity, input.limitPrice);
+    if (compareDecimals(approval.notional, expectedNotional) !== 0) {
+      return "final gate notional 与 quantity*limitPrice 不一致";
     }
     const expectedMargin = divideDecimals(approval.notional, String(input.leverage), {
       decimalPlaces: 30,
@@ -137,7 +138,6 @@ export async function createLiveIntent(
 
   try {
     return await db.transaction(async (tx): Promise<CreateLiveIntentResult> => {
-      await useUtcSession(tx);
       const settingsLock = await tx.select({
         id: tradingSettings.id,
         executionMode: tradingSettings.executionMode,
@@ -167,9 +167,9 @@ export async function createLiveIntent(
         reservedMargin: approval.reservedMargin,
         reservedRisk: approval.reservedRisk,
         version: 1,
-        expiresAt: input.expiresAt,
+        expiresAt: sql`FROM_UNIXTIME(${input.expiresAt.getTime()} / 1000)`,
         leaseOwner: input.workerId,
-        leaseExpiresAt: new Date(now.getTime() + input.leaseDurationMs),
+        leaseExpiresAt: sql`DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL ${input.leaseDurationMs * 1000} MICROSECOND)`,
       });
       return { ok: true, id: input.id, version: 1 };
     });
@@ -188,7 +188,6 @@ export async function claimLiveIntent(
     || !validLease(input.workerId, input.leaseDurationMs)) {
     return { ok: false, reason: "版本或 worker lease 无效" };
   }
-  await useUtcSession(db);
   const result = await db.update(liveIntents).set({
     leaseOwner: input.workerId,
     leaseExpiresAt: sql`DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL ${input.leaseDurationMs * 1000} MICROSECOND)`,
@@ -213,20 +212,18 @@ export async function claimLiveIntent(
 const TERMINAL_INTENT_STATUSES = new Set(["FILLED", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"]);
 
 export async function getLiveIntentReservations(db: LiveDatabase): Promise<LiveIntentReservation> {
-  await useUtcSession(db);
-  const [rows, now] = await Promise.all([
-    db.select({
-      status: liveIntents.status,
-      expiresAt: liveIntents.expiresAt,
-      margin: liveIntents.reservedMargin,
-      risk: liveIntents.reservedRisk,
-    }).from(liveIntents),
-    databaseNow(db),
-  ]);
-  const active = rows.filter((row) => !TERMINAL_INTENT_STATUSES.has(row.status)
-    && (row.status !== "PENDING_SEND" || row.expiresAt.getTime() > now.getTime()));
+  const rows = await db.select({
+    margin: liveIntents.reservedMargin,
+    risk: liveIntents.reservedRisk,
+  }).from(liveIntents).where(and(
+    notInArray(liveIntents.status, [...TERMINAL_INTENT_STATUSES]),
+    or(
+      ne(liveIntents.status, "PENDING_SEND"),
+      gt(liveIntents.expiresAt, sql`CURRENT_TIMESTAMP(3)`),
+    ),
+  ));
   return {
-    margin: addDecimals(...active.map((row) => row.margin)),
-    risk: addDecimals(...active.map((row) => row.risk)),
+    margin: addDecimals(...rows.map((row) => row.margin)),
+    risk: addDecimals(...rows.map((row) => row.risk)),
   };
 }

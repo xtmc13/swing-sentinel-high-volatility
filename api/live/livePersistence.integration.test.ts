@@ -321,6 +321,9 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
     { name: "wrong signal", values: { signalId: "other-signal" } },
     { name: "inconsistent notional", values: { notional: "1" } },
     { name: "inconsistent margin", values: { reservedMargin: "1" } },
+    { name: "incoherent notional margin and zero risk", values: { notional: "1", reservedMargin: "0.2", reservedRisk: "0" } },
+    { name: "coherent margin with mismatched quantity notional", values: { notional: "1", reservedMargin: "0.2" } },
+    { name: "zero opening risk", values: { reservedRisk: "0" } },
     { name: "stale approval", values: { validUntil: new Date(0) } },
   ])("拒绝 $name 的 final gate 结果", async ({ values }) => {
     const input = intentInput(crypto.randomUUID(), "invalid-approval");
@@ -353,6 +356,35 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
 
     expect(result.ok).toBe(false);
     expect(gateCalled).toBe(false);
+  });
+
+  it("pooled 非 UTC session 不被修改且过期预留由 DB 时间过滤", async () => {
+    if (!testDatabaseUrl) throw new Error("database required");
+    const pool = mysql.createPool({ uri: testDatabaseUrl, connectionLimit: 1 });
+    const pooled = drizzle(pool, { mode: "planetscale", schema });
+    try {
+      await pooled.execute(sql`SET SESSION time_zone = '+08:00'`);
+      const input = {
+        ...intentInput(crypto.randomUUID(), "pool-timezone"),
+        expiresAt: new Date(Date.now() + 60_000),
+      };
+      expect((await createLiveIntent(pooled, input, { finalGate: finalGateFor(input) })).ok).toBe(true);
+      expect(await getLiveIntentReservations(pooled)).toEqual({ margin: "800", risk: "60" });
+
+      const timezone = await pooled.execute(sql`SELECT @@session.time_zone AS time_zone`);
+      const timezoneRows = (timezone as unknown as [Array<{ time_zone: string }>])[0];
+      expect(timezoneRows[0]?.time_zone).toBe("+08:00");
+
+      await pooled.update(schema.liveIntents).set({
+        expiresAt: sql`DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 1 SECOND)`,
+      }).where(eq(schema.liveIntents.id, input.id));
+      expect(await getLiveIntentReservations(pooled)).toEqual({ margin: "0", risk: "0" });
+      const finalTimezone = await pooled.execute(sql`SELECT @@session.time_zone AS time_zone`);
+      const finalTimezoneRows = (finalTimezone as unknown as [Array<{ time_zone: string }>])[0];
+      expect(finalTimezoneRows[0]?.time_zone).toBe("+08:00");
+    } finally {
+      await pool.end();
+    }
   });
 
   it("final gate 延迟超过 lease 时长时仍在复核后以 DB 时间开始 lease", async () => {

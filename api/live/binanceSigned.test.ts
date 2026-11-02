@@ -162,6 +162,69 @@ describe("Binance signed mainnet client", () => {
     expect(sleep.mock.calls).toEqual([[250], [500]]);
   });
 
+  it.each([Number.NaN, Infinity, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, 11])(
+    "rejects invalid maxRateLimitRetries=%s without making requests",
+    (maxRateLimitRetries) => {
+      const fetchMock = vi.fn();
+      expect(() => new BinanceSignedClient({ ...credentials, fetch: fetchMock, maxRateLimitRetries }))
+        .toThrow("maxRateLimitRetries");
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("honors the full server Retry-After cooldown without capping it", async () => {
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ serverTime: NOW }))
+      .mockResolvedValueOnce(jsonResponse({}, { status: 429, headers: { "Retry-After": "120" } }))
+      .mockResolvedValueOnce(jsonResponse({ assets: [] }));
+    const client = clientWith(fetchMock, { sleep });
+
+    await client.account();
+
+    expect(sleep).toHaveBeenCalledWith(120_000);
+  });
+
+  it("stops after the configured rate-limit retries are exhausted", async () => {
+    const sleep = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ serverTime: NOW }))
+      .mockImplementation(async () => jsonResponse({ code: -1003 }, { status: 429 }));
+    const client = new BinanceSignedClient({
+      ...credentials,
+      fetch: fetchMock,
+      now: () => NOW,
+      sleep,
+      maxRateLimitRetries: 2,
+    });
+
+    const error = await client.account().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(BinanceSignedError);
+    expect((error as BinanceSignedError).status).toBe(429);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(sleep.mock.calls).toEqual([[250], [500]]);
+  });
+
+  it.each([
+    { name: "userTrades negative startTime", invoke: (client: BinanceSignedClient) => client.userTrades({ symbol: "BTCUSDT", startTime: -1 }) },
+    { name: "userTrades infinite endTime", invoke: (client: BinanceSignedClient) => client.userTrades({ symbol: "BTCUSDT", endTime: Infinity }) },
+    { name: "userTrades fractional fromId", invoke: (client: BinanceSignedClient) => client.userTrades({ symbol: "BTCUSDT", fromId: 0.5 }) },
+    { name: "userTrades zero limit", invoke: (client: BinanceSignedClient) => client.userTrades({ symbol: "BTCUSDT", limit: 0 }) },
+    { name: "userTrades excessive limit", invoke: (client: BinanceSignedClient) => client.userTrades({ symbol: "BTCUSDT", limit: 1001 }) },
+    { name: "userTrades reversed time range", invoke: (client: BinanceSignedClient) => client.userTrades({ symbol: "BTCUSDT", startTime: 10, endTime: 9 }) },
+    { name: "income NaN startTime", invoke: (client: BinanceSignedClient) => client.income({ startTime: Number.NaN }) },
+    { name: "income unsafe endTime", invoke: (client: BinanceSignedClient) => client.income({ endTime: Number.MAX_SAFE_INTEGER + 1 }) },
+    { name: "income fractional limit", invoke: (client: BinanceSignedClient) => client.income({ limit: 1.5 }) },
+    { name: "income reversed time range", invoke: (client: BinanceSignedClient) => client.income({ startTime: 10, endTime: 9 }) },
+  ])("rejects $name before any network request", async ({ invoke }) => {
+    const fetchMock = vi.fn();
+    const client = clientWith(fetchMock);
+
+    await expect(invoke(client)).rejects.toThrow("Invalid signed numeric parameters");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it.each([
     { name: "account", invoke: (client: BinanceSignedClient) => client.account(), path: "/fapi/v2/account", query: {} },
     { name: "positionRisk", invoke: (client: BinanceSignedClient) => client.positionRisk("BTCUSDT"), path: "/fapi/v2/positionRisk", query: { symbol: "BTCUSDT" } },

@@ -176,13 +176,17 @@ export class BinanceSignedClient {
     if (!Number.isInteger(recvWindow) || recvWindow < 1 || recvWindow > 5000) {
       throw new Error("recvWindow must be an integer between 1 and 5000");
     }
+    const maxRateLimitRetries = options.maxRateLimitRetries ?? 2;
+    if (!Number.isSafeInteger(maxRateLimitRetries) || maxRateLimitRetries < 0 || maxRateLimitRetries > 10) {
+      throw new Error("maxRateLimitRetries must be a safe integer between 0 and 10");
+    }
     this.apiKey = options.apiKey;
     this.apiSecret = options.apiSecret;
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.recvWindow = recvWindow;
-    this.maxRateLimitRetries = options.maxRateLimitRetries ?? 2;
+    this.maxRateLimitRetries = maxRateLimitRetries;
   }
 
   get serverTimeOffsetMs(): number | null {
@@ -220,11 +224,32 @@ export class BinanceSignedClient {
     return this.signedRequest("GET", "/fapi/v1/openOrders", { symbol });
   }
 
-  userTrades(params: UserTradesParams): Promise<BinanceUserTrade[]> {
+  private validateSignedNumericParams(params: UserTradesParams | IncomeParams): void {
+    for (const value of [params.startTime, params.endTime]) {
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+        throw new Error("Invalid signed numeric parameters");
+      }
+    }
+    if ("fromId" in params && params.fromId !== undefined
+      && (!Number.isSafeInteger(params.fromId) || params.fromId < 0)) {
+      throw new Error("Invalid signed numeric parameters");
+    }
+    if (params.limit !== undefined
+      && (!Number.isSafeInteger(params.limit) || params.limit < 1 || params.limit > 1000)) {
+      throw new Error("Invalid signed numeric parameters");
+    }
+    if (params.startTime !== undefined && params.endTime !== undefined && params.startTime > params.endTime) {
+      throw new Error("Invalid signed numeric parameters");
+    }
+  }
+
+  async userTrades(params: UserTradesParams): Promise<BinanceUserTrade[]> {
+    this.validateSignedNumericParams(params);
     return this.signedRequest("GET", "/fapi/v1/userTrades", { ...params });
   }
 
-  income(params: IncomeParams = {}): Promise<BinanceIncome[]> {
+  async income(params: IncomeParams = {}): Promise<BinanceIncome[]> {
+    this.validateSignedNumericParams(params);
     return this.signedRequest("GET", "/fapi/v1/income", { ...params });
   }
 
@@ -316,7 +341,7 @@ export class BinanceSignedClient {
   private rateLimitDelay(response: Response, attempt: number): number {
     const retryAfterSeconds = Number(response.headers.get("Retry-After"));
     if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0 && response.headers.has("Retry-After")) {
-      return Math.min(retryAfterSeconds * 1000, 30_000);
+      return retryAfterSeconds * 1000;
     }
     return Math.min(250 * 2 ** attempt, 5000);
   }

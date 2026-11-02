@@ -21,7 +21,19 @@ describe("exact decimal accounting", () => {
 
   it("calculates notional and fees exactly", () => {
     expect(multiplyDecimals("12345.678901", "0.00075")).toBe("9.25925917575");
-    expect(divideDecimals("1", "8")).toBe("0.125");
+    expect(divideDecimals("1", "8", { decimalPlaces: 3, roundingMode: "ROUND_DOWN" })).toBe("0.125");
+  });
+
+  it("multiplies beyond 80 significant digits without rounding", () => {
+    const value = "9".repeat(41);
+    expect(multiplyDecimals(value, value)).toBe(`${"9".repeat(40)}8${"0".repeat(40)}1`);
+  });
+
+  it("requires an explicit division scale and rounding contract", () => {
+    expect(divideDecimals("2", "3", { decimalPlaces: 4, roundingMode: "ROUND_HALF_UP" })).toBe("0.6667");
+    expect(divideDecimals("-2", "3", { decimalPlaces: 4, roundingMode: "ROUND_HALF_UP" })).toBe("-0.6667");
+    expect(divideDecimals("-2", "3", { decimalPlaces: 4, roundingMode: "ROUND_DOWN" })).toBe("-0.6666");
+    expect(divideDecimals("1", "3", { decimalPlaces: 4, roundingMode: "ROUND_UP" })).toBe("0.3334");
   });
 
   it("normalizes decimal strings without exponent notation", () => {
@@ -44,11 +56,21 @@ describe("exact decimal accounting", () => {
     expect(isMultipleOfStep("1.236", "0.005")).toBe(false);
   });
 
+  it("floors huge values to steps without quotient precision loss", () => {
+    expect(floorToStep("1e100", "3")).toBe("9".repeat(100));
+  });
+
+  it("rejects non-decimal grammar", () => {
+    for (const value of ["0x10", "0b10", "0o10", "1_000", "1,000", "", ".", "1.2.3", "--1", "1e", "1e+"]) {
+      expect(() => decimal(value)).toThrow("Invalid decimal");
+    }
+  });
+
   it("fails closed for invalid values and zero divisors or steps", () => {
     expect(() => decimal("NaN")).toThrow("Invalid decimal");
     expect(() => decimal("Infinity")).toThrow("Invalid decimal");
     expect(() => decimal(0.1 as unknown as string)).toThrow("Invalid decimal");
-    expect(() => divideDecimals("1", "0")).toThrow("Division by zero");
+    expect(() => divideDecimals("1", "0", { decimalPlaces: 3, roundingMode: "ROUND_DOWN" })).toThrow("Division by zero");
     expect(() => floorToStep("1", "0")).toThrow("Step must be positive");
     expect(() => ceilToStep("1", "-0.1")).toThrow("Step must be positive");
   });

@@ -197,17 +197,56 @@ export interface ReconciliationResult {
   issues: ReconciliationIssue[];
 }
 
+export interface EntryResume {
+  resume(): Promise<boolean>;
+}
+
+export class LiveEntryAdmission {
+  private generation = 0;
+  private resumeOwner: symbol | null = null;
+
+  constructor(private initiallyAllowed = true) {}
+
+  get allowed(): boolean {
+    return this.initiallyAllowed;
+  }
+
+  async pauseForReconciliation(): Promise<EntryResume | null> {
+    if (!this.initiallyAllowed || this.resumeOwner) return null;
+    const owner = Symbol("reconciliation-resume");
+    const generation = this.generation;
+    this.resumeOwner = owner;
+    this.initiallyAllowed = false;
+    return {
+      resume: async () => {
+        if (this.resumeOwner !== owner || this.generation !== generation) return false;
+        this.resumeOwner = null;
+        this.generation += 1;
+        this.initiallyAllowed = true;
+        return true;
+      },
+    };
+  }
+
+  async pauseFromOperator(): Promise<void> {
+    this.resumeOwner = null;
+    this.generation += 1;
+    this.initiallyAllowed = false;
+  }
+}
+
 interface ReconciliationServiceOptions {
   client: ReconciliationClient;
   orders: LiveOrderStore;
   store: ReconciliationStore;
   recovery: OrderRecovery;
-  pauseNewEntries: () => Promise<boolean>;
-  allowNewEntries: () => Promise<void>;
+  accounting: { synchronize(): Promise<void> };
+  pauseNewEntries: () => Promise<EntryResume | null>;
   now?: () => number;
 }
 
-const TERMINAL_ORDER_STATUSES = new Set(["FILLED", "CANCEL", "REPLACE"]);
+const TERMINAL_ORDER_STATUSES = new Set(["FILLED", "CANCEL"]);
+const UNRESOLVED_RECOVERY_STATUSES = new Set(["UNKNOWN", "RECONCILING", "REPLACE"]);
 
 function sameDecimal(left: DecimalString, right: DecimalString): boolean {
   return compareDecimals(left, right) === 0;
@@ -234,8 +273,9 @@ export class ReconciliationService {
       for (const order of initialOrders) {
         if (TERMINAL_ORDER_STATUSES.has(order.status)) continue;
         try {
-          await this.options.recovery.recover(order.clientOrderId,
+          const recovered = await this.options.recovery.recover(order.clientOrderId,
             positions.find((position) => position.id === order.intentId));
+          if (UNRESOLVED_RECOVERY_STATUSES.has(recovered.status)) throw new Error("Recovery remains unresolved");
         } catch {
           issues.push(await this.issue({
             category: "UNSETTLED_INTENT",
@@ -248,6 +288,7 @@ export class ReconciliationService {
         }
       }
 
+      await this.options.accounting.synchronize();
       const [account, remotePositions, remoteOrders, localOrders, localPositions, previousSnapshots, unsettledIntents] = await Promise.all([
         this.options.client.account(),
         this.options.client.positionRisk(),
@@ -405,7 +446,7 @@ export class ReconciliationService {
     }
 
     const ok = issues.length === 0;
-    if (ok && mayResume) await this.options.allowNewEntries();
+    if (ok) await mayResume?.resume();
     return { ok, issues };
   }
 
@@ -424,4 +465,3 @@ export class ReconciliationService {
 export function signedPositionQuantity(position: LivePosition): DecimalString {
   return position.side === "SHORT" ? `-${decimal(position.quantity)}` : decimal(position.quantity);
 }
-

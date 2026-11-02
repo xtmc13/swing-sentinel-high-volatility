@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { BinanceIncome, BinanceUserTrade } from "./binanceSigned";
+import type { BinanceIncome, BinanceUserTrade, UserTradesParams } from "./binanceSigned";
 import {
   fetchAllIncome,
   fetchAllUserTrades,
   InMemoryAccountingStore,
+  LiveAccountingSynchronizer,
   syncIncome,
   syncUserTrades,
 } from "./accounting";
@@ -75,6 +76,31 @@ describe("live accounting pagination", () => {
     expect(startTimes).toEqual([100, 200, 300]);
   });
 
+  it("walks the complete income history in bounded time windows", async () => {
+    const day = 24 * 60 * 60 * 1_000;
+    const windows: Array<[number | undefined, number | undefined]> = [];
+
+    await fetchAllIncome({
+      income: async ({ startTime, endTime } = {}) => {
+        windows.push([startTime, endTime]);
+        return [];
+      },
+    }, { startTime: 0, endTime: 8 * day }, 2);
+
+    expect(windows).toEqual([[0, 7 * day - 1], [7 * day, 8 * day]]);
+  });
+
+  it("rejects a repeating mixed-timestamp income page without cursor progress", async () => {
+    let calls = 0;
+    await expect(fetchAllIncome({
+      income: async () => {
+        calls += 1;
+        if (calls > 2) throw new Error("stuck");
+        return [income(1, 100), income(2, 200)];
+      },
+    }, { startTime: 100, endTime: 1_000 }, 2)).rejects.toThrow("Cannot advance");
+  });
+
   it("fails closed instead of skipping income records sharing a full-page timestamp", async () => {
     await expect(fetchAllIncome({
       income: async () => [income(1, 200), income(2, 200)],
@@ -129,5 +155,54 @@ describe("live accounting persistence", () => {
         amount: "-12.345678901234567890123456789",
       },
     ]);
+  });
+
+  it("uses userTrades as authoritative for trade-linked income commission and PnL", async () => {
+    const store = new InMemoryAccountingStore();
+    const incomeClient = {
+      income: async () => [
+        income(99, 200),
+        { ...income(10, 201), incomeType: "COMMISSION", tradeId: "42" },
+        { ...income(11, 202), incomeType: "REALIZED_PNL", tradeId: "42" },
+      ],
+    };
+    const tradeClient = { userTrades: async () => [trade(42)] };
+
+    expect((await syncIncome(incomeClient, store)).inserted).toBe(1);
+    await syncUserTrades(tradeClient, store, { symbol: "BTCUSDT" });
+
+    expect((await store.listLedgerEntries()).map((entry) => entry.exchangeTransactionId)).toEqual([
+      "99",
+      "BTCUSDT:42:COMMISSION",
+      "BTCUSDT:42:REALIZED_PNL",
+    ]);
+  });
+});
+
+describe("startup accounting synchronizer", () => {
+  it("synchronizes income and every configured symbol with the full history window", async () => {
+    const calls: string[] = [];
+    const client = {
+      income: async (params = {}) => {
+        calls.push(`income:${JSON.stringify(params)}`);
+        return [];
+      },
+      userTrades: async ({ symbol, startTime, endTime }: UserTradesParams) => {
+        calls.push(`trades:${symbol}:${startTime}:${endTime}`);
+        return [];
+      },
+    };
+    const synchronizer = new LiveAccountingSynchronizer({
+      client,
+      store: new InMemoryAccountingStore(),
+      incomeParams: { startTime: 0, endTime: 1_000 },
+      symbols: ["BTCUSDT", "ETHUSDT"],
+    });
+
+    await synchronizer.synchronize();
+
+    expect(calls[0]).toContain("income");
+    expect(calls[0]).toContain("startTime");
+    expect(calls.slice(1)).toEqual(["trades:BTCUSDT:0:1000", "trades:ETHUSDT:0:1000"]);
   });
 });

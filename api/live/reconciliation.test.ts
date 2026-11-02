@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { BinanceAccountResponse, BinanceOpenOrder, BinancePositionRisk } from "./binanceSigned";
 import {
   InMemoryReconciliationStore,
+  LiveEntryAdmission,
   ReconciliationService,
 } from "./reconciliation";
 import {
@@ -83,7 +84,9 @@ interface HarnessOptions {
   positions?: BinancePositionRisk[];
   account?: BinanceAccountResponse;
   recoverError?: boolean;
+  recoverStatus?: LiveOrderStatus;
   restError?: boolean;
+  accountingError?: boolean;
   entriesAlreadyPaused?: boolean;
   unsettledIntents?: Array<{ id: string; symbol: string; status: string }>;
 }
@@ -117,14 +120,26 @@ async function harness(options: HarnessOptions = {}) {
         if (options.recoverError) throw new Error("UNKNOWN");
         const latest = await orders.getOrder(clientOrderId);
         if (!latest) throw new Error("missing");
-        return latest;
+        const recoveredStatus = options.recoverStatus
+          ?? (["UNKNOWN", "RECONCILING", "REPLACE"].includes(latest.status) ? "NEW" : latest.status);
+        return orders.transitionOrder(clientOrderId, [latest.status], { status: recoveredStatus })
+          .then((updated) => updated ?? latest);
+      },
+    },
+    accounting: {
+      synchronize: async () => {
+        calls.push("accounting");
+        if (options.accountingError) throw new Error("accounting offline");
       },
     },
     pauseNewEntries: async () => {
       calls.push("pause");
-      return !options.entriesAlreadyPaused;
+      if (options.entriesAlreadyPaused) return null;
+      return { resume: async () => {
+        calls.push("allow");
+        return true;
+      } };
     },
-    allowNewEntries: async () => { calls.push("allow"); },
     now: () => 5_000,
   });
   return { service, orders, store, calls, recovered, localOrders };
@@ -139,6 +154,7 @@ describe("startup reconciliation", () => {
       "PARTIALLY_FILLED",
       "UNKNOWN",
       "RECONCILING",
+      "REPLACE",
     ];
     const remoteOrders = statuses.map((status, index) => remoteOrder(order(status, String(index + 1)), String(index + 1)));
     const h = await harness({ statuses, remoteOrders });
@@ -147,9 +163,29 @@ describe("startup reconciliation", () => {
 
     expect(h.calls[0]).toBe("pause");
     expect(h.calls.indexOf("pause")).toBeLessThan(h.calls.indexOf("account"));
-    expect(h.recovered).toHaveLength(6);
+    expect(h.recovered).toHaveLength(7);
     expect(h.calls.at(-1)).toBe("allow");
     expect(result.ok).toBe(true);
+  });
+
+  it("synchronizes accounting before allowing new entries", async () => {
+    const h = await harness();
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(true);
+    expect(h.calls).toContain("accounting");
+    expect(h.calls.indexOf("accounting")).toBeGreaterThan(h.calls.indexOf("pause"));
+    expect(h.calls.indexOf("accounting")).toBeLessThan(h.calls.indexOf("allow"));
+  });
+
+  it("does not resume when accounting synchronization fails", async () => {
+    const h = await harness({ accountingError: true });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect(h.calls).not.toContain("allow");
   });
 
   it("keeps admission frozen when recovery cannot resolve UNKNOWN", async () => {
@@ -160,6 +196,27 @@ describe("startup reconciliation", () => {
     expect(result.ok).toBe(false);
     expect(h.calls).not.toContain("allow");
     expect((await h.store.listIssues()).some((issue) => issue.category === "UNSETTLED_INTENT")).toBe(true);
+  });
+
+  it("rejects a recovered UNKNOWN result even when openOrders contains the order", async () => {
+    const remote = remoteOrder(order("UNKNOWN"));
+    const h = await harness({ statuses: ["UNKNOWN"], recoverStatus: "UNKNOWN", remoteOrders: [remote] });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect(h.calls).not.toContain("allow");
+    expect((await h.store.listIssues()).some((issue) => issue.category === "UNSETTLED_INTENT")).toBe(true);
+  });
+
+  it("does not treat a stuck REPLACE result as clean recovery", async () => {
+    const h = await harness({ statuses: ["REPLACE"], recoverStatus: "REPLACE" });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect(h.recovered).toHaveLength(1);
+    expect(h.calls).not.toContain("allow");
   });
 
   it("stays frozen when the REST snapshot fails", async () => {
@@ -194,6 +251,57 @@ describe("startup reconciliation", () => {
 
     expect(result.ok).toBe(true);
     expect(h.calls).not.toContain("allow");
+  });
+});
+
+describe("entry admission resume ownership", () => {
+  it("gives nested reconciliation pauses a single resume owner", async () => {
+    const gate = new LiveEntryAdmission(true);
+
+    const first = await gate.pauseForReconciliation();
+    const nested = await gate.pauseForReconciliation();
+
+    expect(first).not.toBeNull();
+    expect(nested).toBeNull();
+    expect(gate.allowed).toBe(false);
+    expect(await first?.resume()).toBe(true);
+    expect(gate.allowed).toBe(true);
+  });
+
+  it("invalidates a stale resume token when an operator pauses during REST", async () => {
+    const gate = new LiveEntryAdmission(true);
+    const token = await gate.pauseForReconciliation();
+
+    await gate.pauseFromOperator();
+
+    expect(await token?.resume()).toBe(false);
+    expect(gate.allowed).toBe(false);
+  });
+
+  it("does not let reconciliation overwrite an operator pause during account retrieval", async () => {
+    const gate = new LiveEntryAdmission(true);
+    const store = new InMemoryReconciliationStore();
+    const orders = new InMemoryLiveOrderStore();
+    const service = new ReconciliationService({
+      client: {
+        account: async () => {
+          await gate.pauseFromOperator();
+          return account();
+        },
+        positionRisk: async () => [],
+        openOrders: async () => [],
+      },
+      orders,
+      store,
+      recovery: { recover: async () => { throw new Error("unexpected"); } },
+      accounting: { synchronize: async () => undefined },
+      pauseNewEntries: () => gate.pauseForReconciliation(),
+    });
+
+    const result = await service.reconcile();
+
+    expect(result.ok).toBe(true);
+    expect(gate.allowed).toBe(false);
   });
 });
 

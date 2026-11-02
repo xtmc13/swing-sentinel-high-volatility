@@ -81,15 +81,22 @@ const STATUS_RANK: Record<LiveOrderStatus, number> = {
   RECONCILING: 5,
 };
 
+interface StreamAttempt {
+  generation: number;
+  socket: UserDataSocket | null;
+  bufferedEvents: unknown[];
+  reconciling: boolean;
+}
+
+class ReconciliationNotReady extends Error {}
+
 export class UserDataStream {
-  private socket: UserDataSocket | null = null;
+  private attempt: StreamAttempt | null = null;
   private reconnecting: Promise<void> | null = null;
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
   private eventTail: Promise<void> = Promise.resolve();
-  private bufferedEvents: unknown[] = [];
-  private reconciling = false;
+  private generation = 0;
   private running = false;
-  private readonly lastOrderEvents = new Map<string, number>();
   private readonly keepAliveIntervalMs: number;
   private readonly reconnectDelayMs: number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
@@ -105,36 +112,29 @@ export class UserDataStream {
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
+    this.reconnecting = null;
+    const generation = ++this.generation;
     await this.options.pauseNewEntries();
     try {
-      await this.connectAndReconcile();
+      await this.connectWithRetry(generation, false);
+      if (!this.isCurrent(generation)) return;
       this.keepAliveTimer = setInterval(() => { void this.keepAlive(); }, this.keepAliveIntervalMs);
     } catch (error) {
+      if (!this.isCurrent(generation)) return;
       this.running = false;
-      const socket = this.socket;
-      this.socket = null;
-      if (socket) {
-        socket.onclose = null;
-        socket.onerror = null;
-        socket.onmessage = null;
-        socket.close();
-      }
+      this.generation += 1;
+      this.discardAttempt();
       throw error;
     }
   }
 
   async stop(): Promise<void> {
     this.running = false;
+    this.generation += 1;
+    this.reconnecting = null;
     if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
     this.keepAliveTimer = null;
-    const socket = this.socket;
-    this.socket = null;
-    if (socket) {
-      socket.onclose = null;
-      socket.onerror = null;
-      socket.onmessage = null;
-      socket.close();
-    }
+    this.discardAttempt();
     await this.eventTail;
     await this.options.client.closeListenKey();
   }
@@ -148,43 +148,78 @@ export class UserDataStream {
     }
   }
 
-  private async connectAndReconcile(): Promise<void> {
-    const { listenKey } = await this.options.client.createListenKey();
-    if (!listenKey) throw new Error("Empty listenKey");
-    const socket = this.options.socketFactory(privateUserDataStreamUrl(listenKey));
-    this.socket = socket;
-    this.reconciling = true;
-    this.bufferedEvents = [];
-    socket.onmessage = ({ data }) => {
-      if (this.socket !== socket) return;
-      if (this.reconciling) this.bufferedEvents.push(data);
-      else this.enqueue(data, socket);
-    };
-    socket.onclose = () => {
-      if (this.socket === socket) void this.reconnect();
-    };
-    socket.onerror = () => {
-      if (this.socket === socket) void this.reconnect();
-    };
-    try {
-      await this.options.client.syncServerTime();
-      await this.options.reconcile();
-      this.reconciling = false;
-      const buffered = this.bufferedEvents;
-      this.bufferedEvents = [];
-      for (const event of buffered) this.enqueue(event, socket);
-    } catch (error) {
-      this.reconciling = false;
-      this.bufferedEvents = [];
-      throw error;
+  private isCurrent(generation: number): boolean {
+    return this.running && this.generation === generation;
+  }
+
+  private isCurrentAttempt(attempt: StreamAttempt): boolean {
+    return this.isCurrent(attempt.generation) && this.attempt === attempt;
+  }
+
+  private discardAttempt(): void {
+    const attempt = this.attempt;
+    this.attempt = null;
+    if (!attempt?.socket) return;
+    attempt.socket.onclose = null;
+    attempt.socket.onerror = null;
+    attempt.socket.onmessage = null;
+    attempt.socket.close();
+    attempt.bufferedEvents = [];
+  }
+
+  private async connectWithRetry(generation: number, retryErrors: boolean): Promise<void> {
+    while (this.isCurrent(generation)) {
+      try {
+        await this.connectAndReconcile(generation);
+        return;
+      } catch (error) {
+        if (!this.isCurrent(generation)) return;
+        this.discardAttempt();
+        if (!retryErrors && !(error instanceof ReconciliationNotReady)) throw error;
+        await this.recordIssue("REST_RECONCILIATION", null, "私有流连接或 REST 对账未就绪，保持冻结并重试");
+        await this.sleep(this.reconnectDelayMs);
+      }
     }
   }
 
-  private enqueue(data: unknown, socket: UserDataSocket): void {
-    this.eventTail = this.eventTail.then(() => this.handle(data)).catch(async () => {
+  private async connectAndReconcile(generation: number): Promise<void> {
+    const attempt: StreamAttempt = { generation, socket: null, bufferedEvents: [], reconciling: true };
+    this.attempt = attempt;
+    const { listenKey } = await this.options.client.createListenKey();
+    if (!this.isCurrentAttempt(attempt)) return;
+    if (!listenKey) throw new Error("Empty listenKey");
+    const socket = this.options.socketFactory(privateUserDataStreamUrl(listenKey));
+    attempt.socket = socket;
+    socket.onmessage = ({ data }) => {
+      if (!this.isCurrentAttempt(attempt)) return;
+      if (attempt.reconciling) attempt.bufferedEvents.push(data);
+      else this.enqueue(data, attempt);
+    };
+    socket.onclose = () => {
+      if (this.isCurrentAttempt(attempt)) void this.reconnect();
+    };
+    socket.onerror = () => {
+      if (this.isCurrentAttempt(attempt)) void this.reconnect();
+    };
+    await this.options.client.syncServerTime();
+    if (!this.isCurrentAttempt(attempt)) return;
+    const result = await this.options.reconcile();
+    if (!this.isCurrentAttempt(attempt)) return;
+    if (!result.ok) throw new ReconciliationNotReady("REST reconciliation is not ready");
+    attempt.reconciling = false;
+    const buffered = attempt.bufferedEvents;
+    attempt.bufferedEvents = [];
+    for (const event of buffered) this.enqueue(event, attempt);
+  }
+
+  private enqueue(data: unknown, attempt: StreamAttempt): void {
+    this.eventTail = this.eventTail.then(async () => {
+      if (this.isCurrentAttempt(attempt)) await this.handle(data);
+    }).catch(async () => {
+      if (!this.isCurrentAttempt(attempt)) return;
       await this.options.pauseNewEntries();
       await this.recordIssue("USER_DATA_EVENT", null, "私有事件无效或处理失败，冻结并重新对账");
-      if (this.socket === socket) await this.reconnect();
+      await this.reconnect();
     });
   }
 
@@ -212,9 +247,6 @@ export class UserDataStream {
         `${clientOrderId} 是未知人工或外部订单事件，未接管`);
       return;
     }
-    const time = eventTime(event.E ?? event.T);
-    const previousTime = this.lastOrderEvents.get(clientOrderId);
-    this.lastOrderEvents.set(clientOrderId, Math.max(previousTime ?? 0, time));
     const lastQuantity = decimal(requiredString(update.l ?? "0", "last filled quantity"));
     if (compareDecimals(lastQuantity, "0") > 0) {
       const seed = await this.options.orders.getPosition(local.intentId) ?? await this.options.seedFor(local);
@@ -236,11 +268,11 @@ export class UserDataStream {
         await this.recordIssue("UNPROTECTED_POSITION", local.symbol, unresolved);
       }
     }
-    if (previousTime !== undefined && time <= previousTime) return;
     const latest = await this.options.orders.getOrder(clientOrderId);
     if (!latest || ["UNKNOWN", "RECONCILING", "REPLACE"].includes(latest.status)) return;
     const status = orderStatus(update.X);
     if (STATUS_RANK[status] < STATUS_RANK[latest.status]) return;
+    if (["FILLED", "CANCEL"].includes(latest.status) && status !== latest.status) return;
     await this.options.orders.transitionOrder(clientOrderId, [latest.status], {
       status,
       exchangeOrderId: requiredString(update.i, "order ID"),
@@ -270,22 +302,21 @@ export class UserDataStream {
   private async reconnect(): Promise<void> {
     if (!this.running) return;
     if (this.reconnecting) return this.reconnecting;
-    this.reconnecting = (async () => {
+    const generation = ++this.generation;
+    this.discardAttempt();
+    const pending = (async () => {
+      if (!this.isCurrent(generation)) return;
       await this.options.pauseNewEntries();
-      const socket = this.socket;
-      this.socket = null;
-      if (socket) socket.close();
-      while (this.running) {
-        try {
-          await this.sleep(this.reconnectDelayMs);
-          await this.connectAndReconcile();
-          return;
-        } catch {
-          await this.recordIssue("REST_RECONCILIATION", null, "私有流重连或 REST 对账失败，保持冻结");
-        }
-      }
-    })().finally(() => { this.reconnecting = null; });
-    return this.reconnecting;
+      if (!this.isCurrent(generation)) return;
+      await this.sleep(this.reconnectDelayMs);
+      await this.connectWithRetry(generation, true);
+    })();
+    this.reconnecting = pending;
+    try {
+      await pending;
+    } finally {
+      if (this.reconnecting === pending) this.reconnecting = null;
+    }
   }
 
   private recordIssue(category: ReconciliationIssueCategory, symbol: string | null, message: string): Promise<unknown> {

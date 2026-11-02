@@ -242,6 +242,73 @@ describe("private user-data lifecycle", () => {
     expect(h.calls[0]).toBe("pause");
   });
 
+  it("retries ok:false without releasing events buffered by the failed attempt", async () => {
+    let attempts = 0;
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const h = harness({
+      reconcile: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          await firstGate;
+          return { ok: false };
+        }
+        await secondGate;
+        return { ok: true };
+      },
+    });
+    running.push(h.stream);
+    const starting = h.stream.start();
+    await vi.waitFor(() => expect(attempts).toBe(1));
+    h.sockets[0]?.emit(fillEvent(200, 2));
+    releaseFirst();
+    await vi.waitFor(() => expect(attempts).toBe(2));
+    expect((await h.orders.getOrder("client-1"))?.executedQuantity).toBe("0");
+
+    releaseSecond();
+    await starting;
+
+    expect(attempts).toBe(2);
+    expect((await h.orders.getOrder("client-1"))?.executedQuantity).toBe("0");
+  });
+
+  it("does not install a socket when stop wins a pending listenKey request", async () => {
+    const h = harness();
+    running.push(h.stream);
+    let release!: (value: { listenKey: string }) => void;
+    h.client.createListenKey = () => new Promise((resolve) => { release = resolve; });
+    const starting = h.stream.start();
+    await Promise.resolve();
+
+    await h.stream.stop();
+    release({ listenKey: "late-key" });
+    await starting;
+
+    expect(h.sockets).toHaveLength(0);
+  });
+
+  it("does not release buffered events when stop wins pending reconciliation", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const h = harness({ reconcile: async () => {
+      await gate;
+      return { ok: true };
+    } });
+    running.push(h.stream);
+    const starting = h.stream.start();
+    await vi.waitFor(() => expect(h.sockets).toHaveLength(1));
+    h.sockets[0]?.emit(fillEvent(200, 2));
+
+    await h.stream.stop();
+    release();
+    await starting;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect((await h.orders.getOrder("client-1"))?.executedQuantity).toBe("0");
+  });
+
   it("reconnects when Binance expires the listenKey", async () => {
     const h = harness();
     running.push(h.stream);
@@ -269,6 +336,37 @@ describe("private order and account events", () => {
     const latest = await h.orders.getOrder("client-1");
     expect(latest).toMatchObject({ status: "FILLED", executedQuantity: "2", commission: "0.02" });
     expect((await h.orders.listOpenPositions())[0]?.quantity).toBe("2");
+  });
+
+  it("advances NEW to CANCELED when both events share a millisecond", async () => {
+    const h = harness();
+    running.push(h.stream);
+    await h.stream.start();
+    const created = fillEvent(100, 1, "NEW");
+    created.o.l = "0";
+    const cancelled = fillEvent(100, 2, "CANCELED");
+    cancelled.o.l = "0";
+
+    h.sockets[0]?.emit(created);
+    h.sockets[0]?.emit(cancelled);
+
+    await vi.waitFor(async () => expect((await h.orders.getOrder("client-1"))?.status).toBe("CANCEL"));
+  });
+
+  it("advances partial to final when both events share a millisecond", async () => {
+    const h = harness();
+    running.push(h.stream);
+    await h.stream.start();
+    const partial = fillEvent(100, 1, "PARTIALLY_FILLED");
+    partial.o.l = "0";
+    const filled = fillEvent(100, 2, "FILLED");
+    filled.o.l = "0";
+
+    h.sockets[0]?.emit(partial);
+    h.sockets[0]?.emit(filled);
+
+    await vi.waitFor(async () => expect((await h.orders.getOrder("client-1"))?.status).toBe("FILLED"));
+    expect(await h.orders.listOpenPositions()).toEqual([]);
   });
 
   it("freezes and reports an unknown manual order event without applying it", async () => {

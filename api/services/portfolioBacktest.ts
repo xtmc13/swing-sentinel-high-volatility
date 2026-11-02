@@ -12,7 +12,7 @@ import {
   type TradeView,
   type TradingSettings,
   type VolatilityState,
-} from "@contracts/trading";
+} from "@contracts/trading";\nimport { evaluateMomentumExhaustion } from "./momentumExhaustion";
 import { getSettings } from "../queries/trading";
 import { applyAdverseSlippage, approveHistoricalEntry, type EntryRiskPosition } from "./execution";
 import { persistBacktestResult } from "./backtest";

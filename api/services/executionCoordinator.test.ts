@@ -1,0 +1,239 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  DEFAULT_LIVE_CONTROLS,
+  DEFAULT_SETTINGS,
+  type AccountSnapshot,
+  type Opportunity,
+  type PositionView,
+  type TradingSettings,
+} from "@contracts/trading";
+import {
+  createExecutionCoordinator,
+  liveTradingEnabled,
+  type ExecutionAdapter,
+} from "./executionCoordinator";
+
+const account: AccountSnapshot = {
+  equity: 100_000,
+  cash: 100_000,
+  availableMargin: 100_000,
+  usedMargin: 0,
+  unrealizedPnl: 0,
+  realizedPnl: 0,
+  todayPnl: 0,
+  todayPnlPct: 0,
+  dayStartEquity: 100_000,
+  valuationValid: true,
+  valuationIssues: [],
+  dailyLocked: false,
+};
+
+const position: PositionView = {
+  id: crypto.randomUUID(),
+  symbol: "BTCUSDT",
+  side: "LONG",
+  qty: 1,
+  initialQty: 1,
+  entryPrice: 100,
+  markPrice: 101,
+  stopPrice: 99,
+  targetPrice: 103,
+  liquidationPrice: 90,
+  leverage: 2,
+  margin: 50,
+  unrealizedPnl: 1,
+  unrealizedPct: 2,
+  realizedPnl: 0,
+  openedAt: new Date(1_800_000_000_000).toISOString(),
+  holdingMinutes: 1,
+  rMultiple: 0.5,
+  valuationValid: true,
+};
+
+function opportunity(overrides: Partial<Opportunity> = {}): Opportunity {
+  return {
+    id: "BTCUSDT-LONG",
+    signalId: "swing:BTCUSDT:LONG:1800000000000:0:0",
+    strategyType: "SWING",
+    symbol: "BTCUSDT",
+    side: "LONG",
+    status: "READY",
+    score: 90,
+    regime: "多头共振",
+    entry: 100,
+    stop: 99,
+    target: 103,
+    stopDistancePct: 1,
+    rewardRisk: 3,
+    leverage: 2,
+    marginPct: 2,
+    riskPct: 0.35,
+    reasons: ["测试信号"],
+    signalCloseTime: 1_800_000_000_000,
+    signalTime: 1_800_000_000_000,
+    expiryTime: 1_800_000_015_000,
+    triggerPrice: 100,
+    limitPrice: 100.1,
+    stateVersion: 0,
+    sourceGeneration: 0,
+    detectorVersion: "swing-closed-candle-v1",
+    configVersion: "swing-config-v1",
+    atr15: 1,
+    createdAt: new Date(1_800_000_000_000).toISOString(),
+    ...overrides,
+  };
+}
+
+function adapter(overrides: Partial<ExecutionAdapter> = {}): ExecutionAdapter {
+  return {
+    open: vi.fn(async () => ({ ok: true as const, positionId: "paper-position", reason: "模拟开仓成交" })),
+    close: vi.fn(async () => ({ ok: true as const, reason: "人工平仓", pnl: 1, unsettled: false as const, alreadyClosed: false as const })),
+    manage: vi.fn(async () => undefined),
+    emergency: vi.fn(async () => ({ ok: true, paused: true as const, settled: [], unsettled: [] })),
+    account: vi.fn(async () => account),
+    positions: vi.fn(async () => [position]),
+    snapshot: vi.fn(async () => ({ account, positions: [position] })),
+    ...overrides,
+  };
+}
+
+function setup(options: {
+  settings?: Partial<TradingSettings>;
+  source?: "MAINNET" | "TESTNET";
+  paper?: ExecutionAdapter;
+  live?: ExecutionAdapter;
+  env?: Record<string, string | undefined>;
+  armed?: boolean;
+  risk?: { openPositions: number; pendingIntents: number; unfinishedOrders: number };
+  now?: () => number;
+} = {}) {
+  const settings: TradingSettings = { ...DEFAULT_SETTINGS, autoTrade: true, ...options.settings };
+  const paper = options.paper ?? adapter();
+  const live = options.live ?? adapter();
+  const saveSettings = vi.fn(async (next: TradingSettings) => {
+    Object.assign(settings, next);
+  });
+  const coordinator = createExecutionCoordinator({
+    paper,
+    live,
+    getSettings: async () => settings,
+    saveSettings,
+    getLiveControls: async () => ({ armed: options.armed ?? false }),
+    getOutstandingRisk: async () => options.risk ?? { openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 },
+    market: { dataSource: options.source ?? "MAINNET" },
+    env: options.env ?? {},
+    now: options.now ?? (() => 1_800_000_001_000),
+  });
+  return { coordinator, settings, paper, live, saveSettings };
+}
+
+describe("执行配置安全默认值", () => {
+  it("默认仅启用 SWING paper，动量、主网总开关和 armed 全部关闭", () => {
+    expect(DEFAULT_SETTINGS.executionMode).toBe("PAPER");
+    expect(DEFAULT_SETTINGS.strategyMode).toBe("SWING");
+    expect(DEFAULT_SETTINGS.momentumEnabled).toBe(false);
+    expect(DEFAULT_LIVE_CONTROLS.armed).toBe(false);
+    expect(liveTradingEnabled({})).toBe(false);
+    expect(liveTradingEnabled({ LIVE_TRADING_ENABLED: "false" })).toBe(false);
+  });
+});
+
+describe("ExecutionCoordinator", () => {
+  it("PAPER 开仓保留原 paper adapter 调用和结果", async () => {
+    const h = setup({ source: "TESTNET" });
+    const signal = opportunity();
+    const healthy = () => true;
+
+    const result = await h.coordinator.open(signal, healthy);
+
+    expect(result).toEqual({ ok: true, positionId: "paper-position", reason: "模拟开仓成交" });
+    expect(h.paper.open).toHaveBeenCalledWith(signal, healthy);
+    expect(h.live.open).not.toHaveBeenCalled();
+  });
+
+  it("统一 paper 的 close/manage/emergency/account/positions/snapshot 行为", async () => {
+    const h = setup();
+
+    await expect(h.coordinator.close(position.id)).resolves.toMatchObject({ ok: true, pnl: 1 });
+    await expect(h.coordinator.manage()).resolves.toBeUndefined();
+    await expect(h.coordinator.emergency()).resolves.toMatchObject({ ok: true, paused: true });
+    await expect(h.coordinator.account()).resolves.toBe(account);
+    await expect(h.coordinator.positions()).resolves.toEqual([position]);
+    await expect(h.coordinator.snapshot()).resolves.toEqual({ account, positions: [position] });
+    expect(h.paper.close).toHaveBeenCalledWith(position.id, undefined);
+    expect(h.paper.manage).toHaveBeenCalledTimes(1);
+    expect(h.paper.emergency).toHaveBeenCalledTimes(1);
+  });
+
+  it("TESTNET 行情不能切换或选择 LIVE_MAINNET", async () => {
+    const h = setup({ source: "TESTNET" });
+
+    await expect(h.coordinator.switchExecutionMode("LIVE_MAINNET")).rejects.toThrow("TESTNET");
+    expect(h.saveSettings).not.toHaveBeenCalled();
+    Object.assign(h.settings, { executionMode: "LIVE_MAINNET" });
+    await expect(h.coordinator.open(opportunity())).resolves.toMatchObject({ ok: false });
+    expect(h.live.open).not.toHaveBeenCalled();
+    await expect(h.coordinator.close(position.id)).rejects.toThrow("TESTNET");
+    expect(h.live.close).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { openPositions: 1, pendingIntents: 0, unfinishedOrders: 0 },
+    { openPositions: 0, pendingIntents: 1, unfinishedOrders: 0 },
+    { openPositions: 0, pendingIntents: 0, unfinishedOrders: 1 },
+  ])("有未结风险时拒绝切换执行模式：%j", async (risk) => {
+    const h = setup({ risk });
+
+    await expect(h.coordinator.switchExecutionMode("LIVE_MAINNET")).rejects.toThrow("未结");
+    expect(h.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("无未结风险时可通过专用方法切换模式", async () => {
+    const h = setup();
+
+    await expect(h.coordinator.switchExecutionMode("LIVE_MAINNET")).resolves.toMatchObject({
+      executionMode: "LIVE_MAINNET",
+    });
+    expect(h.saveSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { name: "总开关", env: {}, armed: true, autoTrade: true },
+    { name: "armed", env: { LIVE_TRADING_ENABLED: "true" }, armed: false, autoTrade: true },
+    { name: "autoTrade", env: { LIVE_TRADING_ENABLED: "true" }, armed: true, autoTrade: false },
+  ])("缺少 $name 条件时 live 开仓失败关闭", async (gate) => {
+    const h = setup({
+      settings: { executionMode: "LIVE_MAINNET", autoTrade: gate.autoTrade },
+      env: gate.env,
+      armed: gate.armed,
+    });
+
+    await expect(h.coordinator.open(opportunity())).resolves.toMatchObject({ ok: false });
+    expect(h.live.open).not.toHaveBeenCalled();
+  });
+
+  it("全部 live 门控满足时才委托 live adapter", async () => {
+    const h = setup({
+      settings: { executionMode: "LIVE_MAINNET" },
+      env: { LIVE_TRADING_ENABLED: "true" },
+      armed: true,
+    });
+    const signal = opportunity();
+
+    await expect(h.coordinator.open(signal)).resolves.toMatchObject({ ok: true });
+    expect(h.live.open).toHaveBeenCalledWith(signal, undefined);
+    expect(h.paper.open).not.toHaveBeenCalled();
+  });
+
+  it("过期动量信号和重复 signalId 不进入 adapter", async () => {
+    const h = setup();
+    const signal = opportunity({ strategyType: "MOMENTUM" });
+
+    await expect(h.coordinator.open({ ...signal, expiryTime: 1_800_000_000_999 })).resolves.toMatchObject({ ok: false });
+    expect(h.paper.open).not.toHaveBeenCalled();
+
+    await h.coordinator.open(signal);
+    await expect(h.coordinator.open(signal)).resolves.toMatchObject({ ok: false });
+    expect(h.paper.open).toHaveBeenCalledTimes(1);
+  });
+});

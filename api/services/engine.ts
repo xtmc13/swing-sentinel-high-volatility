@@ -10,10 +10,11 @@ import type {
 import { binance } from "./binance";
 import { analyzeMarket } from "./opportunity";
 import {
-  getAccountSnapshot,
-  manageOpenPositions,
-  openPaperPosition,
-} from "./paper";
+  createExecutionCoordinator,
+  executionCoordinator,
+  paperExecutionAdapter,
+  type ExecutionCoordinator,
+} from "./executionCoordinator";
 import { addEvent, getOpenPositions, getSettings } from "../queries/trading";
 import { getVolatilityState, saveVolatilityState } from "../queries/volatility";
 import { getDb } from "../queries/connection";
@@ -74,7 +75,7 @@ export type EngineRiskData = Omit<
 >;
 
 type EventLevel = "INFO" | "WARN" | "ERROR" | "SUCCESS";
-type OpenResult = { ok: boolean; reason: string };
+type OpenResult = import("./executionCoordinator").OpenExecutionResult;
 
 export interface TradingEngineDependencies {
   now: () => number;
@@ -91,6 +92,7 @@ export interface TradingEngineDependencies {
   riskData: (symbol: string, settings: TradingSettings) => Promise<EngineRiskData>;
   analyzeMarket: typeof analyzeMarket;
   openPaperPosition: (opportunity: Opportunity, executionHealthy: () => boolean) => Promise<OpenResult>;
+  executionCoordinator?: ExecutionCoordinator;
   concurrency: number;
 }
 
@@ -142,13 +144,28 @@ export class TradingEngine {
   constructor(dependencies: Partial<TradingEngineDependencies> = {}) {
     const now = dependencies.now ?? Date.now;
     const market = dependencies.market ?? binance;
+    const hasPaperOverrides = Boolean(
+      dependencies.openPaperPosition || dependencies.manageOpenPositions || dependencies.getAccountSnapshot,
+    );
+    const coordinator = dependencies.executionCoordinator ?? (hasPaperOverrides
+      ? createExecutionCoordinator({
+          market,
+          getSettings: dependencies.getSettings,
+          paper: {
+            ...paperExecutionAdapter,
+            ...(dependencies.openPaperPosition ? { open: dependencies.openPaperPosition } : {}),
+            ...(dependencies.manageOpenPositions ? { manage: dependencies.manageOpenPositions } : {}),
+            ...(dependencies.getAccountSnapshot ? { account: dependencies.getAccountSnapshot } : {}),
+          },
+        })
+      : executionCoordinator);
     this.deps = {
       now,
       market,
       monitor: dependencies.monitor ?? new MarketMonitor({ client: market, now }),
       getSettings: dependencies.getSettings ?? getSettings,
       getOpenPositions: dependencies.getOpenPositions ?? getOpenPositions,
-      getAccountSnapshot: dependencies.getAccountSnapshot ?? (() => getAccountSnapshot()),
+      getAccountSnapshot: () => coordinator.account(),
       saveEquitySnapshot: dependencies.saveEquitySnapshot ?? (async (snapshot) => {
         await getDb().insert(equitySnapshots).values({
           equity: snapshot.equity,
@@ -156,13 +173,13 @@ export class TradingEngine {
           unrealized: snapshot.unrealizedPnl,
         });
       }),
-      manageOpenPositions: dependencies.manageOpenPositions ?? manageOpenPositions,
+      manageOpenPositions: () => coordinator.manage(),
       getVolatilityState: dependencies.getVolatilityState ?? getVolatilityState,
       saveVolatilityState: dependencies.saveVolatilityState ?? saveVolatilityState,
       addEvent: dependencies.addEvent ?? addEvent,
       riskData: dependencies.riskData ?? ((symbol, settings) => this.loadRiskData(symbol, settings)),
       analyzeMarket: dependencies.analyzeMarket ?? analyzeMarket,
-      openPaperPosition: dependencies.openPaperPosition ?? openPaperPosition,
+      openPaperPosition: (opportunity, executionHealthy) => coordinator.open(opportunity, executionHealthy),
       concurrency: dependencies.concurrency ?? 3,
     };
     this.marketSource = this.deps.market.dataSource;

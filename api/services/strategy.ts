@@ -13,6 +13,30 @@ export interface AnalyzeClosedCandlesInput {
   sourceGeneration?: number;
 }
 
+const SWING_DETECTOR_VERSION = "swing-closed-candle-v1";
+const SWING_CONFIG_VERSION = "swing-config-v1";
+
+function swingSignalMetadata(
+  market: Market,
+  settings: TradingSettings,
+  side: Side,
+  entry: number,
+  signalCloseTime: number,
+  stateVersion: number,
+  sourceGeneration: number,
+) {
+  return {
+    signalId: `SWING:${market.symbol}:${side}:${signalCloseTime}:${stateVersion}:${sourceGeneration}:${SWING_DETECTOR_VERSION}:${SWING_CONFIG_VERSION}`,
+    strategyType: "SWING" as const,
+    signalTime: signalCloseTime,
+    expiryTime: signalCloseTime + settings.maxSignalAgeSeconds * 1000,
+    triggerPrice: entry,
+    limitPrice: entry * (1 + (side === "LONG" ? 1 : -1) * settings.slippageBps / 10_000),
+    detectorVersion: SWING_DETECTOR_VERSION,
+    configVersion: SWING_CONFIG_VERSION,
+  };
+}
+
 export function analyzeClosedCandles(input: AnalyzeClosedCandlesInput): Opportunity {
   const { market, settings, now } = input;
   const c4h = closedCandles(input.candles4h, now);
@@ -20,6 +44,7 @@ export function analyzeClosedCandles(input: AnalyzeClosedCandlesInput): Opportun
   const c15m = closedCandles(input.candles15m, now);
   const c5m = closedCandles(input.candles5m, now);
   const signalCloseTime = c5m.at(-1)?.closeTime ?? 0;
+  const sourceGeneration = input.sourceGeneration ?? 0;
   const fallback: Side = market.change24h >= 0 ? "LONG" : "SHORT";
   if (c4h.length < 200 || c1h.length < 200 || c15m.length < 60 || c5m.length < 30) {
     return {
@@ -28,7 +53,8 @@ export function analyzeClosedCandles(input: AnalyzeClosedCandlesInput): Opportun
       stop: 0, target: 0, stopDistancePct: 0, rewardRisk: 0,
       leverage: market.maxLeverage, marginPct: settings.marginPerTradePct,
       riskPct: settings.riskPerTradePct, reasons: ["已收盘K线不足，禁止前瞻判断"],
-      signalCloseTime, stateVersion: input.stateVersion, sourceGeneration: input.sourceGeneration ?? 0, createdAt: new Date(now).toISOString(),
+      ...swingSignalMetadata(market, settings, fallback, market.price, signalCloseTime, input.stateVersion, sourceGeneration),
+      signalCloseTime, stateVersion: input.stateVersion, sourceGeneration, createdAt: new Date(now).toISOString(),
     };
   }
 
@@ -106,6 +132,7 @@ export function analyzeClosedCandles(input: AnalyzeClosedCandlesInput): Opportun
     regime, entry, stop, target, stopDistancePct, rewardRisk: 2.2,
     leverage: settings.leverageMode === "FIXED" ? Math.min(settings.fixedLeverage, market.maxLeverage) : market.maxLeverage,
     marginPct: settings.marginPerTradePct, riskPct: settings.riskPerTradePct,
-    reasons, signalCloseTime, stateVersion: input.stateVersion, sourceGeneration: input.sourceGeneration ?? 0, atr15, createdAt: new Date(now).toISOString(),
+    ...swingSignalMetadata(market, settings, side, entry, signalCloseTime, input.stateVersion, sourceGeneration),
+    reasons, signalCloseTime, stateVersion: input.stateVersion, sourceGeneration, atr15, createdAt: new Date(now).toISOString(),
   };
 }

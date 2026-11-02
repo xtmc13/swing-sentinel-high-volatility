@@ -39,6 +39,9 @@ export async function getAccount() {
 
 export function settingsFromRow(row: typeof tradingSettings.$inferSelect): TradingSettings {
   return {
+    executionMode: row.executionMode === "LIVE_MAINNET" ? "LIVE_MAINNET" : "PAPER",
+    strategyMode: row.strategyMode === "MOMENTUM" || row.strategyMode === "BOTH" ? row.strategyMode : "SWING",
+    momentumEnabled: row.momentumEnabled ?? false,
     autoTrade: row.autoTrade,
     riskPerTradePct: row.riskPerTradePct,
     marginPerTradePct: row.marginPerTradePct,
@@ -84,6 +87,9 @@ export async function getSettings(): Promise<TradingSettings> {
 export async function saveSettings(input: TradingSettings) {
   await ensureInitialized();
   await getDb().update(tradingSettings).set({
+    executionMode: input.executionMode,
+    strategyMode: input.strategyMode,
+    momentumEnabled: input.momentumEnabled,
     autoTrade: input.autoTrade,
     riskPerTradePct: input.riskPerTradePct,
     marginPerTradePct: input.marginPerTradePct,

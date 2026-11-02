@@ -16,6 +16,8 @@ const settings: TradingSettings = {
 
 const opportunity: Opportunity = {
   id: "BTCUSDT-LONG",
+  signalId: "SWING:BTCUSDT:LONG:1799999999000:3:0",
+  strategyType: "SWING",
   symbol: "BTCUSDT",
   side: "LONG",
   status: "READY",
@@ -31,8 +33,14 @@ const opportunity: Opportunity = {
   riskPct: 0.35,
   reasons: [],
   signalCloseTime: NOW - 1000,
+  signalTime: NOW - 1000,
+  expiryTime: NOW + 14_000,
+  triggerPrice: 100,
+  limitPrice: 100.02,
   stateVersion: 3,
   sourceGeneration: 0,
+  detectorVersion: "swing-closed-candle-v1",
+  configVersion: "swing-config-v1",
   atr15: 0.4,
   createdAt: new Date(NOW - 1000).toISOString(),
 };

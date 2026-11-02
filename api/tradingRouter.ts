@@ -9,18 +9,20 @@ import {
   getRecentOrders, getRecentEvents, getEquityHistory,
 } from "./queries/trading";
 import {
-  getAccountSnapshotWithPositions, toTradeView, calculatePerformance,
-  closePaperPosition, emergencyStop, resetPaperSimulation,
+  toTradeView, calculatePerformance, resetPaperSimulation,
 } from "./services/paper";
+import { executionCoordinator } from "./services/executionCoordinator";
 import { getDb } from "./queries/connection";
 import { backtestRuns } from "@db/schema";
-import type { DashboardData, TradingSettings } from "@contracts/trading";
+import type { DashboardData } from "@contracts/trading";
 import { runPortfolioBacktest } from "./services/portfolioBacktest";
 import { portfolioRisk } from "./services/risk";
 import { startValidationJob, getValidationJob } from "./services/validationJobs";
 import { getValidationReport, listValidationReports } from "./queries/validation";
 
 export const settingsInput = z.object({
+  strategyMode: z.enum(["SWING", "MOMENTUM", "BOTH"]).optional(),
+  momentumEnabled: z.boolean().optional(),
   autoTrade: z.boolean(),
   riskPerTradePct: z.number().min(0.05).max(2),
   marginPerTradePct: z.number().min(0.1).max(10),
@@ -60,7 +62,7 @@ async function dashboard(): Promise<DashboardData> {
   if (!engine.markets.length) await engine.refreshMarkets();
   const [settings, tradeRows, orderRows, eventRows, equityRows, snapshot, initialAccount] = await Promise.all([
     getSettings(), getRecentTrades(), getRecentOrders(),
-    getRecentEvents(), getEquityHistory(), getAccountSnapshotWithPositions(), getAccount(),
+    getRecentEvents(), getEquityHistory(), executionCoordinator.snapshot(), getAccount(),
   ]);
   const { account, positions } = snapshot;
   const observability = engine.getDashboardObservability();
@@ -120,7 +122,8 @@ export const tradingRouter = createRouter({
   })).query(({ input }) => binance.getCandles(input.symbol, input.interval, 300)),
   scan: adminQuery.mutation(() => engine.scan(true)),
   saveSettings: adminQuery.input(settingsInput).mutation(async ({ input }) => {
-    await saveSettings(input as TradingSettings);
+    const settings = await getSettings();
+    await saveSettings({ ...settings, ...input });
     return dashboard();
   }),
   setAutoTrade: adminQuery.input(z.object({ enabled: z.boolean() })).mutation(async ({ input }) => {
@@ -128,8 +131,8 @@ export const tradingRouter = createRouter({
     await saveSettings({ ...settings, autoTrade: input.enabled });
     return { enabled: input.enabled };
   }),
-  closePosition: adminQuery.input(z.object({ positionId: z.string().uuid() })).mutation(({ input }) => closePaperPosition(input.positionId)),
-  emergencyStop: adminQuery.mutation(() => emergencyStop()),
+  closePosition: adminQuery.input(z.object({ positionId: z.string().uuid() })).mutation(({ input }) => executionCoordinator.close(input.positionId)),
+  emergencyStop: adminQuery.mutation(() => executionCoordinator.emergency()),
   reset: adminQuery.mutation(() => resetPaperSimulation()),
   runBacktest: adminQuery.input(z.object({
     symbol: z.string().regex(/^[A-Z0-9]{5,20}$/),

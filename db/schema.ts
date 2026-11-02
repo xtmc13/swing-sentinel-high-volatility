@@ -26,6 +26,9 @@ export const simulationAccounts = mysqlTable("simulation_accounts", {
 
 export const tradingSettings = mysqlTable("trading_settings", {
   id: int("id").primaryKey().default(1),
+  executionMode: varchar("execution_mode", { length: 16 }).notNull().default("PAPER"),
+  strategyMode: varchar("strategy_mode", { length: 16 }).notNull().default("SWING"),
+  momentumEnabled: boolean("momentum_enabled").notNull().default(false),
   autoTrade: boolean("auto_trade").notNull().default(false),
   riskPerTradePct: double("risk_per_trade_pct").notNull().default(0.35),
   marginPerTradePct: double("margin_per_trade_pct").notNull().default(2),
@@ -59,6 +62,12 @@ export const tradingSettings = mysqlTable("trading_settings", {
   candleStaleSeconds: int("candle_stale_seconds").notNull().default(90),
   spreadBaselineMinSamples: int("spread_baseline_min_samples").notNull().default(120),
   universeSize: int("universe_size").notNull().default(100),
+  updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
+});
+
+export const liveControls = mysqlTable("live_controls", {
+  id: int("id").primaryKey().default(1),
+  armed: boolean("armed").notNull().default(false),
   updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
 });
 

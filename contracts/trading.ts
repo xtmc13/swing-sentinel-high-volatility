@@ -3,6 +3,17 @@ export type DataSource = "MAINNET" | "TESTNET";
 export type OpportunityStatus = "READY" | "WAIT" | "BLOCKED";
 export type EngineState = "RUNNING" | "PAUSED" | "LOCKED" | "DEGRADED";
 export type VolatilityMode = "NORMAL" | "HIGH" | "EXTREME";
+export type ExecutionMode = "PAPER" | "LIVE_MAINNET";
+export type StrategyMode = "SWING" | "MOMENTUM" | "BOTH";
+export type StrategyType = "SWING" | "MOMENTUM";
+
+export interface LiveControls {
+  armed: boolean;
+}
+
+export const DEFAULT_LIVE_CONTROLS: LiveControls = {
+  armed: false,
+};
 
 export interface MarketQuality {
   valid: boolean;
@@ -56,6 +67,9 @@ export interface Market {
 }
 
 export interface TradingSettings {
+  executionMode: ExecutionMode;
+  strategyMode: StrategyMode;
+  momentumEnabled: boolean;
   autoTrade: boolean;
   riskPerTradePct: number;
   marginPerTradePct: number;
@@ -108,6 +122,8 @@ export interface AccountSnapshot {
 
 export interface Opportunity {
   id: string;
+  signalId: string;
+  strategyType: StrategyType;
   symbol: string;
   side: Side;
   status: OpportunityStatus;
@@ -123,8 +139,14 @@ export interface Opportunity {
   riskPct: number;
   reasons: string[];
   signalCloseTime: number;
+  signalTime: number;
+  expiryTime: number;
+  triggerPrice: number;
+  limitPrice: number;
   stateVersion: number;
   sourceGeneration: number;
+  detectorVersion: string;
+  configVersion: string;
   atr15?: number;
   createdAt: string;
 }
@@ -332,6 +354,9 @@ export interface PortfolioBacktestResult extends BacktestResult {
 }
 
 export const DEFAULT_SETTINGS: TradingSettings = {
+  executionMode: "PAPER",
+  strategyMode: "SWING",
+  momentumEnabled: false,
   autoTrade: false,
   riskPerTradePct: 0.35,
   marginPerTradePct: 2,

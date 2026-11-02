@@ -49,6 +49,8 @@ function market(symbol: string): Market {
 function opportunity(symbol: string, now: number, stateVersion: number): Opportunity {
   return {
     id: `${symbol}-${now}`,
+    signalId: `SWING:${symbol}:LONG:${now - 1000}:${stateVersion}:0`,
+    strategyType: "SWING",
     symbol,
     side: "LONG",
     status: "READY",
@@ -64,8 +66,14 @@ function opportunity(symbol: string, now: number, stateVersion: number): Opportu
     riskPct: 0.35,
     reasons: ["测试正式信号"],
     signalCloseTime: now - 1000,
+    signalTime: now - 1000,
+    expiryTime: now + 14_000,
+    triggerPrice: 100,
+    limitPrice: 100.02,
     stateVersion,
     sourceGeneration: 0,
+    detectorVersion: "swing-closed-candle-v1",
+    configVersion: "swing-config-v1",
     atr15: 1,
     createdAt: new Date(now).toISOString(),
   };
@@ -258,6 +266,23 @@ describe("三态引擎编排", () => {
 
     await expect(h.engine.engineState(account)).resolves.toBe("PAUSED");
     expect(getAccountSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("自动开仓通过 ExecutionCoordinator 而不直接调用 paper", async () => {
+    const open = vi.fn(async () => ({ ok: true as const, positionId: "position", reason: "模拟开仓成交" }));
+    const openPaperPosition = vi.fn(async () => ({ ok: true as const, positionId: "direct", reason: "绕过 coordinator" }));
+    const h = harness({
+      settings: { autoTrade: true },
+      dependencies: {
+        executionCoordinator: { open } as never,
+        openPaperPosition,
+      },
+    });
+
+    await h.engine.scan(true);
+
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(openPaperPosition).not.toHaveBeenCalled();
   });
 
   it("NORMAL 只在 45 秒正式扫描生成并执行新信号，不因风险 tick 加速开仓", async () => {

@@ -77,8 +77,18 @@ describe("已收盘 K 线正式信号", () => {
     expect(result.status).toBe("READY");
     expect(result.side).toBe("LONG");
     expect(result.signalCloseTime).toBe(NOW - 300_000);
+    expect(result.signalTime).toBe(NOW - 300_000);
+    expect(result.expiryTime).toBe(NOW - 285_000);
+    expect(result.triggerPrice).toBe(result.entry);
+    expect(result.limitPrice).toBeCloseTo(result.entry * 1.0002, 10);
+    expect(result.strategyType).toBe("SWING");
+    expect(result.detectorVersion).toBe("swing-closed-candle-v1");
+    expect(result.configVersion).toBe("swing-config-v1");
+    expect(result.signalId).toBe(`SWING:TESTUSDT:LONG:${NOW - 300_000}:7:0:swing-closed-candle-v1:swing-config-v1`);
     expect(result.stateVersion).toBe(7);
     expect(result.createdAt).toBe(new Date(NOW).toISOString());
+    expect(analyzeClosedCandles(input()).signalId).toBe(result.signalId);
+    expect(analyzeClosedCandles({ ...input(), stateVersion: 8 }).signalId).not.toBe(result.signalId);
   });
 
   it("未收盘 5M 的反向剧烈价格不参与正式入场判断", () => {

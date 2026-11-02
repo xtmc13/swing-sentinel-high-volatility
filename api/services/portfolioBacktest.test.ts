@@ -106,6 +106,8 @@ function analyzeWith(signals: Record<string, Record<number, Signal>>) {
     const entry = input.market.markPrice;
     return {
       id: `${input.market.symbol}-${side}`,
+      signalId: `SWING:${input.market.symbol}:${side}:${input.now}:${input.stateVersion}:${input.sourceGeneration ?? 0}`,
+      strategyType: "SWING",
       symbol: input.market.symbol,
       side,
       status: signal ? "READY" : "BLOCKED",
@@ -121,8 +123,14 @@ function analyzeWith(signals: Record<string, Record<number, Signal>>) {
       riskPct: 1,
       reasons: [],
       signalCloseTime: input.now,
+      signalTime: input.now,
+      expiryTime: input.now + 15_000,
+      triggerPrice: entry,
+      limitPrice: entry,
       stateVersion: input.stateVersion,
       sourceGeneration: input.sourceGeneration ?? 0,
+      detectorVersion: "swing-closed-candle-v1",
+      configVersion: "swing-config-v1",
       atr15: signal?.atr15 ?? 1,
       createdAt: new Date(input.now).toISOString(),
     };

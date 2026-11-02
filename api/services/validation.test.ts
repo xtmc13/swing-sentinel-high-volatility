@@ -51,12 +51,18 @@ function analyze(input: AnalyzeClosedCandlesInput): Opportunity {
   const ready = signalTimes.has(input.now);
   const side: Side = "LONG";
   return {
-    id: `BTCUSDT-${side}`, symbol: "BTCUSDT", side,
+    id: `BTCUSDT-${side}`,
+    signalId: `SWING:BTCUSDT:${side}:${input.now}:${input.stateVersion}:0`,
+    strategyType: "SWING",
+    symbol: "BTCUSDT", side,
     status: ready ? "READY" : "BLOCKED", score: ready ? 100 : 0, regime: "测试",
     entry: input.market.markPrice, stop: input.market.markPrice - 5, target: 0,
     stopDistancePct: 5, rewardRisk: 2.2, leverage: 10, marginPct: 10, riskPct: 1,
     reasons: [], signalCloseTime: input.now, stateVersion: input.stateVersion,
-    sourceGeneration: 0, atr15: 10, createdAt: new Date(input.now).toISOString(),
+    signalTime: input.now, expiryTime: input.now + 15_000,
+    triggerPrice: input.market.markPrice, limitPrice: input.market.markPrice,
+    sourceGeneration: 0, detectorVersion: "swing-closed-candle-v1", configVersion: "swing-config-v1",
+    atr15: 10, createdAt: new Date(input.now).toISOString(),
   };
 }
 

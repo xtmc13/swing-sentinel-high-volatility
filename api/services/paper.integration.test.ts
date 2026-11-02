@@ -106,6 +106,8 @@ function service(db: ReturnType<typeof independentDb>, market: FakeMarket) {
 function opportunity(symbol: string): Opportunity {
   return {
     id: `${symbol}-LONG`,
+    signalId: `SWING:${symbol}:LONG:${NOW - 1000}:1:0`,
+    strategyType: "SWING",
     symbol,
     side: "LONG",
     status: "READY",
@@ -121,8 +123,14 @@ function opportunity(symbol: string): Opportunity {
     riskPct: 0.35,
     reasons: [],
     signalCloseTime: NOW - 1000,
+    signalTime: NOW - 1000,
+    expiryTime: NOW + 14_000,
+    triggerPrice: 100,
+    limitPrice: 100.02,
     stateVersion: 1,
     sourceGeneration: 0,
+    detectorVersion: "swing-closed-candle-v1",
+    configVersion: "swing-config-v1",
     atr15: 0.4,
     createdAt: new Date(NOW - 1000).toISOString(),
   };

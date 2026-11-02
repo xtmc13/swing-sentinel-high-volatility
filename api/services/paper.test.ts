@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, type Opportunity, type TradingSettings, type VolatilityState } from "@contracts/trading";
 import { applyAdverseSlippage, approveAndPriceEntry, type EntryApprovalInput } from "./execution";
 import { assertAffectedRows } from "../queries/trading";
-import { sameOpenPositionSet, toPositionView, type PositionRow } from "./paper";
+import { revalidateSnapshot, sameOpenPositionSet, toPositionView, type PositionRow } from "./paper";
 import type { MarketSnapshot } from "./binance";
 
 const NOW = 1_800_000_000_000;
@@ -81,6 +81,28 @@ function input(overrides: Partial<EntryApprovalInput> = {}): EntryApprovalInput 
     ...overrides,
   };
 }
+
+describe("持仓管理行情新鲜度", () => {
+  it("行情在资金费请求或账户锁等待期间过期时必须重新判定为无效", () => {
+    const stale = snapshot({
+      bookTime: NOW - (DEFAULT_SETTINGS.bookStaleSeconds + 1) * 1000,
+      markTime: NOW,
+    });
+    const result = revalidateSnapshot(stale, settings, NOW);
+
+    expect(result.quality.valid).toBe(false);
+    expect(result.quality.reasons.join(" ")).toMatch(/盘口|陈旧|过期/);
+  });
+
+  it("即使原始质量标记有效，也不能绕过基于当前时间的重新校验", () => {
+    const oldMark = snapshot({
+      bookTime: NOW,
+      markTime: NOW - (DEFAULT_SETTINGS.candleStaleSeconds + 1) * 1000,
+    });
+    expect(oldMark.quality.valid).toBe(true);
+    expect(revalidateSnapshot(oldMark, settings, NOW).quality.valid).toBe(false);
+  });
+});
 
 describe("账户快照持仓一致性", () => {
   it("行情估值前后持仓ID集合变化时必须判定快照不一致", () => {

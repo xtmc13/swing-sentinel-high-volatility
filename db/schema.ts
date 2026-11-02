@@ -271,6 +271,7 @@ export const liveOrders = mysqlTable("live_orders", {
   originalQuantity: money("original_quantity"),
   executedQuantity: money("executed_quantity"),
   reduceOnly: boolean("reduce_only").notNull().default(false),
+  admissionGeneration: int("admission_generation"),
   createdAt: timestamp("created_at", { fsp: 3 }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { fsp: 3 }).notNull().defaultNow().onUpdateNow(),
 }, (table) => ({

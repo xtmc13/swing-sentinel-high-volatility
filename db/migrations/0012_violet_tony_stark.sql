@@ -1,0 +1,1 @@
+ALTER TABLE `live_orders` ADD `admission_generation` int;

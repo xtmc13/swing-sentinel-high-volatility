@@ -45,6 +45,7 @@ export interface LiveOrder {
   commission: DecimalString;
   reduceOnly: boolean;
   manualCanary?: boolean;
+  admissionGeneration?: number;
   createdAt: number;
 }
 
@@ -665,6 +666,14 @@ export class OrderStateMachine {
     return { cancelled, unsettled };
   }
 
+  private async submitReplacement(order: LiveOrder): Promise<LiveOrder> {
+    if (order.type !== "LIMIT" || order.reduceOnly) return this.submit(order.clientOrderId);
+    if (order.admissionGeneration === undefined) {
+      return await this.store.transitionOrder(order.clientOrderId, ["PENDING_SEND"], { status: "CANCEL" }) ?? order;
+    }
+    return this.submit(order.clientOrderId, order.admissionGeneration);
+  }
+
   private async replace(
     order: LiveOrder,
     changes: { price?: DecimalString; quantity?: DecimalString },
@@ -676,7 +685,7 @@ export class OrderStateMachine {
     let replacing = await this.store.transitionOrder(order.clientOrderId, [order.status], { status: "REPLACE" });
     if (!replacing) {
       const existing = await this.store.getOrder(replacementClientOrderId);
-      if (existing) return this.submit(existing.clientOrderId);
+      if (existing) return this.submitReplacement(existing);
       const latest = await this.requireOrder(order.clientOrderId);
       if (latest.status === "CANCEL") replacing = latest;
       else if (["REPLACE", "RECONCILING", "UNKNOWN"].includes(latest.status)) {
@@ -732,7 +741,7 @@ export class OrderStateMachine {
       await this.store.transitionOrder(replacement.clientOrderId, ["PENDING_SEND"], { status: "CANCEL" });
       throw new Error("Late fill changed the replacement basis");
     }
-    return this.submit(replacement.clientOrderId);
+    return this.submitReplacement(replacement);
   }
 
   private async ensureProtection(position: LivePosition): Promise<void> {

@@ -466,6 +466,37 @@ describe("mainnet live execution adapter", () => {
       .rejects.toThrow("最多改单 1 次");
   });
 
+  it("disarm invalidates an entry replacement before its transport", async () => {
+    const h = setup();
+    await h.adapter.open(opportunity);
+    const entryClientId = `${h.created[0].id}-entry`;
+    h.gateway.queryOrder = async () => ({
+      symbol: "BTCUSDT", orderId: 500, clientOrderId: entryClientId, price: "100", origQty: "2",
+      executedQty: "0", status: "CANCELED", side: "BUY", type: "LIMIT",
+    });
+    h.store.pauseExecution();
+
+    const replacement = await h.adapter.replaceOrder(entryClientId, "100");
+    expect(replacement.status).toBe("CANCEL");
+    expect(h.gateway.placed).toHaveLength(1);
+  });
+
+  it("stale current preflight blocks an entry replacement before transport", async () => {
+    const h = setup();
+    await h.adapter.open(opportunity);
+    const entryClientId = `${h.created[0].id}-entry`;
+    h.gateway.queryOrder = async () => ({
+      symbol: "BTCUSDT", orderId: 500, clientOrderId: entryClientId, price: "100", origQty: "2",
+      executedQty: "0", status: "CANCELED", side: "BUY", type: "LIMIT",
+    });
+    h.assertCurrentAdmission.mockRejectedValue(new Error("preflight stale"));
+
+    const replacement = await h.adapter.replaceOrder(entryClientId, "100");
+    expect(replacement.status).toBe("CANCEL");
+    expect(h.gateway.placed).toHaveLength(1);
+    expect(h.assertCurrentAdmission).toHaveBeenCalled();
+  });
+
   it("cross-worker emergency CANCEL wins over submit admission and prevents transport", async () => {
     const h = setup();
     h.claimIntent.mockImplementationOnce(async (input) => {
@@ -527,7 +558,10 @@ describe("mainnet live execution adapter", () => {
       getSettings: async () => settings,
       getLiveControls: async () => ({ armed: true }),
       runLivePreflight: async () => ({ ready: true, reasons: [], checkedAt: new Date().toISOString() }),
-      getLiveOperations: async () => ({ orders: [], protectionOrders: [], unsettledIntents: [], reconciliationIssues: [] }),
+      getLiveOperations: async () => ({
+        orders: [], protectionOrders: [], unsettledIntents: [], reconciliationIssues: [],
+        reconciliationSummary: { openIssues: 0, severeIssues: 0, lastDetectedAt: null },
+      }),
       getOutstandingRisk: async () => ({ openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
       privateWs: { health: () => ({ configured: true, running: true, connected: true, lastMessageAt: Date.now(), reconnects: 0 }) },
       reconciliation: { health: () => ({ configured: true, running: true, lastRunAt: Date.now() }) },

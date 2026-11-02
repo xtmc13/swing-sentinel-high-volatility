@@ -70,6 +70,7 @@ describe("live dashboard operations", () => {
         message: "缺少止损",
         detectedAt: new Date(1_800_000_000_100).toISOString(),
       }],
+      reconciliationSummary: { openIssues: 1, severeIssues: 1, lastDetectedAt: 1_800_000_000_100 },
     });
   });
 
@@ -89,5 +90,31 @@ describe("live dashboard operations", () => {
     expect(listUnsettledIntents).toHaveBeenCalledWith(100);
     expect(result.orders).toEqual([]);
     expect(result.protectionOrders[0]).toMatchObject({ type: "STOP_MARKET", status: "NEW", reduceOnly: true });
+  });
+
+  it("authoritative summary sees a newer unresolved CRITICAL beyond the 100-row display page", async () => {
+    const reconciliation = new InMemoryReconciliationStore();
+    for (let index = 0; index < 101; index += 1) {
+      await reconciliation.recordIssue({
+        category: "USER_DATA_EVENT", severity: "INFO", symbol: null,
+        expectedValue: null, actualValue: null, message: `old-info-${index}`,
+        detectedAt: 1_800_000_000_000 + index,
+      });
+    }
+    await reconciliation.recordIssue({
+      category: "UNPROTECTED_POSITION", severity: "CRITICAL", symbol: "BTCUSDT",
+      expectedValue: null, actualValue: null, message: "new-critical",
+      detectedAt: 1_800_000_000_101,
+    });
+    const orders = { listRecentOrders: async () => [], listActiveProtectionOrders: async () => [] };
+
+    const result = await readLiveOperations(orders, reconciliation);
+    expect(result.reconciliationIssues).toHaveLength(100);
+    expect(result.reconciliationIssues.some((issue) => issue.severity === "CRITICAL")).toBe(false);
+    expect(result.reconciliationSummary).toEqual({
+      openIssues: 102,
+      severeIssues: 1,
+      lastDetectedAt: 1_800_000_000_101,
+    });
   });
 });

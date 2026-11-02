@@ -133,6 +133,7 @@ const { DrizzleReconciliationStore } = await import("./live/reconciliation");
 vi.spyOn(DrizzleLiveOrderStore.prototype, "listRecentOrders").mockResolvedValue([]);
 vi.spyOn(DrizzleLiveOrderStore.prototype, "listActiveProtectionOrders").mockResolvedValue([]);
 vi.spyOn(DrizzleReconciliationStore.prototype, "listIssues").mockResolvedValue([]);
+vi.spyOn(DrizzleReconciliationStore.prototype, "getIssueSummary").mockResolvedValue({ openIssues: 0, severeIssues: 0, lastDetectedAt: null });
 vi.spyOn(DrizzleReconciliationStore.prototype, "listUnsettledIntents").mockResolvedValue([]);
 const { tradingRouter } = await import("./tradingRouter");
 

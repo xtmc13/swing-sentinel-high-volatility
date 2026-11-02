@@ -383,12 +383,7 @@ export class ExecutionCoordinator {
     const privateWsFresh = privateWs.lastMessageAt !== null && this.now() >= privateWs.lastMessageAt
       && this.now() - privateWs.lastMessageAt <= 10_000;
     const privateWsHealthy = privateWs.configured && privateWs.running && privateWs.connected && privateWsFresh;
-    const openIssues = operations.reconciliationIssues.filter((issue) => issue.status !== "RESOLVED");
-    const severeIssues = openIssues.filter((issue) => issue.severity === "ERROR" || issue.severity === "CRITICAL");
-    const latestIssue = operations.reconciliationIssues.reduce<number>(
-      (latest, issue) => Math.max(latest, Date.parse(issue.detectedAt)),
-      0,
-    );
+    const issueSummary = operations.reconciliationSummary;
     const reconciliationState = this.dependencies.reconciliation?.health() ?? {
       configured: false,
       running: false,
@@ -397,7 +392,7 @@ export class ExecutionCoordinator {
     const reconciliationFresh = reconciliationState.lastRunAt !== null && this.now() >= reconciliationState.lastRunAt
       && this.now() - reconciliationState.lastRunAt <= 10_000;
     const reconciliationHealthy = reconciliationState.configured && reconciliationState.running
-      && reconciliationFresh && severeIssues.length === 0;
+      && reconciliationFresh && issueSummary.severeIssues === 0;
     const missingProtections = settings.executionMode === "LIVE_MAINNET"
       ? positions.filter((position) => !operations.protectionOrders.some((order) => order.intentId === position.id
         && order.type === "STOP_MARKET" && order.reduceOnly && ["NEW", "PARTIALLY_FILLED"].includes(order.status)))
@@ -439,10 +434,10 @@ export class ExecutionCoordinator {
         configured: reconciliationState.configured,
         running: reconciliationState.running,
         healthy: reconciliationHealthy,
-        openIssues: openIssues.length,
-        severeIssues: severeIssues.length,
+        openIssues: issueSummary.openIssues,
+        severeIssues: issueSummary.severeIssues,
         lastRunAt: reconciliationState.lastRunAt === null ? null : new Date(reconciliationState.lastRunAt).toISOString(),
-        lastDetectedAt: latestIssue > 0 ? new Date(latestIssue).toISOString() : null,
+        lastDetectedAt: issueSummary.lastDetectedAt === null ? null : new Date(issueSummary.lastDetectedAt).toISOString(),
       },
       privateWs,
       missingProtections,

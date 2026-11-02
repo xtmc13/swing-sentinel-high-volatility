@@ -1,4 +1,4 @@
-import { asc, desc, eq, notInArray } from "drizzle-orm";
+import { asc, desc, eq, ne, notInArray, sql } from "drizzle-orm";
 import { liveAccountSnapshots, liveIntents, reconciliationIssues } from "@db/schema";
 import type {
   BinanceAccountResponse,
@@ -54,8 +54,15 @@ export interface UnsettledLiveIntent {
   status: string;
 }
 
+export interface ReconciliationIssueSummary {
+  openIssues: number;
+  severeIssues: number;
+  lastDetectedAt: number | null;
+}
+
 export interface ReconciliationStore {
   recordIssue(issue: NewReconciliationIssue): Promise<ReconciliationIssue>;
+  getIssueSummary(): Promise<ReconciliationIssueSummary>;
   listIssues(limit?: number): Promise<ReconciliationIssue[]>;
   listUnsettledIntents(limit?: number): Promise<UnsettledLiveIntent[]>;
   appendAccountSnapshot(snapshot: LiveAccountSnapshot): Promise<boolean>;
@@ -90,6 +97,15 @@ export class InMemoryReconciliationStore implements ReconciliationStore {
   async listIssues(limit?: number): Promise<ReconciliationIssue[]> {
     const rows = limit === undefined ? this.issues : this.issues.slice(0, limit);
     return rows.map((issue) => ({ ...issue }));
+  }
+
+  async getIssueSummary(): Promise<ReconciliationIssueSummary> {
+    const unresolved = this.issues.filter((issue) => issue.status !== "RESOLVED");
+    return {
+      openIssues: unresolved.length,
+      severeIssues: unresolved.filter((issue) => issue.severity === "ERROR" || issue.severity === "CRITICAL").length,
+      lastDetectedAt: unresolved.length > 0 ? Math.max(...unresolved.map((issue) => issue.detectedAt)) : null,
+    };
   }
 
   async appendAccountSnapshot(snapshot: LiveAccountSnapshot): Promise<boolean> {
@@ -157,6 +173,21 @@ export class DrizzleReconciliationStore implements ReconciliationStore {
       detectedAt: row.detectedAt.getTime(),
       resolvedAt: row.resolvedAt?.getTime() ?? null,
     }));
+  }
+
+  async getIssueSummary(): Promise<ReconciliationIssueSummary> {
+    const rows = await this.db.select({
+      openIssues: sql<number>`COUNT(*)`,
+      severeIssues: sql<number>`COALESCE(SUM(CASE WHEN severity IN ('ERROR', 'CRITICAL') THEN 1 ELSE 0 END), 0)`,
+      lastDetectedAt: sql<string | number | null>`CAST(UNIX_TIMESTAMP(MAX(detected_at)) * 1000 AS UNSIGNED)`,
+    }).from(reconciliationIssues).where(ne(reconciliationIssues.status, "RESOLVED"));
+    const row = rows[0];
+    return {
+      openIssues: Number(row?.openIssues ?? 0),
+      severeIssues: Number(row?.severeIssues ?? 0),
+      lastDetectedAt: row?.lastDetectedAt === null || row?.lastDetectedAt === undefined
+        ? null : Number(row.lastDetectedAt),
+    };
   }
 
   async appendAccountSnapshot(snapshot: LiveAccountSnapshot): Promise<boolean> {

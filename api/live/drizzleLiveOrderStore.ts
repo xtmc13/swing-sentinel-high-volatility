@@ -55,6 +55,7 @@ function orderFromRows(row: OrderRow, fills: FillRow[]): LiveOrder {
       ? divideDecimals(quote, executedQuantity, EXACT_AVERAGE) : "0",
     commission,
     reduceOnly: row.reduceOnly,
+    admissionGeneration: row.admissionGeneration ?? undefined,
     createdAt: row.createdAt.getTime(),
   };
 }
@@ -138,6 +139,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       originalQuantity: order.originalQuantity,
       executedQuantity: "0",
       reduceOnly: order.reduceOnly,
+      admissionGeneration: order.admissionGeneration ?? null,
       createdAt: new Date(order.createdAt),
     });
   }
@@ -214,6 +216,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
           originalQuantity: replacement.originalQuantity,
           executedQuantity: "0",
           reduceOnly: replacement.reduceOnly,
+          admissionGeneration: replacement.admissionGeneration ?? null,
           createdAt: new Date(replacement.createdAt),
         });
         return replacement;

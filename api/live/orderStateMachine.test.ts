@@ -104,6 +104,7 @@ function entry(store: InMemoryLiveOrderStore, quantity = "3"): LiveOrder {
     averagePrice: "0",
     commission: "0",
     reduceOnly: false,
+    admissionGeneration: 0,
     createdAt: 1,
   };
   store.addOrder(order);
@@ -131,7 +132,10 @@ function setup() {
   const store = new InMemoryLiveOrderStore();
   const gateway = new FakeGateway();
   const alerts: string[] = [];
-  const machine = new OrderStateMachine(store, gateway, { alert: (message) => alerts.push(message) });
+  const machine = new OrderStateMachine(store, gateway, {
+    alert: (message) => alerts.push(message),
+    assertCurrentAdmission: async () => undefined,
+  });
   return { store, gateway, alerts, machine };
 }
 
@@ -240,7 +244,7 @@ describe("fill-driven live order state machine", () => {
     entry(store);
     await machine.submit("entry-1");
     await machine.handleFill("entry-1", fill(), seed);
-    const other = new OrderStateMachine(store, gateway);
+    const other = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined });
 
     await Promise.all([
       machine.replaceOrder("entry-1", "101"),
@@ -296,7 +300,7 @@ describe("fill-driven live order state machine", () => {
     const replacement = await machine.replaceOrder("entry-1", "101");
     await store.transitionOrder(replacement.clientOrderId, ["NEW"], { status: "PENDING_SEND" });
     const transition = store.transitionOrder.bind(store);
-    const otherWorker = new OrderStateMachine(store, gateway);
+    const otherWorker = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined });
     store.transitionOrder = async (clientOrderId, expectedStatuses, patch) => {
       if (clientOrderId === replacement.clientOrderId && patch.status === "CANCEL"
         && expectedStatuses.includes("PENDING_SEND")) {
@@ -320,7 +324,7 @@ describe("fill-driven live order state machine", () => {
     const replacement = await machine.replaceOrder("entry-1", "101");
     await store.transitionOrder(replacement.clientOrderId, ["NEW"], { status: "PENDING_SEND" });
     const transition = store.transitionOrder.bind(store);
-    const otherWorker = new OrderStateMachine(store, gateway);
+    const otherWorker = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined });
     store.transitionOrder = async (clientOrderId, expectedStatuses, patch) => {
       if (clientOrderId === replacement.clientOrderId && patch.status === "CANCEL"
         && expectedStatuses.includes("PENDING_SEND")) {
@@ -603,8 +607,8 @@ describe("fill-driven live order state machine", () => {
   it("duplicate workers cannot submit the same persisted order twice", async () => {
     const { store, gateway } = setup();
     entry(store);
-    const first = new OrderStateMachine(store, gateway);
-    const second = new OrderStateMachine(store, gateway);
+    const first = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined });
+    const second = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined });
 
     await Promise.all([first.submit("entry-1"), second.submit("entry-1")]);
     expect(gateway.placed).toHaveLength(1);

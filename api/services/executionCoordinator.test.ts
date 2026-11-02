@@ -133,6 +133,7 @@ function setup(options: {
     protectionOrders: { id: string; intentId: string; clientOrderId: string; exchangeOrderId: string | null; symbol: string; side: "LONG" | "SHORT"; type: "LIMIT" | "MARKET" | "STOP_MARKET"; status: string; price: string; originalQuantity: string; executedQuantity: string; averagePrice: string; commission: string; reduceOnly: boolean; createdAt: string }[];
     unsettledIntents: { id: string; symbol: string; status: string }[];
     reconciliationIssues: { id: string; category: string; severity: "INFO" | "WARN" | "ERROR" | "CRITICAL"; status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED"; symbol: string | null; message: string; detectedAt: string }[];
+    reconciliationSummary: { openIssues: number; severeIssues: number; lastDetectedAt: number | null };
   };
   privateWs?: { health(): PrivateWsHealth };
   reconciliation?: { health(): { configured: boolean; running: boolean; lastRunAt: number | null } };
@@ -169,7 +170,10 @@ function setup(options: {
     getLiveControls: async () => ({ armed }),
     setLiveControls,
     runLivePreflight,
-    getLiveOperations: async () => options.operations ?? { orders: [], protectionOrders: [confirmedStop], unsettledIntents: [], reconciliationIssues: [] },
+    getLiveOperations: async () => options.operations ?? {
+      orders: [], protectionOrders: [confirmedStop], unsettledIntents: [], reconciliationIssues: [],
+      reconciliationSummary: { openIssues: 0, severeIssues: 0, lastDetectedAt: null },
+    },
     privateWs: options.privateWs ?? { health: () => ({ configured: true, running: true, connected: true, lastMessageAt: 1_800_000_001_000, reconnects: 0 }) },
     reconciliation: options.reconciliation ?? { health: () => ({ configured: true, running: true, lastRunAt: 1_800_000_001_000 }) },
     getOutstandingRisk: options.riskLoader ?? (async () => options.risk ?? { openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
@@ -542,7 +546,7 @@ describe("ExecutionCoordinator", () => {
       preflight: { ready: true, reasons: [], checkedAt: new Date(1_799_999_900_000).toISOString() },
       privateWs: { health: () => ({ configured: true, running: true, connected: true, lastMessageAt: 1_799_999_900_000, reconnects: 0 }) },
       reconciliation: { health: () => ({ configured: true, running: false, lastRunAt: 1_799_999_900_000 }) },
-      operations: { orders: [], protectionOrders: [], unsettledIntents: [], reconciliationIssues: [] },
+      operations: { orders: [], protectionOrders: [], unsettledIntents: [], reconciliationIssues: [], reconciliationSummary: { openIssues: 0, severeIssues: 0, lastDetectedAt: null } },
     });
 
     const status = await h.coordinator.status();
@@ -569,6 +573,7 @@ describe("ExecutionCoordinator", () => {
         orders: [],
         unsettledIntents: [],
         reconciliationIssues: [],
+        reconciliationSummary: { openIssues: 0, severeIssues: 0, lastDetectedAt: null },
         protectionOrders: [{
           id: "stop-1", intentId: position.id, clientOrderId: "stop-1", exchangeOrderId: null,
           symbol: position.symbol, side: "SHORT", type: "STOP_MARKET", status: orderStatus,
@@ -581,13 +586,29 @@ describe("ExecutionCoordinator", () => {
     expect((await h.coordinator.status()).missingProtections).toContain("BTCUSDT 缺少有效止损保护");
   });
 
+  it("显示分页之外的未解决严重问题仍阻断 readiness", async () => {
+    const h = setup({
+      settings: { executionMode: "LIVE_MAINNET" },
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key", BINANCE_MAINNET_API_SECRET: "fake-secret" },
+      armed: true,
+      operations: {
+        orders: [], protectionOrders: [], unsettledIntents: [], reconciliationIssues: [],
+        reconciliationSummary: { openIssues: 102, severeIssues: 1, lastDetectedAt: 1_800_000_001_000 },
+      },
+    });
+
+    const status = await h.coordinator.status();
+    expect(status.reconciliation).toMatchObject({ healthy: false, openIssues: 102, severeIssues: 1 });
+    expect(status.canSubmit).toBe(false);
+  });
+
   it("LIVE adapter 未配置时 dashboard 显示不可用而不回退 paper 账户", async () => {
     const paper = adapter();
     const coordinator = createExecutionCoordinator({
       paper,
       getSettings: async () => ({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" }),
       getLiveControls: async () => ({ armed: false }),
-      getLiveOperations: async () => ({ orders: [], protectionOrders: [], unsettledIntents: [], reconciliationIssues: [] }),
+      getLiveOperations: async () => ({ orders: [], protectionOrders: [], unsettledIntents: [], reconciliationIssues: [], reconciliationSummary: { openIssues: 0, severeIssues: 0, lastDetectedAt: null } }),
       getOutstandingRisk: async () => ({ openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
       env: {},
       market: { dataSource: "MAINNET" },

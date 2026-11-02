@@ -198,6 +198,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       commission: "0",
       reduceOnly: false,
       manualCanary: options.manualCanary === true,
+      admissionGeneration: created.emergencyGeneration,
       createdAt: this.now(),
     });
     const submitted = await this.machine.submit(clientOrderId, created.emergencyGeneration);

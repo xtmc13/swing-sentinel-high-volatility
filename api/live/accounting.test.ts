@@ -54,6 +54,20 @@ describe("live accounting pagination", () => {
     expect(fromIds).toEqual([undefined, 12, 14]);
   });
 
+  it("walks userTrades full history in bounded time windows", async () => {
+    const day = 24 * 60 * 60 * 1_000;
+    const windows: Array<[number | undefined, number | undefined]> = [];
+
+    await fetchAllUserTrades({
+      userTrades: async ({ startTime, endTime }) => {
+        windows.push([startTime, endTime]);
+        return [];
+      },
+    }, { symbol: "BTCUSDT", startTime: 0, endTime: 8 * day }, 2);
+
+    expect(windows).toEqual([[0, 7 * day - 1], [7 * day, 8 * day]]);
+  });
+
   it("rejects a repeating userTrades page instead of looping forever", async () => {
     await expect(fetchAllUserTrades({
       userTrades: async () => [trade(10), trade(11)],

@@ -135,10 +135,13 @@ async function harness(options: HarnessOptions = {}) {
     pauseNewEntries: async () => {
       calls.push("pause");
       if (options.entriesAlreadyPaused) return null;
-      return { resume: async () => {
-        calls.push("allow");
-        return true;
-      } };
+      return {
+        resume: async () => {
+          calls.push("allow");
+          return true;
+        },
+        discard: async () => undefined,
+      };
     },
     now: () => 5_000,
   });
@@ -276,6 +279,34 @@ describe("entry admission resume ownership", () => {
 
     expect(await token?.resume()).toBe(false);
     expect(gate.allowed).toBe(false);
+  });
+
+  it("releases failed-attempt ownership so a clean retry can resume", async () => {
+    const gate = new LiveEntryAdmission(true);
+    const store = new InMemoryReconciliationStore();
+    const orders = new InMemoryLiveOrderStore();
+    const manual = remoteOrder(order("NEW", "9"), "9");
+    manual.clientOrderId = "manual-order";
+    let externalOrder = true;
+    const service = new ReconciliationService({
+      client: {
+        account: async () => account(),
+        positionRisk: async () => [],
+        openOrders: async () => externalOrder ? [manual] : [],
+      },
+      orders,
+      store,
+      recovery: { recover: async () => { throw new Error("unexpected"); } },
+      accounting: { synchronize: async () => undefined },
+      pauseNewEntries: () => gate.pauseForReconciliation(),
+    });
+
+    expect((await service.reconcile()).ok).toBe(false);
+    expect(gate.allowed).toBe(false);
+    externalOrder = false;
+    expect((await service.reconcile()).ok).toBe(true);
+
+    expect(gate.allowed).toBe(true);
   });
 
   it("does not let reconciliation overwrite an operator pause during account retrieval", async () => {

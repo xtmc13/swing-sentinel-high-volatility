@@ -107,6 +107,8 @@ function pageLimit(value: number): number {
   return value;
 }
 
+const ACCOUNTING_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
+
 export async function fetchAllUserTrades(
   client: UserTradesClient,
   params: UserTradesParams,
@@ -115,29 +117,38 @@ export async function fetchAllUserTrades(
   pageLimit(limit);
   const records: BinanceUserTrade[] = [];
   const seen = new Set<string>();
-  let fromId = params.fromId;
+  const bounded = params.startTime !== undefined && params.endTime !== undefined;
+  const finalEnd = params.endTime;
+  let windowStart = params.startTime;
+  let windowEnd = bounded && windowStart !== undefined && finalEnd !== undefined
+    ? Math.min(windowStart + ACCOUNTING_HISTORY_WINDOW_MS - 1, finalEnd)
+    : finalEnd;
   while (true) {
-    const page = await client.userTrades({ ...params, fromId, limit });
-    for (const record of page) {
-      if (!Number.isSafeInteger(record.id) || record.id < 0) throw new Error("Invalid exchange trade ID");
-      const key = `${record.symbol}:${record.id}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        records.push(record);
+    let fromId = params.fromId;
+    while (true) {
+      const page = await client.userTrades({ ...params, startTime: windowStart, endTime: windowEnd, fromId, limit });
+      for (const record of page) {
+        if (!Number.isSafeInteger(record.id) || record.id < 0) throw new Error("Invalid exchange trade ID");
+        const key = `${record.symbol}:${record.id}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          records.push(record);
+        }
       }
+      if (page.length < limit) break;
+      const lastId = page[page.length - 1]?.id;
+      if (!Number.isSafeInteger(lastId) || lastId >= Number.MAX_SAFE_INTEGER) {
+        throw new Error("Cannot advance userTrades pagination");
+      }
+      const nextFromId = lastId + 1;
+      if (fromId !== undefined && nextFromId <= fromId) throw new Error("Cannot advance userTrades pagination");
+      fromId = nextFromId;
     }
-    if (page.length < limit) return records;
-    const lastId = page[page.length - 1]?.id;
-    if (!Number.isSafeInteger(lastId) || lastId >= Number.MAX_SAFE_INTEGER) {
-      throw new Error("Cannot advance userTrades pagination");
-    }
-    const nextFromId = lastId + 1;
-    if (nextFromId === fromId) throw new Error("Cannot advance userTrades pagination");
-    fromId = nextFromId;
+    if (!bounded || windowEnd === undefined || finalEnd === undefined || windowEnd >= finalEnd) return records;
+    windowStart = windowEnd + 1;
+    windowEnd = Math.min(windowStart + ACCOUNTING_HISTORY_WINDOW_MS - 1, finalEnd);
   }
 }
-
-const INCOME_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000;
 
 export async function fetchAllIncome(
   client: IncomeClient,
@@ -151,7 +162,7 @@ export async function fetchAllIncome(
   const finalEnd = params.endTime;
   let windowStart = params.startTime;
   let windowEnd = bounded && windowStart !== undefined && finalEnd !== undefined
-    ? Math.min(windowStart + INCOME_HISTORY_WINDOW_MS - 1, finalEnd)
+    ? Math.min(windowStart + ACCOUNTING_HISTORY_WINDOW_MS - 1, finalEnd)
     : finalEnd;
   while (true) {
     let cursor = windowStart;
@@ -178,7 +189,7 @@ export async function fetchAllIncome(
     }
     if (!bounded || windowEnd === undefined || finalEnd === undefined || windowEnd >= finalEnd) return records;
     windowStart = windowEnd + 1;
-    windowEnd = Math.min(windowStart + INCOME_HISTORY_WINDOW_MS - 1, finalEnd);
+    windowEnd = Math.min(windowStart + ACCOUNTING_HISTORY_WINDOW_MS - 1, finalEnd);
   }
 }
 

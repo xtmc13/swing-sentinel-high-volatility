@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BinanceOpenOrder, LiveOrderGateway } from "./binanceSigned";
 import { privateUserDataStreamUrl } from "./binanceSigned";
-import { InMemoryReconciliationStore } from "./reconciliation";
+import { InMemoryReconciliationStore, LiveEntryAdmission, ReconciliationService } from "./reconciliation";
 import {
   InMemoryLiveOrderStore,
   OrderStateMachine,
@@ -176,6 +176,7 @@ function harness(options: HarnessOptions = {}) {
 const running: UserDataStream[] = [];
 afterEach(async () => {
   await Promise.all(running.splice(0).map((stream) => stream.stop()));
+  vi.useRealTimers();
 });
 
 describe("private user-data lifecycle", () => {
@@ -191,6 +192,32 @@ describe("private user-data lifecycle", () => {
     expect(h.calls).toContain("keepAlive");
     expect(h.calls).toContain("close");
     expect(h.sockets[0]?.closed).toBe(true);
+  });
+
+  it("lets reconciliation own and resume admission after a non-owning stream suspension", async () => {
+    const gate = new LiveEntryAdmission(true);
+    const h = harness({
+      withOrder: false,
+      pause: () => gate.suspend(),
+      reconcile: () => service.reconcile(),
+    });
+    const service = new ReconciliationService({
+      client: {
+        account: async () => ({ assets: [] }),
+        positionRisk: async () => [],
+        openOrders: async () => [],
+      },
+      orders: h.orders,
+      store: h.store,
+      recovery: { recover: async () => { throw new Error("unexpected"); } },
+      accounting: { synchronize: async () => undefined },
+      pauseNewEntries: () => gate.pauseForReconciliation(),
+    });
+    running.push(h.stream);
+
+    await h.stream.start();
+
+    expect(gate.allowed).toBe(true);
   });
 
   it("can retry startup after the initial REST reconciliation fails", async () => {
@@ -307,6 +334,28 @@ describe("private user-data lifecycle", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect((await h.orders.getOrder("client-1"))?.executedQuantity).toBe("0");
+  });
+
+  it("installs exactly one keepalive when the start generation changes during reconciliation", async () => {
+    vi.useFakeTimers();
+    let attempts = 0;
+    const h = harness({
+      reconcile: async () => {
+        attempts += 1;
+        if (attempts === 1) h.sockets[0]?.disconnect();
+        return { ok: true };
+      },
+    });
+    running.push(h.stream);
+    const starting = h.stream.start();
+    await starting;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.sockets).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.calls.filter((call) => call === "keepAlive")).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.calls.filter((call) => call === "keepAlive")).toHaveLength(2);
   });
 
   it("reconnects when Binance expires the listenKey", async () => {

@@ -117,8 +117,6 @@ export class UserDataStream {
     await this.options.pauseNewEntries();
     try {
       await this.connectWithRetry(generation, false);
-      if (!this.isCurrent(generation)) return;
-      this.keepAliveTimer = setInterval(() => { void this.keepAlive(); }, this.keepAliveIntervalMs);
     } catch (error) {
       if (!this.isCurrent(generation)) return;
       this.running = false;
@@ -206,6 +204,8 @@ export class UserDataStream {
     const result = await this.options.reconcile();
     if (!this.isCurrentAttempt(attempt)) return;
     if (!result.ok) throw new ReconciliationNotReady("REST reconciliation is not ready");
+    if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
+    this.keepAliveTimer = setInterval(() => { void this.keepAlive(); }, this.keepAliveIntervalMs);
     attempt.reconciling = false;
     const buffered = attempt.bufferedEvents;
     attempt.bufferedEvents = [];

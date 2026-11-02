@@ -199,31 +199,51 @@ export interface ReconciliationResult {
 
 export interface EntryResume {
   resume(): Promise<boolean>;
+  discard(): Promise<void>;
 }
 
 export class LiveEntryAdmission {
   private generation = 0;
   private resumeOwner: symbol | null = null;
+  private allowedState: boolean;
+  private operatorPaused: boolean;
+  private retryResume = false;
 
-  constructor(private initiallyAllowed = true) {}
+  constructor(initiallyAllowed = true) {
+    this.allowedState = initiallyAllowed;
+    this.operatorPaused = !initiallyAllowed;
+  }
 
   get allowed(): boolean {
-    return this.initiallyAllowed;
+    return this.allowedState;
+  }
+
+  async suspend(): Promise<void> {
+    if (!this.operatorPaused && this.allowedState && !this.resumeOwner) this.retryResume = true;
+    this.allowedState = false;
   }
 
   async pauseForReconciliation(): Promise<EntryResume | null> {
-    if (!this.initiallyAllowed || this.resumeOwner) return null;
+    if (this.resumeOwner || this.operatorPaused || (!this.allowedState && !this.retryResume)) return null;
     const owner = Symbol("reconciliation-resume");
     const generation = this.generation;
     this.resumeOwner = owner;
-    this.initiallyAllowed = false;
+    this.retryResume = true;
+    this.allowedState = false;
     return {
       resume: async () => {
         if (this.resumeOwner !== owner || this.generation !== generation) return false;
         this.resumeOwner = null;
         this.generation += 1;
-        this.initiallyAllowed = true;
+        this.retryResume = false;
+        this.allowedState = true;
         return true;
+      },
+      discard: async () => {
+        if (this.resumeOwner !== owner || this.generation !== generation) return;
+        this.resumeOwner = null;
+        this.generation += 1;
+        this.allowedState = false;
       },
     };
   }
@@ -231,7 +251,9 @@ export class LiveEntryAdmission {
   async pauseFromOperator(): Promise<void> {
     this.resumeOwner = null;
     this.generation += 1;
-    this.initiallyAllowed = false;
+    this.retryResume = false;
+    this.operatorPaused = true;
+    this.allowedState = false;
   }
 }
 
@@ -447,6 +469,7 @@ export class ReconciliationService {
 
     const ok = issues.length === 0;
     if (ok) await mayResume?.resume();
+    else await mayResume?.discard();
     return { ok, issues };
   }
 

@@ -69,3 +69,24 @@ All live defaults remain off: `PAPER`, `momentumEnabled=false`, `LIVE_TRADING_EN
 - For a flat symbol, exchange `liquidationPrice` can be zero. The real-risk gate rejects missing/nonpositive liquidation data rather than substituting paper estimates. A safe real-data canary path must be demonstrated before enabling entries.
 - Manual canary remains a separate explicit authorization: one whitelist symbol, minimum safe quantity, real fill/protection/cancel/close/restart reconciliation, and autoTrade still off. It was not run. Small-scope auto trading additionally requires canary and observation-period success.
 - Public Binance connectivity was unavailable in this environment. The browser verified the safe degraded dashboard, not live public connectivity or profitability. Real order/canary behavior is deliberately unverified and disabled.
+
+## Review fix round 1
+
+Code/test commit: `91bf07ff6af2b37da8bb533a99d33bc9a3c445e1` (`fix: preserve live recovery during lifecycle transitions`). This report update is committed separately. No subagents, push, real credentials, real exchange calls, or preview resources were used.
+
+### RED / GREEN
+
+- **Unresolved reconciliation hang**: the new real-composition regression initially timed out after 5 seconds because adapter publication awaited the `ok:false` retry loop. Startup now waits only for the first reconciliation outcome, publishes the adapter with entry admission suspended, and leaves retries active. The same test then completed fake reduce-only close and emergency while preflight remained unready; `placeOrder` was only the local fake.
+- **PAPER transition cleanup**: the switch regression initially completed with zero stop calls. The coordinator now awaits the runtime stop hook after successful PAPER persistence; singleton wiring stops private WS/accounting/reconciliation. Focused test passed.
+- **Process shutdown**: `processShutdown.test.ts` was initially RED because the module was absent. The installed SIGTERM/SIGINT handlers now await live cleanup before exit 0, or use exit 1 on cleanup failure. Both tests passed; `api/boot.ts` connects the actual production process without changing dev/test imports.
+- **Restart during shutdown**: RED showed the second service constructed before the first deferred stop was released. A stopping promise and generation checks now serialize cleanup/restart and prevent stale publication. Runtime suite passed 10/10, including the earlier shutdown-during-start case.
+- **Paper/live risk scope**: both new tests were RED—paper-only pending work returned true and a live pending intent returned false. The gate now reads only live positions/intents/orders with shared terminal statuses; both passed.
+- **Router error sanitization**: RED reflected a fake internal DB URL as PRECONDITION_FAILED. Only known gate prefixes now retain their safe messages; unexpected errors use generic INTERNAL_SERVER_ERROR text without configuration content. Router suite passed 9/9.
+
+### Verification
+
+- Combined focused regression set: **10 files, 101/101 passed**.
+- Final focused set after type-fixture cleanup: **6 files, 30/30 passed**.
+- `npm test`: **48 files passed, 4 skipped; 431 passed, 53 skipped, 0 failed**. The skips are the DB suites because the verified temporary DB was already removed; their prior real-DB results remain documented above.
+- `npm run check`: exit 0. `npm run lint`: exit 0. `npm run build`: exit 0; 2441 Vite modules and the production boot bundle completed. `git diff --check` and staged diff check: exit 0.
+- Rust was not impacted by this TypeScript-only round, so no Rust result is claimed for the fix commit.

@@ -160,6 +160,7 @@ describe("多标的同步组合回测事件语义", () => {
     expect(result.tradesBySymbol.BTCUSDT[0].openedAt).toBe(new Date(bars[1].time * 1000).toISOString());
     expect(result).toMatchObject({ symbol: "PORTFOLIO", symbols: ["BTCUSDT"], initialEquity: 1000, finalEquity: 1004, totalTrades: 1 });
     expect(result.transitions).toHaveLength(0);
+    expect(result.momentumExhaustion).toEqual([]);
     expect(result.equityCurve.every((point) => point.time >= START / 1000 && point.time < START / 1000 + 3600)).toBe(true);
   });
 

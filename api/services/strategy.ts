@@ -1,5 +1,6 @@
 import type { Candle, Market, Opportunity, Side, TradingSettings } from "@contracts/trading";
 import { atrSeries, closedCandles, emaSeries, macdSeries } from "./indicators";
+import { evaluateMomentumExhaustion } from "./momentumExhaustion";
 
 export interface AnalyzeClosedCandlesInput {
   market: Market;
@@ -82,11 +83,13 @@ export function analyzeClosedCandles(input: AnalyzeClosedCandlesInput): Opportun
   const target = entry + direction * stopDistance * 2.2;
   const volatilityPct = entry > 0 ? atr15 / entry * 100 : 0;
   const momentumAligned = side === "LONG" ? histogram > 0 : histogram < 0;
+  const exhaustion = evaluateMomentumExhaustion({ side, candles15m: c15m, candles1h: c1h, candles4h: c4h, now });
   const regime = volatilityPct > 3.5 ? "高波动" : aligned ? (side === "LONG" ? "多头共振" : "空头共振") : "周期冲突";
   const reasons = [
     aligned ? "4H／1H 方向共振" : "大周期未共振",
     setup ? "15M 回调结构有效" : "等待 15M 回调结构",
     trigger ? "5M 突破与动能确认" : "等待 5M 触发",
+    exhaustion.protection === "NONE" ? "未检测到多周期动能衰竭" : `动能衰竭 ${exhaustion.score}/100（${exhaustion.resonanceCount}/3 周期确认）`,
   ];
   let status: Opportunity["status"] = "READY";
   const pricesValid = [entry, stop, target, atr15, histogram, previousHistogram].every(Number.isFinite)
@@ -99,7 +102,7 @@ export function analyzeClosedCandles(input: AnalyzeClosedCandlesInput): Opportun
   }
   const score = Math.round(
     (aligned ? 35 : 0) + (setup ? 20 : 0) + (trigger ? 20 : 0)
-    + market.liquidityScore * 0.15 + (momentumAligned ? 10 : Math.max(0, 5 - Math.abs(previous5.close - last5.close))),
+    + market.liquidityScore * 0.15 + (momentumAligned ? 10 : Math.max(0, 5 - Math.abs(previous5.close - last5.close)))\n    - Math.round(exhaustion.score * 0.2),
   );
   return {
     id: `${market.symbol}-${side}`, symbol: market.symbol, side, status, score,

@@ -143,8 +143,8 @@ function reversalFrame(eventTime: number, sequence: number) {
   };
 }
 
-function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH" } = {}) {
-  const store = new InMemoryLiveOrderStore({ emergencyGeneration: 7 });
+function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTrade?: boolean } = {}) {
+  const store = new InMemoryLiveOrderStore({ emergencyGeneration: 7, autoTrade: options.autoTrade });
   const gateway = new AdapterGateway();
   const created: CreateLiveIntentInput[] = [];
   const claims: ClaimLiveIntentInput[] = [];
@@ -258,6 +258,15 @@ describe("mainnet live execution adapter", () => {
     expect(h.createIntent.mock.calls[0]?.[1].requireAutoTrade).toBe(true);
     expect(h.gateway.placed[0]).toMatchObject({ type: "LIMIT", timeInForce: "IOC", quantity: "2" });
     expect(await h.store.getPosition(h.created[0].id)).toBeNull();
+  });
+
+  it("manual canary persists its admission class and submits while autoTrade is paused", async () => {
+    const h = setup({ autoTrade: false });
+
+    await expect(h.adapter.open(opportunity, undefined, { manualCanary: true })).resolves.toMatchObject({ ok: true });
+    expect(h.createIntent.mock.calls[0]?.[1].requireAutoTrade).toBe(false);
+    expect((await h.store.listOrders())[0]).toMatchObject({ manualCanary: true, status: "NEW" });
+    expect(h.gateway.placed).toHaveLength(1);
   });
 
   it("passes the transactionally selected HIGH mode into the final gate", async () => {
@@ -462,6 +471,7 @@ describe("mainnet live execution adapter", () => {
       live: h.adapter,
       getSettings: async () => settings,
       getLiveControls: async () => ({ armed: true }),
+      runLivePreflight: async () => ({ ready: true, reasons: [], checkedAt: null }),
       env: { LIVE_TRADING_ENABLED: "true" },
       market: { dataSource: "MAINNET" },
     });

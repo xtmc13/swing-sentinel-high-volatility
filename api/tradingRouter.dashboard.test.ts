@@ -39,6 +39,8 @@ vi.mock("./queries/trading", () => ({
   getRecentOrders: vi.fn(async () => []),
   getRecentEvents: vi.fn(async () => []),
   getEquityHistory: vi.fn(async () => []),
+  getOutstandingOrderCounts: vi.fn(async () => ({ pendingIntents: 0, unfinishedOrders: 0 })),
+  switchExecutionModeAtomic: vi.fn(),
   addEvent: vi.fn(),
   ensureInitialized: vi.fn(),
   assertAffectedRows: vi.fn(),
@@ -126,6 +128,11 @@ const monitor: WebSocketHealthMetrics = {
 const { engine } = await import("./services/engine");
 const queries = await import("./queries/trading");
 const { getDb } = await import("./queries/connection");
+const { DrizzleLiveOrderStore } = await import("./live/drizzleLiveOrderStore");
+const { DrizzleReconciliationStore } = await import("./live/reconciliation");
+vi.spyOn(DrizzleLiveOrderStore.prototype, "listOrders").mockResolvedValue([]);
+vi.spyOn(DrizzleReconciliationStore.prototype, "listIssues").mockResolvedValue([]);
+vi.spyOn(DrizzleReconciliationStore.prototype, "listUnsettledIntents").mockResolvedValue([]);
 const { tradingRouter } = await import("./tradingRouter");
 
 describe("dashboard 持仓估值", () => {
@@ -159,6 +166,11 @@ describe("dashboard 持仓估值", () => {
       update: () => ({ set: () => ({ where: vi.fn(async () => undefined) }) }),
     };
     vi.mocked(getDb).mockReturnValue({
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: vi.fn(async () => [{ armed: false }]) }),
+        }),
+      }),
       transaction: async (callback: (transaction: typeof tx) => unknown) => callback(tx),
     } as never);
 

@@ -213,6 +213,18 @@ describe("private user-data lifecycle", () => {
     expect(h.sockets[0]?.closed).toBe(true);
   });
 
+  it("reports real running, connection and last-message health", async () => {
+    const h = harness();
+    running.push(h.stream);
+    expect(h.stream.health()).toMatchObject({ configured: true, running: false, connected: false, lastMessageAt: null });
+
+    await h.stream.start();
+    expect(h.stream.health()).toMatchObject({ running: true, connected: true, reconnects: 0 });
+    h.sockets[0].emit({ e: "ACCOUNT_UPDATE", E: 1_800_000_000_000, T: 1_800_000_000_000, a: { B: [{ a: "USDT" }], P: [] } });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.stream.health().lastMessageAt).toBe(1_800_000_000_000);
+  });
+
   it("lets reconciliation own and resume admission after a non-owning stream suspension", async () => {
     const gate = new LiveEntryAdmission(true);
     const h = harness({

@@ -114,11 +114,19 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     );
   }
 
-  async open(opportunity: Opportunity, executionHealthy?: () => boolean): Promise<OpenExecutionResult> {
-    return serializeOpenAndEmergency(() => this.openWhenSerialized(opportunity, executionHealthy));
+  async open(
+    opportunity: Opportunity,
+    executionHealthy?: () => boolean,
+    options: { manualCanary?: boolean } = {},
+  ): Promise<OpenExecutionResult> {
+    return serializeOpenAndEmergency(() => this.openWhenSerialized(opportunity, executionHealthy, options));
   }
 
-  private async openWhenSerialized(opportunity: Opportunity, executionHealthy?: () => boolean): Promise<OpenExecutionResult> {
+  private async openWhenSerialized(
+    opportunity: Opportunity,
+    executionHealthy?: () => boolean,
+    options: { manualCanary?: boolean } = {},
+  ): Promise<OpenExecutionResult> {
     if (executionHealthy && !executionHealthy()) return { ok: false, reason: "实时执行健康检查未通过" };
     const input: CreateLiveIntentInput = {
       ...this.dependencies.prepareIntent(opportunity),
@@ -141,7 +149,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     }
     const approvals: Extract<LiveFinalGateResult, { approved: true }>[] = [];
     const created = await this.dependencies.createIntent(input, {
-      requireAutoTrade: true,
+      requireAutoTrade: !options.manualCanary,
       finalGate: async (tx, context) => {
         const approval = await this.dependencies.finalGate(opportunity, input, tx, context);
         if (approval.approved) approvals.push(approval);
@@ -182,6 +190,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       averagePrice: "0",
       commission: "0",
       reduceOnly: false,
+      manualCanary: options.manualCanary === true,
       createdAt: this.now(),
     });
     const submitted = await this.machine.submit(clientOrderId, created.emergencyGeneration);

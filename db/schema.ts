@@ -231,6 +231,7 @@ export const liveIntents = mysqlTable("live_intents", {
   id: varchar("id", { length: 36 }).primaryKey(),
   signalId: varchar("signal_id", { length: 160 }).notNull(),
   strategyType: varchar("strategy_type", { length: 16 }).notNull().default("SWING"),
+  manualCanary: boolean("manual_canary").notNull().default(false),
   breakoutPrice: decimal("breakout_price", { precision: 65, scale: 30 }),
   symbol: varchar("symbol", { length: 24 }).notNull(),
   side: varchar("side", { length: 8 }).notNull(),

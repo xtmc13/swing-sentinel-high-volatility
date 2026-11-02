@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { liveFills, liveIntents, liveOrders, livePositions, tradingSettings } from "@db/schema";
 import type { Side } from "@contracts/trading";
-import { lockEmergencyGeneration, type LiveDatabase, type LiveTransaction } from "./livePersistence";
+import { liveSubmissionPermitted, lockEmergencyGeneration, type LiveDatabase, type LiveTransaction } from "./livePersistence";
 import {
   addDecimals,
   compareDecimals,
@@ -104,7 +104,11 @@ async function readPosition(db: Reader, positionId: string, lock = false): Promi
 }
 
 export class DrizzleLiveOrderStore implements LiveOrderStore {
-  constructor(private readonly db: LiveDatabase) {}
+  private readonly db: LiveDatabase;
+
+  constructor(db: LiveDatabase) {
+    this.db = db;
+  }
 
   async insertOrder(order: LiveOrder): Promise<void> {
     await this.db.insert(liveOrders).values({
@@ -201,11 +205,16 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       const settings = await tx.select({ autoTrade: tradingSettings.autoTrade }).from(tradingSettings)
         .where(eq(tradingSettings.id, 1)).for("update");
       const generation = await lockEmergencyGeneration(tx);
-      const intents = await tx.select({ status: liveIntents.status }).from(liveIntents)
+      const intents = await tx.select({ status: liveIntents.status, manualCanary: liveIntents.manualCanary }).from(liveIntents)
         .where(eq(liveIntents.id, current.intentId)).for("update");
       const emergencyCancelled = intents[0]?.status === "CANCEL";
-      if (emergencyCancelled || !settings[0]?.autoTrade || generation !== expectedGeneration
-        || intents[0]?.status !== "PENDING_SEND") {
+      if (emergencyCancelled || !liveSubmissionPermitted({
+        autoTrade: settings[0]?.autoTrade ?? false,
+        manualCanary: intents[0]?.manualCanary ?? false,
+        generation,
+        expectedGeneration,
+        intentStatus: intents[0]?.status ?? "MISSING",
+      })) {
         await tx.update(liveOrders).set({ status: "CANCEL" }).where(eq(liveOrders.id, current.id));
         return { ...current, status: "CANCEL" };
       }

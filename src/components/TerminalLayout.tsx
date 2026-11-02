@@ -36,6 +36,8 @@ export default function TerminalLayout() {
   }, []);
   const data = dashboard.data;
   const running = data?.settings.autoTrade ?? false;
+  const executionMode = data?.settings.executionMode ?? "PAPER";
+  const modeLabel = executionMode === "LIVE_MAINNET" ? "LIVE" : "PAPER";
   const activeSelectedSymbol = data?.markets.some((market) => market.symbol === selectedSymbol)
     ? selectedSymbol
     : data?.markets.find((market) => market.eligible)?.symbol ?? data?.markets[0]?.symbol ?? "";
@@ -64,13 +66,13 @@ export default function TerminalLayout() {
             <div className="hidden items-center gap-3 md:flex">
               <span className={`status-dot ${running ? "live data-positive" : "data-warning"}`} />
               <div>
-                <div className="text-[11px] font-medium tracking-[0.12em]">{running ? "PAPER ENGINE ACTIVE" : "PAPER ENGINE PAUSED"}</div>
+                <div className={`text-[11px] font-medium tracking-[0.12em] ${executionMode === "LIVE_MAINNET" ? "text-[#fca5a5]" : ""}`}>{modeLabel} ENGINE {running ? "ACTIVE" : "PAUSED"}</div>
                 <div className="text-[10px] text-[#8290aa]">{data?.sourceLabel ?? "正在连接币安期货行情"}</div>
               </div>
             </div>
             <div className="md:hidden">
               <div className="text-[11px] text-[#22d3ee]">{data?.source ?? "CONNECTING"}</div>
-              <div className="text-[10px] text-[#8290aa]">模拟交易</div>
+              <div className="text-[10px] text-[#8290aa]">{executionMode === "LIVE_MAINNET" ? "真实交易" : "模拟交易"}</div>
             </div>
             <div className="flex items-center gap-2">
               <div className="hidden text-right sm:block">
@@ -145,8 +147,8 @@ export default function TerminalLayout() {
           </div>
         </div>
         <div className="border-t border-[#1a2540] p-4 text-[10px] leading-5 text-[#8290aa]">
-          <div className="mb-2 flex items-center gap-2 text-[#c5d0df]"><Activity size={13} /> 模拟执行环境</div>
-          不会请求 API 密钥，不会发送真实订单。杠杆上限为模拟参数，实际账户档位以币安为准。
+          <div className={`mb-2 flex items-center gap-2 ${executionMode === "LIVE_MAINNET" ? "text-[#fca5a5]" : "text-[#c5d0df]"}`}><Activity size={13} /> {executionMode === "LIVE_MAINNET" ? "真实主网执行环境" : "模拟执行环境"}</div>
+          {executionMode === "LIVE_MAINNET" ? "账户、持仓与订单均为真实主网数据；armed 不代表已绕过任何预检或风险门控。" : "不会请求 API 密钥，不会发送真实订单。杠杆上限为模拟参数，实际账户档位以币安为准。"}
         </div>
       </aside>
 

@@ -126,6 +126,7 @@ function setup(options: {
   live?: ExecutionAdapter;
   env?: Record<string, string | undefined>;
   armed?: boolean;
+  preflight?: { ready: boolean; reasons: string[]; checkedAt: string | null };
   risk?: { openPositions: number; pendingIntents: number; unfinishedOrders: number };
   riskLoader?: () => Promise<{ openPositions: number; pendingIntents: number; unfinishedOrders: number }>;
   now?: () => number;
@@ -135,22 +136,32 @@ function setup(options: {
   const paper = options.paper ?? adapter();
   const live = options.live ?? adapter();
   const momentumStore = options.momentumStore ?? new InMemoryMomentumStateStore();
+  let armed = options.armed ?? false;
   const saveSettings = vi.fn(async (next: TradingSettings) => {
     Object.assign(settings, next);
+  });
+  const setLiveControls = vi.fn(async (next: { armed: boolean }) => { armed = next.armed; });
+  const runLivePreflight = vi.fn(async () => options.preflight ?? {
+    ready: true,
+    reasons: [],
+    checkedAt: new Date(1_800_000_001_000).toISOString(),
   });
   const coordinator = createExecutionCoordinator({
     paper,
     live,
     getSettings: async () => settings,
     saveSettings,
-    getLiveControls: async () => ({ armed: options.armed ?? false }),
+    getLiveControls: async () => ({ armed }),
+    setLiveControls,
+    runLivePreflight,
+    getLiveOperations: async () => ({ orders: [], unsettledIntents: [], reconciliationIssues: [] }),
     getOutstandingRisk: options.riskLoader ?? (async () => options.risk ?? { openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
     market: { dataSource: options.source ?? "MAINNET" },
     env: options.env ?? {},
     now: options.now ?? (() => 1_800_000_001_000),
     momentumStore,
   });
-  return { coordinator, settings, paper, live, saveSettings, momentumStore };
+  return { coordinator, settings, paper, live, saveSettings, setLiveControls, runLivePreflight, momentumStore };
 }
 
 describe("执行配置安全默认值", () => {
@@ -450,5 +461,79 @@ describe("ExecutionCoordinator", () => {
     await h.coordinator.open(signal);
     await expect(h.coordinator.open(signal)).resolves.toMatchObject({ ok: false });
     expect(h.paper.open).toHaveBeenCalledTimes(1);
+  });
+
+  it("手动 canary 只绕过 autoTrade，预检失败仍拒绝提交", async () => {
+    const h = setup({
+      settings: { executionMode: "LIVE_MAINNET", autoTrade: false },
+      env: { LIVE_TRADING_ENABLED: "true" },
+      armed: true,
+    });
+    const signal = opportunity();
+
+    await expect(h.coordinator.openManual(signal)).resolves.toMatchObject({ ok: true });
+    expect(h.live.open).toHaveBeenCalledWith(signal, undefined, { manualCanary: true });
+
+    const failed = setup({
+      settings: { executionMode: "LIVE_MAINNET", autoTrade: false },
+      env: { LIVE_TRADING_ENABLED: "true" },
+      armed: true,
+      preflight: { ready: false, reasons: ["私有 WS 未连接"], checkedAt: null },
+    });
+    await expect(failed.coordinator.openManual(signal)).resolves.toEqual({ ok: false, reason: "主网预检未通过：私有 WS 未连接" });
+    expect(failed.live.open).not.toHaveBeenCalled();
+  });
+
+  it("armed 只在环境总开关和完整预检通过后持久化，disarm 不依赖预检", async () => {
+    const blocked = setup({
+      settings: { executionMode: "LIVE_MAINNET" },
+      env: {},
+      preflight: { ready: true, reasons: [], checkedAt: null },
+    });
+    await expect(blocked.coordinator.setArmed(true)).rejects.toThrow("LIVE_TRADING_ENABLED");
+    expect(blocked.setLiveControls).not.toHaveBeenCalled();
+    expect(blocked.runLivePreflight).not.toHaveBeenCalled();
+
+    const h = setup({
+      settings: { executionMode: "LIVE_MAINNET" },
+      env: { LIVE_TRADING_ENABLED: "true" },
+    });
+    await expect(h.coordinator.setArmed(true)).resolves.toMatchObject({ armed: true });
+    expect(h.setLiveControls).toHaveBeenCalledWith({ armed: true });
+    await expect(h.coordinator.setArmed(false)).resolves.toMatchObject({ armed: false });
+    expect(h.runLivePreflight).toHaveBeenCalledTimes(1);
+  });
+
+  it("状态只报告凭据是否配置，不泄露凭据值", async () => {
+    const h = setup({
+      settings: { executionMode: "LIVE_MAINNET" },
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_API_KEY: "not-a-real-key", BINANCE_API_SECRET: "not-a-real-secret" },
+      armed: true,
+    });
+
+    const status = await h.coordinator.status();
+    expect(status).toMatchObject({ executionMode: "LIVE_MAINNET", armed: true, environmentEnabled: true, credentialsConfigured: true });
+    expect(JSON.stringify(status)).not.toContain("not-a-real-key");
+    expect(JSON.stringify(status)).not.toContain("not-a-real-secret");
+  });
+
+  it("LIVE adapter 未配置时 dashboard 显示不可用而不回退 paper 账户", async () => {
+    const paper = adapter();
+    const coordinator = createExecutionCoordinator({
+      paper,
+      getSettings: async () => ({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" }),
+      getLiveControls: async () => ({ armed: false }),
+      getLiveOperations: async () => ({ orders: [], unsettledIntents: [], reconciliationIssues: [] }),
+      getOutstandingRisk: async () => ({ openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
+      env: {},
+      market: { dataSource: "MAINNET" },
+    });
+
+    const dashboard = await coordinator.dashboard();
+    expect(dashboard.status).toMatchObject({ executionMode: "LIVE_MAINNET", adapterConfigured: false, canSubmit: false });
+    expect(dashboard.account.valuationValid).toBe(false);
+    expect(dashboard.account.valuationIssues).toContain("LIVE_MAINNET adapter 尚未配置");
+    expect(dashboard.positions).toEqual([]);
+    expect(paper.snapshot).not.toHaveBeenCalled();
   });
 });

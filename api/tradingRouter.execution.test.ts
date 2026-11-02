@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { DEFAULT_SETTINGS, type AccountSnapshot } from "@contracts/trading";
+import { DEFAULT_SETTINGS } from "@contracts/trading";
 
 const SECRET = "execution-router-admin-secret-with-32-characters";
 process.env.APP_SECRET = SECRET;
@@ -12,28 +12,25 @@ const mocks = vi.hoisted(() => ({
   paperReset: vi.fn(async () => ({ ok: true, paused: true as const, settled: [], unsettled: [] })),
   saveSettings: vi.fn(async () => undefined),
   getSettings: vi.fn(async () => ({ ...DEFAULT_SETTINGS })),
+  dashboard: vi.fn(async () => ({
+    account: {},
+    positions: [],
+    status: { executionMode: "PAPER", armed: false },
+    liveOrders: [],
+    unsettledIntents: [],
+    reconciliationIssues: [],
+  })),
+  switchExecutionMode: vi.fn(async (executionMode: "PAPER" | "LIVE_MAINNET") => ({ ...DEFAULT_SETTINGS, executionMode })),
+  setArmed: vi.fn(async (armed: boolean) => ({ executionMode: "LIVE_MAINNET", armed })),
 }));
-
-const account: AccountSnapshot = {
-  equity: 100_000,
-  cash: 100_000,
-  availableMargin: 100_000,
-  usedMargin: 0,
-  unrealizedPnl: 0,
-  realizedPnl: 0,
-  todayPnl: 0,
-  todayPnlPct: 0,
-  dayStartEquity: 100_000,
-  valuationValid: true,
-  valuationIssues: [],
-  dailyLocked: false,
-};
 
 vi.mock("./services/executionCoordinator", () => ({
   executionCoordinator: {
     close: mocks.close,
     emergency: mocks.emergency,
-    snapshot: vi.fn(async () => ({ account, positions: [] })),
+    dashboard: mocks.dashboard,
+    switchExecutionMode: mocks.switchExecutionMode,
+    setArmed: mocks.setArmed,
   },
 }));
 
@@ -97,9 +94,9 @@ vi.mock("./queries/connection", () => ({ getDb: vi.fn() }));
 
 const { tradingRouter, settingsInput } = await import("./tradingRouter");
 
-function caller() {
+function caller(authorization: string | null = SECRET) {
   return tradingRouter.createCaller({
-    req: new Request("http://localhost/api/trpc", { headers: { authorization: `Bearer ${SECRET}` } }),
+    req: new Request("http://localhost/api/trpc", { headers: authorization ? { authorization: `Bearer ${authorization}` } : undefined }),
     resHeaders: new Headers(),
   });
 }
@@ -156,5 +153,33 @@ describe("统一执行管理入口", () => {
     mocks.getSettings.mockResolvedValueOnce({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" });
     await expect(caller().reset()).rejects.toThrow("禁止 paper reset");
     expect(mocks.paperReset).toHaveBeenCalledTimes(1);
+  });
+
+  it("无权限返回 UNAUTHORIZED（HTTP 401），不会触及 armed", async () => {
+    await expect(caller(null).setLiveControls({ armed: true, confirmationPhrase: "ARM LIVE MAINNET", adminSecret: SECRET }))
+      .rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    expect(mocks.setArmed).not.toHaveBeenCalled();
+  });
+
+  it("armed 需要重新输入管理员令牌和精确确认短语，disarm 保持可用", async () => {
+    await expect(caller().setLiveControls({ armed: true, confirmationPhrase: "ARM LIVE MAINNET", adminSecret: "wrong" }))
+      .rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(caller().setLiveControls({ armed: true, confirmationPhrase: "wrong", adminSecret: SECRET }))
+      .rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+    expect(mocks.setArmed).not.toHaveBeenCalled();
+
+    await expect(caller().setLiveControls({ armed: true, confirmationPhrase: "ARM LIVE MAINNET", adminSecret: SECRET }))
+      .resolves.toMatchObject({ armed: true });
+    expect(mocks.setArmed).toHaveBeenLastCalledWith(true);
+    await expect(caller().setLiveControls({ armed: false })).resolves.toMatchObject({ armed: false });
+    expect(mocks.setArmed).toHaveBeenLastCalledWith(false);
+  });
+
+  it("执行模式和 dashboard 都通过 coordinator，并保留 PAPER/LIVE 状态", async () => {
+    await expect(caller().setExecutionMode({ executionMode: "LIVE_MAINNET" })).resolves.toMatchObject({ executionMode: "LIVE_MAINNET" });
+    expect(mocks.switchExecutionMode).toHaveBeenCalledWith("LIVE_MAINNET");
+
+    await expect(caller().dashboard()).resolves.toMatchObject({ execution: { executionMode: "PAPER", armed: false } });
+    expect(mocks.dashboard).toHaveBeenCalled();
   });
 });

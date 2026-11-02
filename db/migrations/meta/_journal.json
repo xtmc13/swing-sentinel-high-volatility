@@ -78,6 +78,13 @@
       "when": 1793639973254,
       "tag": "0010_momentum_exit_claims",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "5",
+      "when": 1793642502877,
+      "tag": "0011_lively_tarantula",
+      "breakpoints": true
     }
   ]
 }

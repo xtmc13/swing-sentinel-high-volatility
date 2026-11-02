@@ -15,6 +15,91 @@ export const DEFAULT_LIVE_CONTROLS: LiveControls = {
   armed: false,
 };
 
+export interface LiveReadiness {
+  ready: boolean;
+  reasons: string[];
+  checkedAt: string | null;
+}
+
+export interface MomentumHealth {
+  enabled: boolean;
+  healthy: boolean;
+  lastFrameAt: string | null;
+  reason: string;
+}
+
+export interface OutstandingExecutionStatus {
+  openPositions: number;
+  pendingIntents: number;
+  unfinishedOrders: number;
+}
+
+export interface ReconciliationHealth {
+  configured: boolean;
+  healthy: boolean;
+  openIssues: number;
+  severeIssues: number;
+  lastDetectedAt: string | null;
+}
+
+export interface PrivateWsHealth {
+  configured: boolean;
+  running: boolean;
+  connected: boolean;
+  lastMessageAt: number | null;
+  reconnects: number;
+}
+
+export interface ExecutionStatus {
+  executionMode: ExecutionMode;
+  armed: boolean;
+  environmentEnabled: boolean;
+  credentialsConfigured: boolean;
+  adapterConfigured: boolean;
+  canSubmit: boolean;
+  reasons: string[];
+  preflight: LiveReadiness;
+  momentum: MomentumHealth;
+  outstanding: OutstandingExecutionStatus;
+  reconciliation: ReconciliationHealth;
+  privateWs: PrivateWsHealth;
+  missingProtections: string[];
+}
+
+export interface LiveOrderView {
+  id: string;
+  intentId: string;
+  clientOrderId: string;
+  exchangeOrderId: string | null;
+  symbol: string;
+  side: Side;
+  type: "LIMIT" | "MARKET" | "STOP_MARKET";
+  status: string;
+  price: string;
+  originalQuantity: string;
+  executedQuantity: string;
+  averagePrice: string;
+  commission: string;
+  reduceOnly: boolean;
+  createdAt: string;
+}
+
+export interface UnsettledIntentView {
+  id: string;
+  symbol: string;
+  status: string;
+}
+
+export interface ReconciliationIssueView {
+  id: string;
+  category: string;
+  severity: "INFO" | "WARN" | "ERROR" | "CRITICAL";
+  status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED";
+  symbol: string | null;
+  message: string;
+  detectedAt: string;
+}
+
 export interface MarketQuality {
   valid: boolean;
   reasons: string[];
@@ -273,6 +358,10 @@ export interface DashboardData {
   marketQuality: Record<string, MarketQuality>;
   portfolioRisk: PortfolioRiskSnapshot;
   monitor: WebSocketHealthMetrics;
+  execution: ExecutionStatus;
+  liveOrders: LiveOrderView[];
+  unsettledIntents: UnsettledIntentView[];
+  reconciliationIssues: ReconciliationIssueView[];
 }
 
 export interface BacktestResult {

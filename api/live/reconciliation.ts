@@ -65,8 +65,11 @@ export interface ReconciliationStore {
 export class InMemoryReconciliationStore implements ReconciliationStore {
   private readonly issues: ReconciliationIssue[] = [];
   private readonly snapshots = new Map<string, LiveAccountSnapshot>();
+  private readonly unsettledIntents: UnsettledLiveIntent[];
 
-  constructor(private readonly unsettledIntents: UnsettledLiveIntent[] = []) {}
+  constructor(unsettledIntents: UnsettledLiveIntent[] = []) {
+    this.unsettledIntents = unsettledIntents;
+  }
 
   async listUnsettledIntents(): Promise<UnsettledLiveIntent[]> {
     return this.unsettledIntents.map((intent) => ({ ...intent }));
@@ -106,7 +109,11 @@ export class InMemoryReconciliationStore implements ReconciliationStore {
 }
 
 export class DrizzleReconciliationStore implements ReconciliationStore {
-  constructor(private readonly db: LiveDatabase) {}
+  private readonly db: LiveDatabase;
+
+  constructor(db: LiveDatabase) {
+    this.db = db;
+  }
 
   async listUnsettledIntents(): Promise<UnsettledLiveIntent[]> {
     return this.db.select({ id: liveIntents.id, symbol: liveIntents.symbol, status: liveIntents.status })
@@ -288,9 +295,11 @@ function localOrderIdentity(order: BinanceOpenOrder, localOrders: LiveOrder[]): 
 }
 
 export class ReconciliationService {
+  private readonly options: ReconciliationServiceOptions;
   private readonly now: () => number;
 
-  constructor(private readonly options: ReconciliationServiceOptions) {
+  constructor(options: ReconciliationServiceOptions) {
+    this.options = options;
     this.now = options.now ?? Date.now;
   }
 

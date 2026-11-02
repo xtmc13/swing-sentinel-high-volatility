@@ -1,0 +1,1 @@
+ALTER TABLE `live_intents` ADD `manual_canary` boolean DEFAULT false NOT NULL;

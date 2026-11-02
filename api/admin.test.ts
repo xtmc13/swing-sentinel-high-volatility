@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAdminRequest } from "./admin";
+import { isAdminRequest, isFreshAdminSecret } from "./admin";
 const SECRET = "test-admin-secret-with-at-least-32-characters";
 const request = (authorization?: string) => new Request("http://localhost/api/trpc/trading.adminStatus", { headers: authorization ? { authorization } : undefined });
 describe("管理员令牌校验", () => {
@@ -12,5 +12,11 @@ describe("管理员令牌校验", () => {
   it("空密钥和超长令牌失败关闭", () => {
     expect(isAdminRequest(request("Bearer "), "")).toBe(false);
     expect(isAdminRequest(request(`Bearer ${"x".repeat(513)}`), SECRET)).toBe(false);
+  });
+  it("armed 的重新授权使用常量时间精确比较且不接受空值", () => {
+    expect(isFreshAdminSecret(SECRET, SECRET)).toBe(true);
+    expect(isFreshAdminSecret(`${SECRET}x`, SECRET)).toBe(false);
+    expect(isFreshAdminSecret("", SECRET)).toBe(false);
+    expect(isFreshAdminSecret(SECRET, "")).toBe(false);
   });
 });

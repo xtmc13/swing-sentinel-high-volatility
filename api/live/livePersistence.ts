@@ -194,7 +194,7 @@ export async function createLiveIntent(
         ? stateLock[0].mode
         : stateLock[0]?.mode === "NORMAL" ? "NORMAL" : null;
       if (!mode) return { ok: false, reason: "缺少当前波动状态，禁止开仓" };
-      const emergencyGeneration = options.requireAutoTrade ? await lockEmergencyGeneration(tx) : 0;
+      const emergencyGeneration = await lockEmergencyGeneration(tx);
 
       const approval = await options.finalGate(tx, {
         mode,
@@ -209,6 +209,7 @@ export async function createLiveIntent(
         id: input.id,
         signalId: input.signalId,
         strategyType: input.strategyType ?? "SWING",
+        manualCanary: options.requireAutoTrade === false,
         breakoutPrice: input.breakoutPrice ?? null,
         symbol: input.symbol,
         side: input.side,
@@ -269,6 +270,18 @@ export interface AssertLiveSubmissionInput {
   expectedGeneration: number;
 }
 
+export function liveSubmissionPermitted(input: {
+  autoTrade: boolean;
+  manualCanary: boolean;
+  generation: number;
+  expectedGeneration: number;
+  intentStatus: string;
+}): boolean {
+  return (input.autoTrade || input.manualCanary)
+    && input.generation === input.expectedGeneration
+    && input.intentStatus === "PENDING_SEND";
+}
+
 export async function assertLiveSubmission(
   db: LiveDatabase,
   input: AssertLiveSubmissionInput,
@@ -280,9 +293,15 @@ export async function assertLiveSubmission(
     const settings = await tx.select({ autoTrade: tradingSettings.autoTrade }).from(tradingSettings)
       .where(eq(tradingSettings.id, 1)).for("update");
     const generation = await lockEmergencyGeneration(tx);
-    const intent = await tx.select({ status: liveIntents.status }).from(liveIntents)
+    const intent = await tx.select({ status: liveIntents.status, manualCanary: liveIntents.manualCanary }).from(liveIntents)
       .where(eq(liveIntents.id, input.intentId)).for("update");
-    if (!settings[0]?.autoTrade || generation !== input.expectedGeneration || intent[0]?.status !== "PENDING_SEND") {
+    if (!liveSubmissionPermitted({
+      autoTrade: settings[0]?.autoTrade ?? false,
+      manualCanary: intent[0]?.manualCanary ?? false,
+      generation,
+      expectedGeneration: input.expectedGeneration,
+      intentStatus: intent[0]?.status ?? "MISSING",
+    })) {
       throw new Error("Live submission changed after emergency or pause");
     }
   });

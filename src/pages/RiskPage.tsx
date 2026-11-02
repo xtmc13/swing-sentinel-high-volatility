@@ -6,6 +6,7 @@ import { useTerminal } from "@/components/terminal-context";
 import type { TradingSettings } from "@contracts/trading";
 import { formatTime } from "@/lib/format";
 import { bulkExecutionFeedback } from "@/lib/executionFeedback";
+import ExecutionStatusPanel from "@/components/ExecutionStatusPanel";
 
 function NumberField({ label, value, suffix, step = 0.1, min = 0, max, onChange }: { label: string; value: number; suffix: string; step?: number; min?: number; max?: number; onChange: (value: number) => void }) {
   return <label className="block"><span className="terminal-label">{label}</span><span className="relative mt-2 block"><input type="number" className="terminal-input pr-16" value={value} step={step} min={min} max={max} onChange={(event) => onChange(Number(event.target.value))} /><span className="pointer-events-none absolute right-3 top-3 text-[10px] text-[#596983]">{suffix}</span></span></label>;
@@ -19,8 +20,23 @@ export default function RiskPage() {
 function RiskPageContent() {
   const { data, refresh } = useTerminal();
   const [form, setForm] = useState<TradingSettings>(data.settings);
+  const [adminSecret, setAdminSecret] = useState("");
+  const [confirmationPhrase, setConfirmationPhrase] = useState("");
   const save = trpc.trading.saveSettings.useMutation({
     onSuccess: async () => { toast.success("风险与执行参数已保存，下一轮扫描生效"); refresh(); },
+    onError: (error) => toast.error(error.message),
+  });
+  const setMode = trpc.trading.setExecutionMode.useMutation({
+    onSuccess: async (result) => { toast.success(`执行模式已切换为 ${result.executionMode === "LIVE_MAINNET" ? "LIVE · 真实" : "PAPER · 模拟"}`); refresh(); },
+    onError: (error) => toast.error(error.message),
+  });
+  const setControls = trpc.trading.setLiveControls.useMutation({
+    onSuccess: async (result) => {
+      toast.success(result.armed ? "主网已 armed；每次提交仍重新执行全部门控" : "主网已 disarm");
+      setAdminSecret("");
+      setConfirmationPhrase("");
+      refresh();
+    },
     onError: (error) => toast.error(error.message),
   });
   const emergency = trpc.trading.emergencyStop.useMutation({
@@ -133,11 +149,29 @@ function RiskPageContent() {
         </div>
 
         <aside className="space-y-3">
+          <ExecutionStatusPanel status={data.execution} />
+          <section className="panel p-4" aria-labelledby="execution-controls-title">
+            <h2 id="execution-controls-title" className="terminal-label">EXECUTION CONTROL</h2>
+            <div className="mt-3 grid grid-cols-2 gap-2" role="group" aria-label="执行模式">
+              <button type="button" className="btn-secondary !px-2 !text-[10px]" disabled={setMode.isPending || data.settings.executionMode === "PAPER"} onClick={() => setMode.mutate({ executionMode: "PAPER" })}>PAPER · 模拟</button>
+              <button type="button" className="btn-secondary !px-2 !text-[10px] !text-[#fca5a5]" disabled={setMode.isPending || data.settings.executionMode === "LIVE_MAINNET"} onClick={() => { if (window.confirm("切换到 LIVE 只选择真实账户视图，不会自动 armed；确认继续？")) setMode.mutate({ executionMode: "LIVE_MAINNET" }); }}>LIVE · 真实</button>
+            </div>
+            <p className="reading mt-3 text-[10px] leading-5 text-[#8290aa]">切换前必须没有未结持仓、意图或订单。手动 canary 不需要开启自动交易，但仍需主网模式、环境总开关、armed、适配器和完整预检。</p>
+            {data.execution.armed ? (
+              <button type="button" className="btn-danger mt-3 w-full" disabled={setControls.isPending} onClick={() => setControls.mutate({ armed: false })}>立即 disarm</button>
+            ) : (
+              <form className="mt-4 space-y-3" onSubmit={(event) => { event.preventDefault(); setControls.mutate({ armed: true, adminSecret, confirmationPhrase }); }}>
+                <label className="block"><span className="terminal-label">重新输入管理员令牌</span><input className="terminal-input mt-2 !text-[11px]" type="password" autoComplete="off" required minLength={32} value={adminSecret} onChange={(event) => setAdminSecret(event.target.value)} /></label>
+                <label className="block"><span className="terminal-label">确认短语</span><input className="terminal-input mt-2 !text-[11px]" required value={confirmationPhrase} onChange={(event) => setConfirmationPhrase(event.target.value)} placeholder="ARM LIVE MAINNET" /></label>
+                <button type="submit" className="btn-danger w-full" disabled={setControls.isPending || data.settings.executionMode !== "LIVE_MAINNET" || confirmationPhrase !== "ARM LIVE MAINNET" || adminSecret.length < 32}>{setControls.isPending ? "正在预检" : "通过全部预检并 armed"}</button>
+              </form>
+            )}
+          </section>
           <section className="panel border-[#66343c] p-4">
             <div className="flex items-center gap-2 text-[#f87171]"><OctagonAlert size={16} aria-hidden="true" /><h2 className="terminal-label !text-[#f87171]">EMERGENCY CONTROL</h2></div>
-            <p className="reading mt-3 text-[11px] leading-5 text-[#a8b5c8]">紧急停止会关闭自动开仓，并按当前模拟市价退出所有持仓。操作会写入审计记录。</p>
-            <button type="button" className="btn-danger mt-4 w-full" disabled={emergency.isPending} onClick={() => { if (window.confirm("确认暂停自动交易并退出全部模拟持仓？")) emergency.mutate(); }}>紧急停止并全部平仓</button>
-            <button type="button" className="btn-secondary mt-2 w-full" disabled={reset.isPending} onClick={() => { if (window.confirm("确认把模拟账户重置为 100,000 USDT？历史订单与复盘记录会保留。")) reset.mutate(); }}><RotateCcw size={13} aria-hidden="true" />重置模拟账户</button>
+            <p className="reading mt-3 text-[11px] leading-5 text-[#a8b5c8]">紧急停止会关闭自动开仓，并按当前{data.settings.executionMode === "LIVE_MAINNET" ? "真实主网" : "模拟"}市价退出所有持仓。未结算结果会明确显示为失败。</p>
+            <button type="button" className="btn-danger mt-4 w-full" disabled={emergency.isPending} onClick={() => { if (window.confirm(`确认暂停自动交易并退出全部${data.settings.executionMode === "LIVE_MAINNET" ? "真实" : "模拟"}持仓？`)) emergency.mutate(); }}>紧急停止并全部平仓</button>
+            {data.settings.executionMode === "PAPER" && <button type="button" className="btn-secondary mt-2 w-full" disabled={reset.isPending} onClick={() => { if (window.confirm("确认把模拟账户重置为 100,000 USDT？历史订单与复盘记录会保留。")) reset.mutate(); }}><RotateCcw size={13} aria-hidden="true" />重置模拟账户</button>}
           </section>
 
           <section className="panel p-4">

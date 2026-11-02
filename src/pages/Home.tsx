@@ -23,9 +23,10 @@ export default function Home() {
   });
   const market = data.markets.find((item) => item.symbol === selectedSymbol) ?? data.markets[0];
   const openRisk = data.portfolioRisk.totalRiskPct;
+  const live = data.settings.executionMode === "LIVE_MAINNET";
   const transitions = data.events.filter((event) => event.category === "三态迁移");
   const metrics = [
-    { label: "模拟账户权益", value: formatNumber(data.account.equity), suffix: data.account.valuationValid ? "USDT" : "估值不可用", tone: !data.account.valuationValid ? "data-warning" : data.account.equity >= 100000 ? "data-positive" : "data-negative" },
+    { label: live ? "真实账户权益" : "模拟账户权益", value: formatNumber(data.account.equity), suffix: data.account.valuationValid ? "USDT" : "估值不可用", tone: !data.account.valuationValid ? "data-warning" : data.account.equity >= 100000 ? "data-positive" : "data-negative" },
     { label: "可用保证金", value: formatNumber(data.account.availableMargin), suffix: "USDT", tone: "text-[#e7edf7]" },
     { label: "今日净盈亏", value: `${data.account.todayPnl >= 0 ? "+" : ""}${formatNumber(data.account.todayPnl)}`, suffix: data.account.dailyLocked ? "当日已锁定" : formatPercent(data.account.todayPnlPct), tone: !data.account.valuationValid ? "data-warning" : data.account.todayPnl >= 0 ? "data-positive" : "data-negative" },
     { label: "当前止损风险", value: formatNumber(openRisk), suffix: "% 权益", tone: openRisk > 1 ? "data-warning" : "data-live" },
@@ -111,7 +112,7 @@ export default function Home() {
                   <div className="flex items-center justify-between"><button onClick={() => setSelectedSymbol(position.symbol)} className="text-[12px] font-medium hover:text-[#22d3ee]">{position.symbol}</button><span className={`text-[10px] ${sideColor(position.side)}`}>{sideLabel(position.side)} · {position.leverage}×</span></div>
                   <div className="mt-3 grid grid-cols-2 gap-3 text-[10px]"><div><div className="text-[#8290aa]">未实现盈亏</div><div className={`mt-1 text-[14px] ${!position.valuationValid ? "data-warning" : position.unrealizedPnl >= 0 ? "data-positive" : "data-negative"}`}>{position.unrealizedPnl >= 0 ? "+" : ""}{formatNumber(position.unrealizedPnl)}</div></div><div className="text-right"><div className="text-[#8290aa]">保证金</div><div className="mt-1 text-[14px]">{formatNumber(position.margin)}</div></div></div>
                   <div className="mt-3 space-y-1 text-[9px] text-[#91a0b8]"><div className="flex justify-between"><span>进场 {formatPrice(position.entryPrice)}</span><span>标记 {formatPrice(position.markPrice)}</span></div><div className="flex justify-between"><span className="text-[#f87171]">止损 {formatPrice(position.stopPrice)}</span><span className="data-positive">目标 {formatPrice(position.targetPrice)}</span></div><div className="flex justify-between"><span>强平参考 {formatPrice(position.liquidationPrice)}</span><span>{position.holdingMinutes.toFixed(0)} 分钟</span></div></div>
-                  <button className="btn-secondary mt-3 w-full !min-h-9 !text-[10px]" disabled={close.isPending} onClick={() => { if (window.confirm(`确认按当前模拟市价平掉 ${position.symbol}？`)) close.mutate({ positionId: position.id }); }}><X size={12} />模拟市价平仓</button>
+                  <button className="btn-secondary mt-3 w-full !min-h-9 !text-[10px]" disabled={close.isPending} onClick={() => { if (window.confirm(`确认按当前${live ? "真实主网" : "模拟"}市价平掉 ${position.symbol}？`)) close.mutate({ positionId: position.id }); }}><X size={12} />{live ? "真实市价平仓" : "模拟市价平仓"}</button>
                 </div>
               ))}
               {!data.positions.length && <div className="p-5 text-center"><div className="text-[11px] text-[#c5d0df]">当前无持仓</div><div className="reading mt-2 text-[10px] leading-5 text-[#8290aa]">系统只在机会与风险审批同时通过后开仓。</div></div>}

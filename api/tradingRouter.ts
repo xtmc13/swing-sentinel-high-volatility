@@ -1,7 +1,9 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
 import { createRouter, publicQuery } from "./middleware";
-import { adminQuery } from "./admin";
+import { adminQuery, isFreshAdminSecret } from "./admin";
+import { env } from "./lib/env";
 import { engine } from "./services/engine";
 import { binance } from "./services/binance";
 import {
@@ -60,11 +62,11 @@ export const settingsInput = z.object({
 
 async function dashboard(): Promise<DashboardData> {
   if (!engine.markets.length) await engine.refreshMarkets();
-  const [settings, tradeRows, orderRows, eventRows, equityRows, snapshot, initialAccount] = await Promise.all([
+  const [settings, tradeRows, orderRows, eventRows, equityRows, execution, initialAccount] = await Promise.all([
     getSettings(), getRecentTrades(), getRecentOrders(),
-    getRecentEvents(), getEquityHistory(), executionCoordinator.snapshot(), getAccount(),
+    getRecentEvents(), getEquityHistory(), executionCoordinator.dashboard(), getAccount(),
   ]);
-  const { account, positions } = snapshot;
+  const { account, positions } = execution;
   const observability = engine.getDashboardObservability();
   const currentPortfolioRisk = portfolioRisk({
     equity: account.equity,
@@ -110,12 +112,33 @@ async function dashboard(): Promise<DashboardData> {
       positions: currentPortfolioRisk.positions,
     },
     monitor: observability.monitor,
+    execution: execution.status,
+    liveOrders: execution.orders,
+    unsettledIntents: execution.unsettledIntents,
+    reconciliationIssues: execution.reconciliationIssues,
   };
 }
 
 export const tradingRouter = createRouter({
   dashboard: publicQuery.query(dashboard),
   adminStatus: adminQuery.query(() => ({ ok: true as const })),
+  setExecutionMode: adminQuery.input(z.object({ executionMode: z.enum(["PAPER", "LIVE_MAINNET"]) }))
+    .mutation(({ input }) => executionCoordinator.switchExecutionMode(input.executionMode)),
+  setLiveControls: adminQuery.input(z.object({
+    armed: z.boolean(),
+    confirmationPhrase: z.string().max(64).optional(),
+    adminSecret: z.string().max(512).optional(),
+  })).mutation(({ input }) => {
+    if (input.armed) {
+      if (!isFreshAdminSecret(input.adminSecret ?? "", env.appSecret)) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "armed 需要重新输入正确的管理员令牌" });
+      }
+      if (input.confirmationPhrase !== "ARM LIVE MAINNET") {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "请输入确认短语 ARM LIVE MAINNET" });
+      }
+    }
+    return executionCoordinator.setArmed(input.armed);
+  }),
   candles: publicQuery.input(z.object({
     symbol: z.string().regex(/^[A-Z0-9]{5,20}$/),
     interval: z.enum(["5m", "15m", "1h", "4h"]),

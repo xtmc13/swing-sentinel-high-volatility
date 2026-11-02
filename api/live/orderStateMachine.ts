@@ -42,6 +42,7 @@ export interface LiveOrder {
   averagePrice: DecimalString;
   commission: DecimalString;
   reduceOnly: boolean;
+  manualCanary?: boolean;
   createdAt: number;
 }
 
@@ -282,7 +283,7 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
     const order = this.orders.get(clientOrderId);
     if (!order) throw new Error("Live order not found");
     if (order.status !== "PENDING_SEND") return copyOrder(order);
-    if (!this.autoTrade || this.emergencyGeneration !== expectedGeneration) {
+    if ((!this.autoTrade && !order.manualCanary) || this.emergencyGeneration !== expectedGeneration) {
       const cancelled = { ...order, status: "CANCEL" as const };
       this.orders.set(clientOrderId, cancelled);
       return copyOrder(cancelled);
@@ -323,14 +324,18 @@ export interface OrderStateMachineOptions {
 }
 
 export class OrderStateMachine {
+  private readonly store: LiveOrderStore;
+  private readonly gateway: LiveOrderGateway;
   private readonly alert: (message: string) => unknown;
   private readonly id: () => string;
 
   constructor(
-    private readonly store: LiveOrderStore,
-    private readonly gateway: LiveOrderGateway,
+    store: LiveOrderStore,
+    gateway: LiveOrderGateway,
     options: OrderStateMachineOptions = {},
   ) {
+    this.store = store;
+    this.gateway = gateway;
     this.alert = options.alert ?? (() => undefined);
     this.id = options.id ?? (() => crypto.randomUUID());
   }

@@ -1,3 +1,4 @@
+import type { PrivateWsHealth } from "@contracts/trading";
 import { privateUserDataStreamUrl, type BinanceAccountResponse } from "./binanceSigned";
 import { compareDecimals, decimal } from "./decimal";
 import { type ReconciliationIssueCategory, type ReconciliationStore } from "./reconciliation";
@@ -98,6 +99,8 @@ export class UserDataStream {
   private eventTail: Promise<void> = Promise.resolve();
   private generation = 0;
   private running = false;
+  private lastMessageAt: number | null = null;
+  private reconnects = 0;
   private readonly keepAliveIntervalMs: number;
   private readonly reconnectDelayMs: number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
@@ -108,6 +111,16 @@ export class UserDataStream {
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1_000;
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.now = options.now ?? Date.now;
+  }
+
+  health(): PrivateWsHealth {
+    return {
+      configured: true,
+      running: this.running,
+      connected: this.running && this.attempt?.socket != null && !this.attempt.reconciling,
+      lastMessageAt: this.lastMessageAt,
+      reconnects: this.reconnects,
+    };
   }
 
   async start(): Promise<void> {
@@ -228,6 +241,7 @@ export class UserDataStream {
   private async handle(data: unknown): Promise<void> {
     const parsed = typeof data === "string" ? JSON.parse(data) : data;
     const event = object(parsed);
+    this.lastMessageAt = typeof event.E === "number" && Number.isSafeInteger(event.E) ? event.E : this.now();
     if (event.e === "listenKeyExpired") {
       await this.reconnect();
       return;
@@ -312,6 +326,7 @@ export class UserDataStream {
   private async reconnect(): Promise<void> {
     if (!this.running) return;
     if (this.reconnecting) return this.reconnecting;
+    this.reconnects += 1;
     const generation = ++this.generation;
     this.discardAttempt();
     const pending = (async () => {

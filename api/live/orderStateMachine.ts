@@ -85,6 +85,7 @@ export interface FillApplication {
   order: LiveOrder;
   position: LivePosition | null;
   inserted: boolean;
+  unresolved?: string[];
 }
 
 export interface LiveOrderStore {
@@ -383,32 +384,49 @@ export class OrderStateMachine {
   private async applyFillAndProtect(clientOrderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication> {
     const order = await this.requireOrder(clientOrderId);
     const result = await this.store.applyFill(order.id, fill, seed);
-    if (result.inserted && order.status === "CANCEL") await this.invalidateReplacement(order);
+    const unresolved = result.inserted && order.status === "CANCEL"
+      ? await this.invalidateReplacement(order) : null;
     if (result.inserted && result.position?.status === "OPEN" && !order.reduceOnly) {
       await this.ensureProtection(result.position);
     }
-    return result;
+    return unresolved ? { ...result, unresolved: [unresolved] } : result;
   }
 
-  private async invalidateReplacement(parent: LiveOrder): Promise<void> {
-    const replacement = await this.store.getOrder(`replace-${parent.clientOrderId}`);
-    if (!replacement) return;
+  private async invalidateReplacement(parent: LiveOrder): Promise<string | null> {
+    let replacement = await this.store.getOrder(`replace-${parent.clientOrderId}`);
+    if (!replacement || replacement.status === "CANCEL") return null;
     if (replacement.status === "FILLED") {
-      await this.alert(`${parent.symbol} CANCEL 父单与已成交 replacement 需要人工对账`);
-      return;
+      return this.reportInvalidationIssue(parent, replacement, "父单 CANCEL 后 replacement 已成交");
     }
-    if (!WORKING_STATUSES.has(replacement.status)) return;
     if (replacement.status === "PENDING_SEND") {
-      await this.store.transitionOrder(replacement.clientOrderId, ["PENDING_SEND"], { status: "CANCEL" });
-      return;
+      const cancelled = await this.store.transitionOrder(replacement.clientOrderId, ["PENDING_SEND"], { status: "CANCEL" });
+      if (cancelled?.status === "CANCEL") return null;
+      replacement = await this.requireOrder(replacement.clientOrderId);
     }
-    await this.store.transitionOrder(replacement.clientOrderId, [replacement.status], { status: "RECONCILING" });
+    if (!WORKING_STATUSES.has(replacement.status)) {
+      return replacement.status === "CANCEL" ? null
+        : this.reportInvalidationIssue(parent, replacement, `replacement 状态 ${replacement.status} 无法失效`);
+    }
+    const reconciling = await this.store.transitionOrder(replacement.clientOrderId, [replacement.status], {
+      status: "RECONCILING",
+    });
+    replacement = reconciling ?? await this.requireOrder(replacement.clientOrderId);
     try {
       await this.gateway.cancelOrder({ symbol: replacement.symbol, origClientOrderId: replacement.clientOrderId });
-      await this.store.transitionOrder(replacement.clientOrderId, ["RECONCILING"], { status: "CANCEL" });
+      const actual = await this.reconcile(replacement);
+      if (actual.status === "CANCEL") return null;
+      return this.reportInvalidationIssue(parent, actual, `cancel 后实际状态为 ${actual.status}`);
     } catch {
-      await this.store.transitionOrder(replacement.clientOrderId, ["RECONCILING"], { status: "UNKNOWN" });
+      const latest = await this.requireOrder(replacement.clientOrderId);
+      const unknown = await this.store.transitionOrder(latest.clientOrderId, [latest.status], { status: "UNKNOWN" });
+      return this.reportInvalidationIssue(parent, unknown ?? latest, "cancel 无法确认，相关 replacement 已冻结为 UNKNOWN");
     }
+  }
+
+  private async reportInvalidationIssue(parent: LiveOrder, replacement: LiveOrder, detail: string): Promise<string> {
+    const message = `${parent.symbol} replacement ${replacement.clientOrderId} 未解决：${detail}`;
+    await this.alert(message);
+    return message;
   }
 
   async handleFill(clientOrderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication> {

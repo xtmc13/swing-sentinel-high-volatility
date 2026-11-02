@@ -288,6 +288,55 @@ describe("fill-driven live order state machine", () => {
     expect((await store.getOrder("replace-entry-1"))?.status).toBe("CANCEL");
   });
 
+  it("cancels and reconciles when another worker submits during replacement invalidation", async () => {
+    const { store, gateway, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    await machine.handleFill("entry-1", fill(), seed);
+    const replacement = await machine.replaceOrder("entry-1", "101");
+    await store.transitionOrder(replacement.clientOrderId, ["NEW"], { status: "PENDING_SEND" });
+    const transition = store.transitionOrder.bind(store);
+    const otherWorker = new OrderStateMachine(store, gateway);
+    store.transitionOrder = async (clientOrderId, expectedStatuses, patch) => {
+      if (clientOrderId === replacement.clientOrderId && patch.status === "CANCEL"
+        && expectedStatuses.includes("PENDING_SEND")) {
+        await otherWorker.submit(clientOrderId);
+        return null;
+      }
+      return transition(clientOrderId, expectedStatuses, patch);
+    };
+
+    const result = await machine.handleFill("entry-1", fill({ exchangeTradeId: "late-race" }), seed);
+    expect((await store.getOrder(replacement.clientOrderId))?.status).toBe("CANCEL");
+    expect(gateway.cancelled.some((order) => order.origClientOrderId === replacement.clientOrderId)).toBe(true);
+    expect(result.unresolved ?? []).toHaveLength(0);
+  });
+
+  it("reports unresolved and freezes replacement when raced invalidation cannot confirm cancel", async () => {
+    const { store, gateway, alerts, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    await machine.handleFill("entry-1", fill(), seed);
+    const replacement = await machine.replaceOrder("entry-1", "101");
+    await store.transitionOrder(replacement.clientOrderId, ["NEW"], { status: "PENDING_SEND" });
+    const transition = store.transitionOrder.bind(store);
+    const otherWorker = new OrderStateMachine(store, gateway);
+    store.transitionOrder = async (clientOrderId, expectedStatuses, patch) => {
+      if (clientOrderId === replacement.clientOrderId && patch.status === "CANCEL"
+        && expectedStatuses.includes("PENDING_SEND")) {
+        await otherWorker.submit(clientOrderId);
+        return null;
+      }
+      return transition(clientOrderId, expectedStatuses, patch);
+    };
+    gateway.failCancel = true;
+
+    const result = await machine.handleFill("entry-1", fill({ exchangeTradeId: "late-failed-race" }), seed);
+    expect((await store.getOrder(replacement.clientOrderId))?.status).toBe("UNKNOWN");
+    expect(result.unresolved).toHaveLength(1);
+    expect(alerts.join(" ")).toContain("未解决");
+  });
+
   it("rejects replacement from UNKNOWN until explicit reconciliation", async () => {
     const { store, gateway, machine } = setup();
     entry(store);

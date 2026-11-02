@@ -119,3 +119,33 @@
 - `git diff --check` / staged diff check：exit 0。
 
 真实 DB integration 仍按任务边界 skipped；相关 fixture 已更新为 armed/generation 基线和 server-side guard，但需在授权专用数据库环境后续执行。disarm 会阻止新的 admission 和最终 transport 检查；已经实际进入交易所 transport 的请求不能靠界面状态撤回，仍由既有 UNKNOWN/reconciliation 流程确认结果。本节取代上一版 live operations 未下推限制。
+
+
+## Review fix round 2
+
+代码/测试/迁移提交 SHA：`ed86b6a738cc17a4c3b22a2c3a0e12d480e1b208`（`fix: guard entry replacement admission`）。本报告更新单独提交；未 push，未使用真实凭据、真实订单、preview DB/server 或真实交易调用。
+
+### RED / GREEN
+
+- Replacement RED：真实 adapter + 共享 in-memory store 中，disarm 后改单和当前 preflight 拒绝后的改单都错误返回 NEW，且 fake gateway 出现第二次下单。两个用例均按预期失败。
+- Reconciliation RED：101 个较早 INFO 后新增未解决 CRITICAL，100 条显示页不含该 CRITICAL，旧实现没有 authoritative summary；coordinator 在显示数组为空时仍错误显示 healthy=true、0 severe。两个用例均按预期失败。
+- 首轮 RED 合计 4 failed / 49 passed。实现后补充既有 state-machine fixture 的 durable generation 和显式 guard，保留全部 replacement race/迟到成交/保护/平仓回归。
+- 最终 focused：**6 files / 101 tests passed，0 failed**。
+
+### Fixes
+
+- `live_orders.admission_generation` 持久化初始 entry 获批的 emergency generation；replacement 继承该值，重启后由 Drizzle reader 恢复。新增离线迁移 `0012_violet_tony_stark.sql` 和 snapshot，未连接或迁移数据库。
+- `OrderStateMachine.submitReplacement` 同时覆盖正常 replacement 和已有 replacement 的恢复分支：LIMIT 非 reduceOnly entry 必须携带 durable generation，并复用初始 entry 的 locked/current admission 及 transport 前第二次检查。缺失 generation、disarm 或 stale/failing guard 均 CANCEL 且不调用 transport。
+- reduceOnly 平仓和 STOP_MARKET 保护不使用 entry admission generation，继续在 disarm/autoTrade 暂停时可用；既有保护和平仓全套测试保持通过。
+- `ReconciliationStore.getIssueSummary()` 独立于 `listIssues(100)`：生产 Drizzle 用 unresolved 条件聚合 COUNT、ERROR/CRITICAL SUM 和 MAX(detected_at)；in-memory 实现同样遍历全部 unresolved，包括 ACKNOWLEDGED。
+- `LiveOperations.reconciliationSummary` 是 readiness 唯一计数来源；显示数组仍只负责分页展示。coordinator 的 healthy/openIssues/severeIssues/lastDetectedAt 均使用 aggregate，显示页之外的新严重问题会阻断 canSubmit 和有效 preflight。
+
+### Final verification
+
+- Focused round 2：6 files passed；**101 passed，0 failed**。
+- `npm test`：42 files passed，4 skipped；**405 passed，53 skipped，0 failed**。
+- `npm run check`：exit 0；`npm run lint`：exit 0。
+- `npm run build`：exit 0；Vite 2441 modules，Node boot bundle 完成。
+- `git diff --check` / staged diff check：exit 0。
+
+53 个数据库 integration 测试继续按授权边界 skipped。新增迁移和 SQL aggregate 未在真实数据库执行；上线前仍需在专用授权环境运行 migration/integration。未进行任何真实 replacement、canary、平仓或保护单调用。

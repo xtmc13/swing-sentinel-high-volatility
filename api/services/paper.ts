@@ -290,6 +290,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       const preflightSettings = await getSettings();
       if (!preflightSettings.autoTrade) return { ok: false as const, reason: "自动交易已暂停" };
       const preflightRows = await db.select().from(positions).where(eq(positions.status, "OPEN"));
+      const preflightSourceGeneration = market.sourceGeneration;
       const symbols = [...new Set([opportunity.symbol, ...preflightRows.map((row) => row.symbol)])];
       const snapshots = new Map(await Promise.all(symbols.map(async (symbol) => {
         const current = await market.getMarketSnapshot(symbol);
@@ -329,6 +330,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         // happens before market-data I/O and can become stale while emergencyStop commits.
         // emergencyStop uses the same account lock, so this closes the late-entry race.
         if (!settings.autoTrade) return { ok: false as const, reason: "自动交易已暂停" };
+        if (market.sourceGeneration !== preflightSourceGeneration) return { retry: true as const };
         const openRows = await tx.select().from(positions).where(eq(positions.status, "OPEN"));
         if (settings.correlationWindow !== preflightSettings.correlationWindow
           || (openRows.length > 0 && preflightRows.length === 0)
@@ -392,7 +394,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
           symbolMeta: meta,
           maxLeverage: currentMarket.maxLeverage,
           now: now(),
-          currentSourceGeneration: market.sourceGeneration,
+          currentSourceGeneration: preflightSourceGeneration,
           executionHealthy,
         });
         if (!approved.ok) return approved;
@@ -445,6 +447,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
     if (!preflightRow || preflightRow.status !== "OPEN") {
       return { ok: false as const, reason: "持仓不存在或已关闭", unsettled: false as const, alreadyClosed: true as const, pnl: undefined };
     }
+    const sourceGeneration = market.sourceGeneration;
     const snapshot = await market.getMarketSnapshot(preflightRow.symbol);
     const result = await db.transaction(async (tx) => {
       const account = (await tx.select().from(simulationAccounts)
@@ -453,6 +456,9 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       const settingsRow = (await tx.select().from(tradingSettings).where(eq(tradingSettings.id, 1)).limit(1))[0];
       if (!settingsRow) throw new Error("Trading settings are missing");
       const settings = settingsFromRow(settingsRow);
+      if (market.sourceGeneration !== sourceGeneration) {
+        return { ok: false as const, reason: "行情数据源已切换，拒绝使用旧源价格平仓", unsettled: true as const, alreadyClosed: false as const };
+      }
       const row = (await tx.select().from(positions).where(eq(positions.id, positionId)).limit(1))[0];
       if (!row || row.status !== "OPEN") {
         return { ok: false as const, reason: "持仓不存在或已关闭", unsettled: false as const, alreadyClosed: true as const, pnl: undefined };
@@ -471,6 +477,9 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       const holdingMinutes = Math.max(0, (now() - row.openedAt.getTime()) / 60_000);
       const closedAt = new Date(now());
       await dependencies.beforeCloseUpdate?.(row.id);
+      if (market.sourceGeneration !== sourceGeneration) {
+        return { ok: false as const, reason: "平仓期间行情数据源已切换，持仓保持 OPEN 并等待重试", unsettled: true as const, alreadyClosed: false as const };
+      }
       const updated = await tx.update(positions).set({ status: "CLOSED", closedAt, realizedPnl: netPnl })
         .where(and(eq(positions.id, row.id), eq(positions.status, "OPEN")));
       assertAffectedRows(updated);

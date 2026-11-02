@@ -320,6 +320,10 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         const settingsRow = (await tx.select().from(tradingSettings).where(eq(tradingSettings.id, 1)).limit(1))[0];
         if (!settingsRow) throw new Error("Trading settings are missing");
         const settings = settingsFromRow(settingsRow);
+        // Recheck the kill switch while holding the account lock. The preflight check
+        // happens before market-data I/O and can become stale while emergencyStop commits.
+        // emergencyStop uses the same account lock, so this closes the late-entry race.
+        if (!settings.autoTrade) return { ok: false as const, reason: "自动交易已暂停" };
         const openRows = await tx.select().from(positions).where(eq(positions.status, "OPEN"));
         if (settings.correlationWindow !== preflightSettings.correlationWindow
           || (openRows.length > 0 && preflightRows.length === 0)

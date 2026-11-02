@@ -59,6 +59,36 @@ function pivotIndices(values: number[], kind: "high" | "low", left = 2, right = 
   return pivots;
 }
 
+function adxSeries(bars: Candle[], period = 14) {
+  const dx = Array(bars.length).fill(Number.NaN);
+  const adx = Array(bars.length).fill(Number.NaN);
+  for (let index = period; index < bars.length; index += 1) {
+    let trueRange = 0;
+    let plus = 0;
+    let minus = 0;
+    for (let cursor = index - period + 1; cursor <= index; cursor += 1) {
+      const current = bars[cursor];
+      const previous = bars[cursor - 1];
+      const up = current.high - previous.high;
+      const down = previous.low - current.low;
+      trueRange += Math.max(current.high - current.low, Math.abs(current.high - previous.close), Math.abs(current.low - previous.close));
+      plus += up > down && up > 0 ? up : 0;
+      minus += down > up && down > 0 ? down : 0;
+    }
+    const plusDi = trueRange > 0 ? plus / trueRange * 100 : 0;
+    const minusDi = trueRange > 0 ? minus / trueRange * 100 : 0;
+    dx[index] = plusDi + minusDi > 0 ? Math.abs(plusDi - minusDi) / (plusDi + minusDi) * 100 : 0;
+    if (index >= period * 2 - 1) {
+      if (index === period * 2 - 1) {
+        adx[index] = dx.slice(period, index + 1).reduce((sum, value) => sum + value, 0) / period;
+      } else {
+        adx[index] = (adx[index - 1] * (period - 1) + dx[index]) / period;
+      }
+    }
+  }
+  return adx;
+}
+
 function timeframeScore(candles: Candle[], timeframe: MomentumTimeframe): TimeframeExhaustion {
   const bars = candles;
   if (bars.length < MIN_BARS) {
@@ -67,7 +97,7 @@ function timeframeScore(candles: Candle[], timeframe: MomentumTimeframe): Timefr
   const closes = bars.map((bar) => bar.close);
   const rsi = rsiSeries(closes);
   const macd = macdSeries(bars).histogram;
-  const atr = atrSeries(bars, 14);
+  const atr = atrSeries(bars, 14);\n  const adx = adxSeries(bars, 14);
   const last = bars.length - 1;
   const safe = (value: number) => Number.isFinite(value);
   if (![rsi[last], macd[last], atr[last]].every(safe) || !(atr[last] > 0)) {
@@ -137,7 +167,7 @@ function timeframeScore(candles: Candle[], timeframe: MomentumTimeframe): Timefr
   }
 
   const averageVolume = bars.slice(-21, -1).reduce((sum, bar) => sum + bar.volume, 0) / 20;
-  const volumeRatio = averageVolume > 0 ? bars[last].volume / averageVolume : 0;
+  const volumeRatio = averageVolume > 0 ? bars[last].volume / averageVolume : 0;\n  if (safe(adx[last]) && safe(adx[last - 5]) && adx[last - 5] >= 20 && adx[last] <= adx[last - 5] - 2) {\n    if (recentRoc > 0) { bearish += 15; reasons.push("ADX趋势强度回落"); }\n    if (recentRoc < 0) { bullish += 15; reasons.push("ADX趋势强度回落"); }\n  }
   const range = bars[last].high - bars[last].low;
   if (volumeRatio >= 1.8 && range >= atr[last] * 1.2) {
     if (bars[last].close < bars[last].open) {

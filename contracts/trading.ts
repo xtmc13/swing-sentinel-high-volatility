@@ -318,7 +318,7 @@ export interface SignalEvaluation {
   maeR: number | null;
 }
 
-export interface PortfolioBacktestResult extends BacktestResult {
+export interface MomentumExhaustionEvent {\n  time: number;\n  symbol: string;\n  side: Side;\n  score: number;\n  resonanceCount: number;\n  protection: string;\n  structureBreak: boolean;\n}\n\nexport interface PortfolioBacktestResult extends BacktestResult {
   symbol: "PORTFOLIO";
   signals: SignalEvaluation[];
   symbols: string[];

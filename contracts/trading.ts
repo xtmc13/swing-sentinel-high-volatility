@@ -143,6 +143,7 @@ export interface Opportunity {
   expiryTime: number;
   triggerPrice: number;
   limitPrice: number;
+  breakoutPrice?: number;
   stateVersion: number;
   sourceGeneration: number;
   detectorVersion: string;

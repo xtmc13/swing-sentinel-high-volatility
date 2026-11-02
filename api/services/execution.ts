@@ -89,6 +89,11 @@ function approvePricedEntry(input: PricedEntryApprovalInput, snapshot?: MarketSn
   if (!Number.isFinite(deviation) || deviation > maxDeviation) {
     return { ok: false, reason: "当前价格偏离信号入场价" };
   }
+  const direction = opportunity.side === "LONG" ? 1 : -1;
+  if (opportunity.strategyType === "MOMENTUM"
+    && (!Number.isFinite(opportunity.limitPrice) || (input.fillPrice - opportunity.limitPrice) * direction > 0)) {
+    return { ok: false, reason: "实际 IOC 定价超过动量限价" };
+  }
 
   const leverage = settings.leverageMode === "FIXED"
     ? Math.min(settings.fixedLeverage, input.maxLeverage)

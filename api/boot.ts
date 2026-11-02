@@ -8,7 +8,8 @@ import { env } from "./lib/env";
 import { log } from "./lib/logger";
 import { handleClientLog } from "./lib/clientlog";
 import { REQUEST_ID_HEADER, runWithRequestId } from "./lib/requestcontext";
-import { startAutomation } from "./services/engine";
+import { engine, startAutomation } from "./services/engine";
+import { isLoopbackRemoteAddress, type MomentumCandidate } from "./services/momentum";
 
 startAutomation();
 
@@ -51,6 +52,23 @@ app.use("*", async (c, next) => {
     });
   });
 });
+
+app.post(
+  "/v1/momentum/candidate",
+  bodyLimit({ maxSize: 64 * 1024, onError: (c) => c.body(null, 413) }),
+  async (c) => {
+    if (!isLoopbackRemoteAddress(c.env?.incoming?.socket?.remoteAddress)) {
+      return c.json({ ok: false, reason: "仅允许回环候选接收" }, 403);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ ok: false, reason: "候选 JSON 无效" }, 400);
+    }
+    return c.json(await engine.receiveMomentumCandidate(body as MomentumCandidate));
+  },
+);
 
 // Scoped to the tRPC route, NOT global: on the dev server (@hono/vite-dev-server)
 // a global bodyLimit breaks bodyless requests. Hono's bodyLimit reads any truthy

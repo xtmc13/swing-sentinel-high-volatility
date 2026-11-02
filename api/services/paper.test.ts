@@ -155,6 +155,14 @@ describe("统一开仓审批与当前盘口定价", () => {
     expect(approveAndPriceEntry(rejectedInput)).toMatchObject({ ok: false, reason: "信号数据源代际陈旧" });
   });
 
+  it("动量实际 IOC 定价超过候选限价时拒绝开仓", () => {
+    const result = approveAndPriceEntry(input({
+      opportunity: { ...opportunity, strategyType: "MOMENTUM", limitPrice: 100.05 },
+    }));
+
+    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining("限价") });
+  });
+
   it("新鲜 REST 盘口不能覆盖执行准入时的监测断流", () => {
     const result = approveAndPriceEntry(input({ executionHealthy: () => false }));
     expect(result).toEqual({ ok: false, reason: "行情监测断开，禁止开仓" });

@@ -1,4 +1,5 @@
 import type { AccountSnapshot, Opportunity, PositionView } from "@contracts/trading";
+import { DEFAULT_MOMENTUM_CONFIG } from "../services/momentum";
 import type { BinanceAccountResponse, LiveOrderGateway } from "./binanceSigned";
 import { withFullUserTradePagination } from "./accounting";
 import { divideDecimals, multiplyDecimals, subtractDecimals, type DecimalString } from "./decimal";
@@ -74,6 +75,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   readonly machine: OrderStateMachine;
   private readonly now: () => number;
   private readonly id: () => string;
+  private readonly replacementCounts = new Map<string, number>();
 
   constructor(private readonly dependencies: MainnetLiveExecutionDependencies) {
     this.now = dependencies.now ?? Date.now;
@@ -156,7 +158,20 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     return this.machine.recover(clientOrderId, seed);
   }
 
-  replaceOrder(clientOrderId: string, newLimitPrice: DecimalString) {
+  async replaceOrder(clientOrderId: string, newLimitPrice: DecimalString) {
+    const order = await this.dependencies.store.getOrder(clientOrderId);
+    if (!order) throw new Error("Live order not found");
+    if (order.type === "LIMIT" && !order.reduceOnly) {
+      let attempts = this.replacementCounts.get(order.intentId);
+      if (attempts === undefined) {
+        const orders = await this.dependencies.store.listOrders();
+        attempts = orders.filter((candidate) => candidate.intentId === order.intentId
+          && candidate.type === "LIMIT" && !candidate.reduceOnly
+          && candidate.clientOrderId !== `${order.intentId}-entry`).length;
+      }
+      if (attempts >= DEFAULT_MOMENTUM_CONFIG.maxReplacements) throw new Error("动量入场最多改单 1 次");
+      this.replacementCounts.set(order.intentId, attempts + 1);
+    }
     return this.machine.replaceOrder(clientOrderId, newLimitPrice);
   }
 

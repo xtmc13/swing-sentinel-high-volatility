@@ -270,8 +270,84 @@ describe("ExecutionCoordinator", () => {
     expect(h.paper.open).not.toHaveBeenCalled();
   });
 
+  it("默认关闭或 SWING-only 时，动量信号不能直接进入 adapter", async () => {
+    const disabled = setup();
+    const signal = opportunity({ strategyType: "MOMENTUM" });
+
+    await expect(disabled.coordinator.open(signal)).resolves.toMatchObject({ ok: false, reason: expect.stringContaining("关闭") });
+    expect(disabled.paper.open).not.toHaveBeenCalled();
+
+    const swingOnly = setup({ settings: { momentumEnabled: true, strategyMode: "SWING" } });
+    await expect(swingOnly.coordinator.open(signal)).resolves.toMatchObject({ ok: false });
+    expect(swingOnly.paper.open).not.toHaveBeenCalled();
+  });
+
+  it("120 秒无跟随通过现有 coordinator close 退出，同时保留原持仓管理", async () => {
+    const stagnant = {
+      ...position,
+      entryPrice: 100,
+      markPrice: 100,
+      openedAt: new Date(1_799_999_880_999).toISOString(),
+    };
+    const paper = adapter({
+      open: vi.fn(async () => ({ ok: true as const, positionId: stagnant.id, reason: "模拟开仓成交" })),
+      positions: vi.fn(async () => [stagnant]),
+    });
+    const h = setup({
+      settings: { momentumEnabled: true, strategyMode: "MOMENTUM" },
+      paper,
+    });
+    const signal = opportunity({ strategyType: "MOMENTUM", breakoutPrice: 99 });
+    await h.coordinator.open(signal);
+
+    await h.coordinator.manage();
+
+    expect(paper.manage).toHaveBeenCalledTimes(1);
+    expect(paper.close).toHaveBeenCalledWith(stagnant.id, "120 秒无跟随退出");
+  });
+
+  it("跌回突破位且流向反转通过现有 close 退出，未结算时不重复平仓", async () => {
+    const failed = {
+      ...position,
+      entryPrice: 100.02,
+      markPrice: 99.99,
+      openedAt: new Date(1_800_000_001_000).toISOString(),
+    };
+    const paper = adapter({
+      open: vi.fn(async () => ({ ok: true as const, positionId: failed.id, reason: "模拟开仓成交" })),
+      positions: vi.fn(async () => [failed]),
+      close: vi.fn(async () => ({ ok: true as const, reason: "等待平仓", pnl: Number.NaN, unsettled: true as const, alreadyClosed: false as const })),
+    });
+    const h = setup({ settings: { momentumEnabled: true, strategyMode: "MOMENTUM" }, paper });
+    await h.coordinator.open(opportunity({ strategyType: "MOMENTUM", breakoutPrice: 100 }));
+    h.coordinator.observeMomentumFrame({
+      symbol: "BTCUSDT",
+      event_time: 1_800_000_000_990,
+      received_time: 1_800_000_001_000,
+      sequence: 3,
+      generation: 4,
+      quality: "GOOD",
+      config_hash: "a".repeat(64),
+      mark_price: 99.99,
+      microprice: 99.99,
+      spread_bps: 1,
+      depth_imbalance: -0.2,
+      aggressive_buy_volume: 1,
+      aggressive_sell_volume: 3,
+      short_return: -0.001,
+      burst_z: 2.5,
+      realized_volatility: 0.02,
+    });
+
+    await h.coordinator.manage();
+    await h.coordinator.manage();
+
+    expect(paper.close).toHaveBeenCalledTimes(1);
+    expect(paper.close).toHaveBeenCalledWith(failed.id, "跌回突破位且流向反转");
+  });
+
   it("过期动量信号和重复 signalId 不进入 adapter", async () => {
-    const h = setup();
+    const h = setup({ settings: { momentumEnabled: true, strategyMode: "MOMENTUM" } });
     const signal = opportunity({ strategyType: "MOMENTUM" });
 
     await expect(h.coordinator.open({ ...signal, expiryTime: 1_800_000_000_999 })).resolves.toMatchObject({ ok: false });

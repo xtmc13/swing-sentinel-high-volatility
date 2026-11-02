@@ -21,6 +21,11 @@ import {
   manageOpenPositions,
   openPaperPosition,
 } from "./paper";
+import {
+  evaluateMomentumExit,
+  momentumFeatureFrameSchema,
+  type MomentumFeatureFrame,
+} from "./momentum";
 
 export type OpenExecutionResult =
   | { ok: true; positionId: string; reason: string }
@@ -98,6 +103,9 @@ async function defaultOutstandingRisk(positionViews: Promise<PositionView[]>): P
 
 export class ExecutionCoordinator {
   private readonly consumedMomentumSignals = new Set<string>();
+  private readonly momentumEntries = new Map<string, Opportunity>();
+  private readonly momentumFrames = new Map<string, MomentumFeatureFrame>();
+  private readonly momentumExitPending = new Set<string>();
   private readonly dependencies: ExecutionCoordinatorDependencies;
   private openSwitchTail: Promise<void> = Promise.resolve();
 
@@ -140,12 +148,21 @@ export class ExecutionCoordinator {
     }
   }
 
+  observeMomentumFrame(frame: MomentumFeatureFrame) {
+    const parsed = momentumFeatureFrameSchema.safeParse(frame);
+    if (parsed.success) this.momentumFrames.set(parsed.data.symbol, parsed.data);
+  }
+
   async open(opportunity: Opportunity, executionHealthy?: () => boolean): Promise<OpenExecutionResult> {
     return this.serializeOpenSwitch(() => this.openWhenSerialized(opportunity, executionHealthy));
   }
 
   private async openWhenSerialized(opportunity: Opportunity, executionHealthy?: () => boolean): Promise<OpenExecutionResult> {
     const settings = await this.settings();
+    const guardedMomentumSignal = opportunity.strategyType === "MOMENTUM";
+    if (guardedMomentumSignal && (!settings.momentumEnabled || settings.strategyMode === "SWING")) {
+      return { ok: false, reason: "动量模式已关闭" };
+    }
     if (settings.executionMode === "LIVE_MAINNET") {
       if (this.marketSource === "TESTNET") return { ok: false, reason: "TESTNET 行情禁止选择 LIVE_MAINNET" };
       if (!liveTradingEnabled(this.dependencies.env ?? process.env)) {
@@ -157,7 +174,6 @@ export class ExecutionCoordinator {
       if (!this.dependencies.live) return { ok: false, reason: "LIVE_MAINNET adapter 尚未配置" };
     }
 
-    const guardedMomentumSignal = opportunity.strategyType === "MOMENTUM";
     if (guardedMomentumSignal && opportunity.expiryTime <= this.now()) {
       return { ok: false, reason: "动量信号已过期" };
     }
@@ -168,6 +184,7 @@ export class ExecutionCoordinator {
     try {
       const result = await this.adapter(settings).open(opportunity, executionHealthy);
       if (!result.ok && guardedMomentumSignal) this.consumedMomentumSignals.delete(opportunity.signalId);
+      if (result.ok && guardedMomentumSignal) this.momentumEntries.set(result.positionId, opportunity);
       return result;
     } catch (error) {
       if (guardedMomentumSignal) this.consumedMomentumSignals.delete(opportunity.signalId);
@@ -180,7 +197,33 @@ export class ExecutionCoordinator {
   }
 
   async manage(): Promise<void> {
-    return this.adapter(await this.settings()).manage();
+    const adapter = this.adapter(await this.settings());
+    await adapter.manage();
+    if (!this.momentumEntries.size) return;
+    const openPositions = await adapter.positions();
+    const byId = new Map(openPositions.map((position) => [position.id, position]));
+    for (const [positionId, opportunity] of this.momentumEntries) {
+      const position = byId.get(positionId);
+      if (!position) {
+        if (this.momentumExitPending.delete(positionId)) this.momentumEntries.delete(positionId);
+        continue;
+      }
+      if (this.momentumExitPending.has(positionId) || opportunity.breakoutPrice === undefined
+        || !position.valuationValid) continue;
+      const reason = evaluateMomentumExit({
+        symbol: position.symbol,
+        side: position.side,
+        entryPrice: position.entryPrice,
+        price: position.markPrice,
+        breakoutPrice: opportunity.breakoutPrice,
+        openedAt: Date.parse(position.openedAt),
+        now: this.now(),
+        frame: this.momentumFrames.get(position.symbol) ?? null,
+      });
+      if (!reason) continue;
+      const result = await adapter.close(positionId, reason);
+      if (result.ok || result.unsettled) this.momentumExitPending.add(positionId);
+    }
   }
 
   async emergency(): Promise<EmergencyExecutionResult> {

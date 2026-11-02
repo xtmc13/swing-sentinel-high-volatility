@@ -283,6 +283,36 @@ describe("mainnet live execution adapter", () => {
     expect(fromIds.slice(0, 2)).toEqual([undefined, 3]);
   });
 
+  it("allows at most one IOC entry replacement, including after adapter restart", async () => {
+    const h = setup();
+    await h.adapter.open(opportunity);
+    const entryClientId = `${h.created[0].id}-entry`;
+    h.gateway.queryOrder = async () => ({
+      symbol: "BTCUSDT",
+      orderId: 500,
+      clientOrderId: entryClientId,
+      price: "100",
+      origQty: "2",
+      executedQty: "0",
+      status: "CANCELED",
+      side: "BUY",
+      type: "LIMIT",
+    });
+
+    const replacement = await h.adapter.replaceOrder(entryClientId, "100.01");
+    await expect(h.adapter.replaceOrder(replacement.clientOrderId, "100.02"))
+      .rejects.toThrow("最多改单 1 次");
+
+    const restarted = new MainnetLiveExecutionAdapter({
+      ...h,
+      workerId: "worker-b",
+      prepareIntent: () => { throw new Error("not used by replacement cap"); },
+      finalGate: () => { throw new Error("not used by replacement cap"); },
+    });
+    await expect(restarted.replaceOrder(replacement.clientOrderId, "100.02"))
+      .rejects.toThrow("最多改单 1 次");
+  });
+
   it("cross-worker emergency CANCEL wins over submit admission and prevents transport", async () => {
     const h = setup();
     h.claimIntent.mockImplementationOnce(async (input) => {
@@ -330,7 +360,13 @@ describe("mainnet live execution adapter", () => {
 
   it("autoTrade=false blocks only new opens; coordinator still permits live reduce-only close", async () => {
     const h = setup();
-    let settings: TradingSettings = { ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET", autoTrade: true };
+    let settings: TradingSettings = {
+      ...DEFAULT_SETTINGS,
+      executionMode: "LIVE_MAINNET",
+      autoTrade: true,
+      momentumEnabled: true,
+      strategyMode: "MOMENTUM",
+    };
     const coordinator = createExecutionCoordinator({
       live: h.adapter,
       getSettings: async () => settings,

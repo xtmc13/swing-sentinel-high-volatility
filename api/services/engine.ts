@@ -29,6 +29,12 @@ import {
 } from "./marketMonitor";
 import { evaluateVolatility, type EvaluateVolatilityInput } from "./volatility";
 import { atrSeries, closedCandles } from "./indicators";
+import {
+  evaluateMomentumCandidate,
+  momentumCandidateSchema,
+  type MomentumCandidate,
+  type MomentumEvaluation,
+} from "./momentum";
 
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -122,6 +128,7 @@ export class TradingEngine {
   scanning = false;
 
   private readonly deps: TradingEngineDependencies;
+  private readonly executionCoordinator: ExecutionCoordinator;
   private ticking = false;
   private riskChecking = false;
   private lastSnapshot = 0;
@@ -162,6 +169,7 @@ export class TradingEngine {
           },
         })
       : executionCoordinator);
+    this.executionCoordinator = coordinator;
     this.deps = {
       now,
       market,
@@ -357,6 +365,76 @@ export class TradingEngine {
       && current?.mode !== "EXTREME"
       && current?.version === item.stateVersion
       && this.symbolQuality(item.symbol).valid;
+  }
+
+  async receiveMomentumCandidate(input: MomentumCandidate): Promise<MomentumEvaluation> {
+    const settings = await this.deps.getSettings();
+    if (!settings.momentumEnabled || settings.strategyMode === "SWING") {
+      return { ok: false, reason: "动量模式已关闭" };
+    }
+    const parsed = momentumCandidateSchema.safeParse(input);
+    if (!parsed.success) return { ok: false, reason: "动量候选格式无效" };
+    const candidate = parsed.data;
+    this.executionCoordinator.observeMomentumFrame(candidate.frame);
+
+    let market = this.markets.find((item) => item.symbol === candidate.symbol);
+    if (!market) {
+      await this.refreshMarkets();
+      market = this.markets.find((item) => item.symbol === candidate.symbol);
+    }
+    if (!market) return { ok: false, reason: "动量候选合约不在当前市场" };
+    const sourceGeneration = this.marketGeneration;
+    await this.reevaluateRisk([candidate.symbol]);
+    const state = this.states.get(candidate.symbol);
+    if (!state || sourceGeneration !== this.marketGeneration) {
+      return { ok: false, reason: "动量风险状态不可用或数据源已切换" };
+    }
+    const [candles4h, candles1h, candles15m, candles1m, risk] = await Promise.all([
+      this.deps.market.getCandles(candidate.symbol, "4h", 220),
+      this.deps.market.getCandles(candidate.symbol, "1h", 220),
+      this.deps.market.getCandles(candidate.symbol, "15m", 220),
+      this.deps.market.getCandles(candidate.symbol, "1m", 122),
+      this.deps.riskData(candidate.symbol, settings),
+    ]);
+    if (sourceGeneration !== this.marketGeneration) return { ok: false, reason: "动量数据源代际陈旧" };
+    const volatilityBaseline = risk.tickReturnBaseline
+      .filter((value) => Number.isFinite(value)).map(Math.abs).sort((left, right) => left - right);
+    const volatilityP80 = volatilityBaseline.length >= 2
+      ? volatilityBaseline[Math.ceil(volatilityBaseline.length * 0.8) - 1]
+      : Number.NaN;
+    const evaluation = evaluateMomentumCandidate({
+      candidate,
+      context: {
+        market,
+        state,
+        sourceGeneration,
+        candles4h,
+        candles1h,
+        candles15m,
+        candles1m,
+        volatilityP80,
+      },
+      settings,
+      now: this.deps.now(),
+    });
+    if (!evaluation.ok) return evaluation;
+    const opportunity = evaluation.opportunity;
+    this.opportunities = [
+      ...this.opportunities.filter((item) => item.symbol !== opportunity.symbol || item.strategyType !== "MOMENTUM"),
+      opportunity,
+    ];
+    if (!settings.autoTrade) return evaluation;
+    if (!this.canUseSignal(opportunity)) {
+      this.opportunities = this.opportunities.filter((item) => item.signalId !== opportunity.signalId);
+      return { ok: false, reason: "动量行情、风险状态或数据源健康门未通过" };
+    }
+    const openPositions = await this.deps.getOpenPositions();
+    if (openPositions.length >= settings.maxPositions) return { ok: false, reason: "持仓数量达到上限" };
+    if (openPositions.some((position) => position.symbol === opportunity.symbol)) {
+      return { ok: false, reason: "同一合约已有持仓" };
+    }
+    const opened = await this.deps.openPaperPosition(opportunity, () => this.canUseSignal(opportunity));
+    return opened.ok ? evaluation : { ok: false, reason: opened.reason };
   }
 
   async scan(manual = false) {

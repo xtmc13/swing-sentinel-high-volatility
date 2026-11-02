@@ -259,7 +259,111 @@ async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+function momentumCandidateForTest() {
+  return {
+    candidate_id: "BTCUSDT:4:2:LONG",
+    symbol: "BTCUSDT",
+    side: "LONG" as const,
+    reference_price: 100.02,
+    created_time: START - 10,
+    expires_at: START + 740,
+    frame: {
+      symbol: "BTCUSDT",
+      event_time: START - 20,
+      received_time: START - 10,
+      sequence: 2,
+      generation: 4,
+      quality: "GOOD" as const,
+      config_hash: "a".repeat(64),
+      mark_price: 100.02,
+      microprice: 100.02,
+      spread_bps: 1,
+      depth_imbalance: 0.2,
+      aggressive_buy_volume: 3,
+      aggressive_sell_volume: 1,
+      short_return: 0.001,
+      burst_z: 2.5,
+      realized_volatility: 0.02,
+    },
+  };
+}
+
+function momentumCandles(count: number, intervalMs: number): Candle[] {
+  return Array.from({ length: count }, (_, index) => {
+    const close = 100 + index * 0.02;
+    const time = START - (count - index) * intervalMs;
+    return {
+      time,
+      closeTime: time + intervalMs - 1,
+      open: close - 0.02,
+      high: close + 0.5,
+      low: close - 0.5,
+      close,
+      volume: 100,
+    };
+  });
+}
+
+function momentumEngineHarness(autoTrade: boolean) {
+  const open = vi.fn(async (_opportunity: Opportunity, _executionHealthy?: () => boolean) => {
+    void _opportunity;
+    void _executionHealthy;
+    return { ok: true as const, positionId: "momentum-position", reason: "模拟开仓成交" };
+  });
+  const observeMomentumFrame = vi.fn();
+  const coordinator = {
+    open,
+    observeMomentumFrame,
+    positions: vi.fn(async () => []),
+  };
+  const oneMinute: Candle[] = [
+    { time: START - 120_000, closeTime: START - 60_001, open: 99.9, high: 100, low: 99.8, close: 99.9, volume: 10 },
+    { time: START - 60_000, closeTime: START - 1, open: 99.9, high: 100, low: 99.8, close: 99.9, volume: 10 },
+  ];
+  const h = harness({
+    settings: { autoTrade, momentumEnabled: true, strategyMode: "MOMENTUM" },
+    states: { BTCUSDT: state("BTCUSDT") },
+    dependencies: {
+      executionCoordinator: coordinator as never,
+      market: {
+        dataSource: "MAINNET",
+        sourceGeneration: 0,
+        isConnected: true,
+        getMarkets: async () => [market("BTCUSDT")],
+        getMarketSnapshot: async () => { throw new Error("not used"); },
+        getCandles: async (_symbol, interval) => interval === "4h"
+          ? momentumCandles(200, 4 * 60 * 60_000)
+          : interval === "1h" ? momentumCandles(200, 60 * 60_000)
+            : interval === "15m" ? momentumCandles(60, 15 * 60_000) : oneMinute,
+        getBaselineCandles: async () => [],
+      },
+    },
+  });
+  return { h, open, observeMomentumFrame };
+}
+
 describe("三态引擎编排", () => {
+  it("内部动量候选经 engine 健康和状态门后只通过 coordinator 开仓", async () => {
+    const { h, open, observeMomentumFrame } = momentumEngineHarness(true);
+
+    const result = await h.engine.receiveMomentumCandidate(momentumCandidateForTest());
+
+    expect(result).toMatchObject({ ok: true, opportunity: { strategyType: "MOMENTUM", breakoutPrice: 100 } });
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open.mock.calls[0]?.[0]).toMatchObject({ signalId: expect.stringContaining("MOMENTUM") });
+    expect(observeMomentumFrame).toHaveBeenCalledWith(momentumCandidateForTest().frame);
+  });
+
+  it("候选接受不等于下单，autoTrade=false 时不进入执行适配器", async () => {
+    const { h, open } = momentumEngineHarness(false);
+
+    const result = await h.engine.receiveMomentumCandidate(momentumCandidateForTest());
+
+    expect(result).toMatchObject({ ok: true });
+    expect(open).not.toHaveBeenCalled();
+    expect(h.engine.opportunities).toHaveLength(1);
+  });
+
   it("引擎状态复用已估值账户快照而不重复请求", async () => {
     const getAccountSnapshot = vi.fn(async () => account);
     const h = harness({ dependencies: { getAccountSnapshot } });

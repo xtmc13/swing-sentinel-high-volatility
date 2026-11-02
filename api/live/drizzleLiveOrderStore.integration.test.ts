@@ -4,6 +4,7 @@ import { migrate } from "drizzle-orm/mysql2/migrator";
 import { fileURLToPath } from "node:url";
 import * as schema from "@db/schema";
 import { DrizzleLiveOrderStore } from "./drizzleLiveOrderStore";
+import { pauseLiveExecution } from "./livePersistence";
 import type { LiveFill, LiveOrder, LivePositionSeed } from "./orderStateMachine";
 
 const testDatabaseUrl = process.env.TASK4_TEST_DATABASE_URL;
@@ -147,6 +148,21 @@ describeDatabase("Task 4 dedicated durable order store", () => {
       quantity: "3",
     }), seed);
     expect((await db.select().from(schema.liveIntents))[0]?.status).toBe("FILLED");
+  });
+
+  it("cross-worker emergency CANCEL cannot be overwritten by submit admission", async () => {
+    if (!db) throw new Error("database required");
+    const store = new DrizzleLiveOrderStore(db);
+    await store.insertOrder(order);
+    await db.insert(schema.tradingSettings).values({ id: 1, autoTrade: true })
+      .onDuplicateKeyUpdate({ set: { autoTrade: true } });
+    await db.insert(schema.liveControls).values({ id: 1, emergencyGeneration: 0 })
+      .onDuplicateKeyUpdate({ set: { emergencyGeneration: 0 } });
+    await pauseLiveExecution(db);
+
+    expect((await db.select().from(schema.liveIntents))[0]?.status).toBe("CANCEL");
+    expect(await store.admitOrder(order.clientOrderId, 0)).toMatchObject({ status: "CANCEL" });
+    expect((await db.select().from(schema.liveOrders))[0]?.status).toBe("CANCEL");
   });
 
   it("allows only one worker to claim PENDING_SEND for submission", async () => {

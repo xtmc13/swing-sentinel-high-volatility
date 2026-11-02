@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
-import { liveFills, liveIntents, liveOrders, livePositions } from "@db/schema";
+import { liveFills, liveIntents, liveOrders, livePositions, tradingSettings } from "@db/schema";
 import type { Side } from "@contracts/trading";
-import type { LiveDatabase, LiveTransaction } from "./livePersistence";
+import { lockEmergencyGeneration, type LiveDatabase, type LiveTransaction } from "./livePersistence";
 import {
   addDecimals,
   compareDecimals,
@@ -186,6 +186,28 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
     }
   }
 
+  async admitOrder(clientOrderId: string, expectedGeneration: number): Promise<LiveOrder> {
+    return this.db.transaction(async (tx) => {
+      const current = await readOrder(tx, clientOrderId, true);
+      if (!current) throw new Error("Live order not found");
+      if (current.status !== "PENDING_SEND") return current;
+      const settings = await tx.select({ autoTrade: tradingSettings.autoTrade }).from(tradingSettings)
+        .where(eq(tradingSettings.id, 1)).for("update");
+      const generation = await lockEmergencyGeneration(tx);
+      const intents = await tx.select({ status: liveIntents.status }).from(liveIntents)
+        .where(eq(liveIntents.id, current.intentId)).for("update");
+      const emergencyCancelled = intents[0]?.status === "CANCEL";
+      if (emergencyCancelled || !settings[0]?.autoTrade || generation !== expectedGeneration
+        || intents[0]?.status !== "PENDING_SEND") {
+        await tx.update(liveOrders).set({ status: "CANCEL" }).where(eq(liveOrders.id, current.id));
+        return { ...current, status: "CANCEL" };
+      }
+      await tx.update(liveOrders).set({ status: "SUBMITTING" }).where(eq(liveOrders.id, current.id));
+      await tx.update(liveIntents).set({ status: "SUBMITTING" }).where(eq(liveIntents.id, current.intentId));
+      return { ...current, status: "SUBMITTING" };
+    });
+  }
+
   async applyFill(orderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication> {
     return this.db.transaction(async (tx) => {
       const rows = await tx.select().from(liveOrders).where(eq(liveOrders.id, orderId)).limit(1).for("update");
@@ -256,6 +278,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
           maintenanceBracket: next.position.maintenanceBracket,
           maintMarginRatio: next.position.maintMarginRatio,
           cumMaintenance: next.position.cumMaintenance,
+          openedAt: new Date(next.position.openedAt),
           closedAt: next.position.closedAt === null ? null : new Date(next.position.closedAt),
         },
       });

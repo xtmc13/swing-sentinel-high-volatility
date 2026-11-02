@@ -102,6 +102,7 @@ export interface LiveOrderStore {
     replacement: LiveOrder,
     expectedPositionQuantity?: DecimalString,
   ): Promise<LiveOrder | null>;
+  admitOrder(clientOrderId: string, expectedGeneration: number): Promise<LiveOrder>;
   applyFill(orderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication>;
   getPosition(positionId: string): Promise<LivePosition | null>;
   listOpenPositions(): Promise<LivePosition[]>;
@@ -127,7 +128,6 @@ export function applyNewFill(
   fill: LiveFill,
   seed: LivePositionSeed,
 ): { order: LiveOrder; position: LivePosition } {
-  if (currentOrder.status === "CANCEL") throw new Error("CANCEL order cannot accept a late fill");
   if (seed.id !== currentOrder.intentId || seed.symbol !== currentOrder.symbol || seed.side !== currentOrder.side) {
     throw new Error("Fill intent ownership mismatch");
   }
@@ -152,8 +152,8 @@ export function applyNewFill(
   const order: LiveOrder = {
     ...currentOrder,
     exchangeOrderId: currentOrder.exchangeOrderId ?? fill.exchangeOrderId,
-    status: compareDecimals(executedQuantity, currentOrder.originalQuantity) === 0
-      ? "FILLED" : "PARTIALLY_FILLED",
+    status: currentOrder.status === "CANCEL" ? "CANCEL"
+      : compareDecimals(executedQuantity, currentOrder.originalQuantity) === 0 ? "FILLED" : "PARTIALLY_FILLED",
     executedQuantity,
     averagePrice,
     commission: addDecimals(currentOrder.commission, fill.commission),
@@ -207,6 +207,21 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
   private readonly orders = new Map<string, LiveOrder>();
   private readonly fills = new Map<string, LiveFill[]>();
   private readonly positions = new Map<string, LivePosition>();
+  private emergencyGeneration: number;
+  private autoTrade: boolean;
+
+  constructor(options: { emergencyGeneration?: number; autoTrade?: boolean } = {}) {
+    this.emergencyGeneration = options.emergencyGeneration ?? 0;
+    this.autoTrade = options.autoTrade ?? true;
+  }
+
+  pauseExecution(): void {
+    this.emergencyGeneration += 1;
+    this.autoTrade = false;
+    for (const [clientOrderId, order] of this.orders) {
+      if (order.status === "PENDING_SEND") this.orders.set(clientOrderId, { ...order, status: "CANCEL" });
+    }
+  }
 
   addOrder(order: LiveOrder): void {
     if (this.orders.has(order.clientOrderId)) throw new Error("Duplicate clientOrderId");
@@ -257,6 +272,20 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
     return copyOrder(replacement);
   }
 
+  async admitOrder(clientOrderId: string, expectedGeneration: number): Promise<LiveOrder> {
+    const order = this.orders.get(clientOrderId);
+    if (!order) throw new Error("Live order not found");
+    if (order.status !== "PENDING_SEND") return copyOrder(order);
+    if (!this.autoTrade || this.emergencyGeneration !== expectedGeneration) {
+      const cancelled = { ...order, status: "CANCEL" as const };
+      this.orders.set(clientOrderId, cancelled);
+      return copyOrder(cancelled);
+    }
+    const submitting = { ...order, status: "SUBMITTING" as const };
+    this.orders.set(clientOrderId, submitting);
+    return copyOrder(submitting);
+  }
+
   async applyFill(orderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication> {
     const order = [...this.orders.values()].find((candidate) => candidate.id === orderId);
     if (!order) throw new Error("Live order not found");
@@ -305,11 +334,15 @@ export class OrderStateMachine {
     return order;
   }
 
-  async submit(clientOrderId: string): Promise<LiveOrder> {
+  async submit(clientOrderId: string, expectedGeneration?: number): Promise<LiveOrder> {
     const order = await this.requireOrder(clientOrderId);
     if (order.status !== "PENDING_SEND") return order;
-    const submitting = await this.store.transitionOrder(clientOrderId, ["PENDING_SEND"], { status: "SUBMITTING" });
-    if (!submitting) return this.requireOrder(clientOrderId);
+    const submitting = expectedGeneration === undefined
+      ? await this.store.transitionOrder(clientOrderId, ["PENDING_SEND"], { status: "SUBMITTING" })
+      : await this.store.admitOrder(clientOrderId, expectedGeneration);
+    if (!submitting || submitting.status !== "SUBMITTING") return submitting ?? this.requireOrder(clientOrderId);
+    const admissionState = await this.requireOrder(clientOrderId);
+    if (admissionState.status !== "SUBMITTING") return admissionState;
     let acknowledgement: Partial<BinanceOpenOrder>;
     try {
       acknowledgement = await this.gateway.placeOrder(this.requestFor(submitting)) as Partial<BinanceOpenOrder>;
@@ -350,10 +383,32 @@ export class OrderStateMachine {
   private async applyFillAndProtect(clientOrderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication> {
     const order = await this.requireOrder(clientOrderId);
     const result = await this.store.applyFill(order.id, fill, seed);
+    if (result.inserted && order.status === "CANCEL") await this.invalidateReplacement(order);
     if (result.inserted && result.position?.status === "OPEN" && !order.reduceOnly) {
       await this.ensureProtection(result.position);
     }
     return result;
+  }
+
+  private async invalidateReplacement(parent: LiveOrder): Promise<void> {
+    const replacement = await this.store.getOrder(`replace-${parent.clientOrderId}`);
+    if (!replacement) return;
+    if (replacement.status === "FILLED") {
+      await this.alert(`${parent.symbol} CANCEL 父单与已成交 replacement 需要人工对账`);
+      return;
+    }
+    if (!WORKING_STATUSES.has(replacement.status)) return;
+    if (replacement.status === "PENDING_SEND") {
+      await this.store.transitionOrder(replacement.clientOrderId, ["PENDING_SEND"], { status: "CANCEL" });
+      return;
+    }
+    await this.store.transitionOrder(replacement.clientOrderId, [replacement.status], { status: "RECONCILING" });
+    try {
+      await this.gateway.cancelOrder({ symbol: replacement.symbol, origClientOrderId: replacement.clientOrderId });
+      await this.store.transitionOrder(replacement.clientOrderId, ["RECONCILING"], { status: "CANCEL" });
+    } catch {
+      await this.store.transitionOrder(replacement.clientOrderId, ["RECONCILING"], { status: "UNKNOWN" });
+    }
   }
 
   async handleFill(clientOrderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication> {
@@ -455,7 +510,9 @@ export class OrderStateMachine {
     for (const order of orders.filter((candidate) => WORKING_STATUSES.has(candidate.status))) {
       try {
         await this.gateway.cancelOrder({ symbol: order.symbol, origClientOrderId: order.clientOrderId });
-        await this.store.transitionOrder(order.clientOrderId, [order.status], { status: "CANCEL" });
+        const transitioned = await this.store.transitionOrder(order.clientOrderId, [order.status], { status: "CANCEL" });
+        const actual = transitioned?.status === "CANCEL" ? transitioned : await this.recover(order.clientOrderId);
+        if (actual.status !== "CANCEL") throw new Error("Cancel state could not be confirmed");
         cancelled.push(order.clientOrderId);
       } catch {
         await this.store.transitionOrder(order.clientOrderId, [order.status], { status: "UNKNOWN" });
@@ -493,20 +550,29 @@ export class OrderStateMachine {
       throw new Error(`${order.status} order requires reconciliation before replacement`);
     }
     const replacementClientOrderId = `replace-${order.clientOrderId}`;
-    const replacing = await this.store.transitionOrder(order.clientOrderId, [order.status], { status: "REPLACE" });
+    let replacing = await this.store.transitionOrder(order.clientOrderId, [order.status], { status: "REPLACE" });
     if (!replacing) {
       const existing = await this.store.getOrder(replacementClientOrderId);
       if (existing) return this.submit(existing.clientOrderId);
-      throw new Error("Order changed before replacement");
+      const latest = await this.requireOrder(order.clientOrderId);
+      if (latest.status === "CANCEL") replacing = latest;
+      else if (["REPLACE", "RECONCILING", "UNKNOWN"].includes(latest.status)) {
+        const reconciled = await this.reconcile(latest);
+        if (reconciled.status !== "CANCEL") return reconciled;
+        replacing = reconciled;
+      } else throw new Error("Order changed before replacement");
     }
-    try {
-      await this.gateway.cancelOrder({ symbol: order.symbol, origClientOrderId: order.clientOrderId });
-    } catch {
-      const unknown = await this.store.transitionOrder(order.clientOrderId, ["REPLACE"], { status: "UNKNOWN" });
-      if (!unknown) throw new Error("Order changed after cancel timeout");
-      return unknown;
+    let current = replacing;
+    if (current.status !== "CANCEL") {
+      try {
+        await this.gateway.cancelOrder({ symbol: order.symbol, origClientOrderId: order.clientOrderId });
+      } catch {
+        const unknown = await this.store.transitionOrder(order.clientOrderId, ["REPLACE"], { status: "UNKNOWN" });
+        if (!unknown) throw new Error("Order changed after cancel timeout");
+        return unknown;
+      }
+      current = await this.reconcile(replacing);
     }
-    const current = await this.reconcile(replacing);
     if (current.status !== "CANCEL") throw new Error("Replacement cancel was not confirmed");
     const latestPosition = current.type === "STOP_MARKET" ? await this.store.getPosition(current.intentId) : null;
     const remaining = latestPosition?.quantity
@@ -581,6 +647,10 @@ export class OrderStateMachine {
       }
       throw new Error("STOP_MARKET position version kept changing");
     } catch (error) {
+      const orders = await this.store.listOrders();
+      const protectionInFlight = orders.some((order) => order.intentId === position.id
+        && order.type === "STOP_MARKET" && WORKING_STATUSES.has(order.status) && order.status !== "UNKNOWN");
+      if (protectionInFlight) return;
       await this.alert(`${position.symbol} 交易所保护单失败：${error instanceof Error ? error.message : String(error)}`);
       await this.closePosition(position.id);
     }

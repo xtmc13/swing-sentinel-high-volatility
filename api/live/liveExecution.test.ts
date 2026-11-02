@@ -115,7 +115,7 @@ function seedFor(input: CreateLiveIntentInput): LivePositionSeed {
 }
 
 function setup() {
-  const store = new InMemoryLiveOrderStore();
+  const store = new InMemoryLiveOrderStore({ emergencyGeneration: 7 });
   const gateway = new AdapterGateway();
   const created: CreateLiveIntentInput[] = [];
   const claims: ClaimLiveIntentInput[] = [];
@@ -133,7 +133,6 @@ function setup() {
     claims.push(input);
     return { ok: true as const, version: input.expectedVersion + 1 };
   });
-  const assertSubmission = vi.fn(async () => undefined);
   const pauseAutoTrade = vi.fn(async () => undefined);
   const adapter = new MainnetLiveExecutionAdapter({
     store,
@@ -141,7 +140,6 @@ function setup() {
     workerId: "worker-a",
     createIntent,
     claimIntent,
-    assertSubmission,
     pauseAutoTrade,
     prepareIntent: (signal) => ({
       signalId: signal.signalId,
@@ -169,7 +167,7 @@ function setup() {
       validUntil: new Date(9_999_999_999_999),
     }),
   });
-  return { store, gateway, created, claims, createIntent, claimIntent, assertSubmission, pauseAutoTrade, adapter };
+  return { store, gateway, created, claims, createIntent, claimIntent, pauseAutoTrade, adapter };
 }
 
 describe("mainnet live execution adapter", () => {
@@ -181,7 +179,6 @@ describe("mainnet live execution adapter", () => {
     expect(h.created).toHaveLength(1);
     expect(h.claims).toHaveLength(1);
     expect(h.createIntent.mock.calls[0]?.[1].requireAutoTrade).toBe(true);
-    expect(h.assertSubmission).toHaveBeenCalledWith(h.created[0].id, 7);
     expect(h.gateway.placed[0]).toMatchObject({ type: "LIMIT", timeInForce: "IOC", quantity: "2" });
     expect(await h.store.getPosition(h.created[0].id)).toBeNull();
   });
@@ -195,12 +192,36 @@ describe("mainnet live execution adapter", () => {
     expect(h.gateway.placed).toHaveLength(0);
   });
 
-  it("a changed emergency generation prevents transport", async () => {
+  it("expired unfilled IOC returns non-success", async () => {
     const h = setup();
-    h.assertSubmission.mockRejectedValueOnce(new Error("emergency generation changed"));
+    h.gateway.placeOrder = async (request) => {
+      h.gateway.placed.push(request);
+      return {
+        symbol: request.symbol,
+        orderId: 500,
+        clientOrderId: request.newClientOrderId ?? "entry",
+        price: request.price ?? "0",
+        origQty: request.quantity,
+        executedQty: "0",
+        status: "EXPIRED",
+        side: request.side,
+        type: request.type,
+      };
+    };
 
-    await expect(h.adapter.open(opportunity)).rejects.toThrow("generation changed");
+    await expect(h.adapter.open(opportunity)).resolves.toMatchObject({ ok: false });
+  });
+
+  it("cross-worker emergency CANCEL wins over submit admission and prevents transport", async () => {
+    const h = setup();
+    h.claimIntent.mockImplementationOnce(async (input) => {
+      h.store.pauseExecution();
+      return { ok: true as const, version: input.expectedVersion + 1 };
+    });
+
+    await expect(h.adapter.open(opportunity)).resolves.toMatchObject({ ok: false });
     expect(h.gateway.placed).toHaveLength(0);
+    expect((await h.store.getOrder(`${h.created[0].id}-entry`))?.status).toBe("CANCEL");
   });
 
   it("emergency serializes behind an in-flight open and then cancels its order", async () => {

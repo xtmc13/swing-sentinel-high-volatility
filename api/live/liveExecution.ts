@@ -2,7 +2,6 @@ import type { AccountSnapshot, Opportunity, PositionView } from "@contracts/trad
 import type { BinanceAccountResponse, LiveOrderGateway } from "./binanceSigned";
 import { divideDecimals, multiplyDecimals, subtractDecimals, type DecimalString } from "./decimal";
 import {
-  assertLiveSubmission,
   claimLiveIntent,
   createLiveIntent,
   pauseLiveExecution,
@@ -43,7 +42,6 @@ export interface MainnetLiveExecutionDependencies {
     options: CreateLiveIntentOptions,
   ) => Promise<CreateLiveIntentResult>;
   claimIntent: (input: ClaimLiveIntentInput) => Promise<ClaimLiveIntentResult>;
-  assertSubmission: (intentId: string, expectedGeneration: number) => Promise<void>;
   prepareIntent: PrepareLiveIntent;
   finalGate: (
     opportunity: Opportunity,
@@ -134,10 +132,15 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       reduceOnly: false,
       createdAt: this.now(),
     });
-    await this.dependencies.assertSubmission(input.id, created.emergencyGeneration);
-    const submitted = await this.machine.submit(clientOrderId);
-    if (submitted.status === "UNKNOWN") {
-      return { ok: false, reason: "订单提交结果 UNKNOWN；必须先对账，禁止盲目重试" };
+    const submitted = await this.machine.submit(clientOrderId, created.emergencyGeneration);
+    if (submitted.status === "CANCEL" && submitted.executedQuantity === "0") {
+      return { ok: false, reason: "IOC 已终止且没有实际成交" };
+    }
+    if (submitted.status === "CANCEL") {
+      return { ok: true, positionId: input.id, reason: "IOC 已终止，已有实际成交" };
+    }
+    if (!["NEW", "PARTIALLY_FILLED", "FILLED"].includes(submitted.status)) {
+      return { ok: false, reason: `订单提交未确认（${submitted.status}），必须先对账` };
     }
     return { ok: true, positionId: input.id, reason: "live IOC 已提交，等待实际成交回报" };
   }
@@ -254,10 +257,9 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
 export function createMainnetLiveExecutionAdapter(
   dependencies: Omit<
     MainnetLiveExecutionDependencies,
-    "createIntent" | "claimIntent" | "assertSubmission" | "pauseAutoTrade"
+    "createIntent" | "claimIntent" | "pauseAutoTrade"
   > & {
     db: LiveDatabase;
-    assertSubmission?: MainnetLiveExecutionDependencies["assertSubmission"];
     pauseAutoTrade?: MainnetLiveExecutionDependencies["pauseAutoTrade"];
   },
 ): MainnetLiveExecutionAdapter {
@@ -265,8 +267,6 @@ export function createMainnetLiveExecutionAdapter(
     ...dependencies,
     createIntent: (input, options) => createLiveIntent(dependencies.db, input, options),
     claimIntent: (input) => claimLiveIntent(dependencies.db, input),
-    assertSubmission: dependencies.assertSubmission
-      ?? ((intentId, expectedGeneration) => assertLiveSubmission(dependencies.db, { intentId, expectedGeneration })),
     pauseAutoTrade: dependencies.pauseAutoTrade ?? (() => pauseLiveExecution(dependencies.db)),
   });
 }

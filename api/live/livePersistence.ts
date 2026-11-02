@@ -118,7 +118,7 @@ function approvalError(
   return null;
 }
 
-async function lockEmergencyGeneration(tx: LiveTransaction): Promise<number> {
+export async function lockEmergencyGeneration(tx: LiveTransaction): Promise<number> {
   const locked = await tx.select({ generation: liveControls.emergencyGeneration }).from(liveControls)
     .where(eq(liveControls.id, 1)).for("update");
   if (locked[0]) return locked[0].generation;

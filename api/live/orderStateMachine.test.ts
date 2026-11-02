@@ -275,17 +275,17 @@ describe("fill-driven live order state machine", () => {
       .toMatchObject({ newClientOrderId: replacement.clientOrderId, quantity: "1" });
   });
 
-  it("rejects late fills after CANCEL instead of changing a completed replacement basis", async () => {
+  it("accepts delayed valid fills after CANCEL and invalidates the overstated replacement", async () => {
     const { store, machine } = setup();
     entry(store);
     await machine.submit("entry-1");
     await machine.handleFill("entry-1", fill(), seed);
     await machine.replaceOrder("entry-1", "101");
 
-    await expect(machine.handleFill("entry-1", fill({ exchangeTradeId: "late-trade" }), seed))
-      .rejects.toThrow("CANCEL");
-    expect((await store.getOrder("entry-1"))?.executedQuantity).toBe("1");
-    expect((await store.getPosition(seed.id))?.quantity).toBe("1");
+    await machine.handleFill("entry-1", fill({ exchangeTradeId: "late-trade" }), seed);
+    expect(await store.getOrder("entry-1")).toMatchObject({ status: "CANCEL", executedQuantity: "2" });
+    expect((await store.getPosition(seed.id))?.quantity).toBe("2");
+    expect((await store.getOrder("replace-entry-1"))?.status).toBe("CANCEL");
   });
 
   it("rejects replacement from UNKNOWN until explicit reconciliation", async () => {
@@ -364,6 +364,26 @@ describe("fill-driven live order state machine", () => {
     }
     expect((await store.getOrder("entry-1"))?.executedQuantity).toBe("0");
     expect(await store.getPosition(seed.id)).toBeNull();
+  });
+
+  it("a cross-worker REPLACE race reconciles instead of triggering a market exit", async () => {
+    const { store, gateway, alerts, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    await machine.handleFill("entry-1", fill({ exchangeTradeId: "first" }), seed);
+    const transition = store.transitionOrder.bind(store);
+    store.transitionOrder = async (clientOrderId, expectedStatuses, patch) => {
+      const current = await store.getOrder(clientOrderId);
+      if (patch.status === "REPLACE" && current?.type === "STOP_MARKET" && current.status === "NEW") {
+        await transition(clientOrderId, expectedStatuses, { status: "REPLACE" });
+        return null;
+      }
+      return transition(clientOrderId, expectedStatuses, patch);
+    };
+
+    await machine.handleFill("entry-1", fill({ exchangeTradeId: "second" }), seed);
+    expect(alerts).toHaveLength(0);
+    expect(gateway.placed.filter((order) => order.type === "MARKET")).toHaveLength(0);
   });
 
   it("concurrent fills cannot shrink protection or trigger a duplicate-protection exit", async () => {
@@ -473,6 +493,22 @@ describe("fill-driven live order state machine", () => {
     const emergency = await machine.emergency();
     expect(emergency.unsettled).toHaveLength(1);
     expect(emergency.unsettled[0]).toMatchObject({ positionId: seed.id, symbol: seed.symbol });
+  });
+
+  it("does not report a successful cancel when the conditional transition loses and recovery cannot confirm it", async () => {
+    const { store, gateway, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    const transition = store.transitionOrder.bind(store);
+    store.transitionOrder = async (clientOrderId, expectedStatuses, patch) => {
+      if (patch.status === "CANCEL" && clientOrderId === "entry-1") return null;
+      return transition(clientOrderId, expectedStatuses, patch);
+    };
+    gateway.queryOrder = async () => null;
+
+    const emergency = await machine.emergency();
+    expect(emergency.cancelled).toHaveLength(0);
+    expect(emergency.unsettled).toHaveLength(1);
   });
 
   it("emergency cancels system orders and reports reduce-only exits unresolved until fills arrive", async () => {

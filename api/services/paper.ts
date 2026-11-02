@@ -247,23 +247,25 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
     if (now() - lastCheck < 60_000) return;
     const db = dbFor();
     const events = await market.getFundingRates(row.symbol, row.openedAt.getTime(), now());
+    let retryRequired = false;
     for (const event of events) {
       if (event.fundingTime < row.openedAt.getTime() || event.fundingTime > now()) continue;
       if (!Number.isFinite(event.fundingRate) || !Number.isFinite(event.fundingTime)) throw new Error(`${row.symbol} 资金费历史数据无效`);
       const settled = await db.transaction(async (tx) => {
         await tx.select().from(simulationAccounts).where(eq(simulationAccounts.id, 1)).limit(1).for("update");
         const current = (await tx.select().from(positions).where(eq(positions.id, row.id)).limit(1))[0];
-        if (!current || current.status !== "OPEN" || market.sourceGeneration !== sourceGeneration) return false;
+        if (market.sourceGeneration !== sourceGeneration) return "retry" as const;
+        if (!current || current.status !== "OPEN") return "skip" as const;
         const existing = await tx.select().from(fundingSettlements).where(and(
           eq(fundingSettlements.positionId, row.id),
           eq(fundingSettlements.fundingTime, event.fundingTime),
         )).limit(1);
-        if (existing.length) return false;
+        if (existing.length) return "skip" as const;
         // Funding history is fetched asynchronously. Revalidate the original quote only
         // after acquiring the account lock so a slow API call or lock wait cannot apply
         // funding using a stale mark price.
         const currentSnapshot = revalidateSnapshot(snapshot, settings, now());
-        if (!currentSnapshot.quality.valid) return false;
+        if (!currentSnapshot.quality.valid) return "retry" as const;
         const direction = current.side === "LONG" ? 1 : -1;
         const notional = current.qty * currentSnapshot.markPrice;
         const amount = -direction * notional * event.fundingRate;
@@ -275,11 +277,14 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
           cash: sql`${simulationAccounts.cash} + ${amount}`,
           realizedPnl: sql`${simulationAccounts.realizedPnl} + ${amount}`,
         }).where(eq(simulationAccounts.id, 1));
-        return true;
+        return "settled" as const;
       });
-      if (settled) await reportEvent("INFO", "资金费结算", `${row.symbol} 按当前标记价近似结算资金费`, row.symbol);
+      if (settled === "retry") retryRequired = true;
+      if (settled === "settled") await reportEvent("INFO", "资金费结算", `${row.symbol} 按当前标记价近似结算资金费`, row.symbol);
     }
-    fundingCheckedAt.set(row.id, now());
+    // Do not throttle a retryable stale-quote/source-switch failure for 60 seconds.
+    // Duplicate or already-closed events are safe to mark checked.
+    if (!retryRequired) fundingCheckedAt.set(row.id, now());
   }
 
   async function openPaperPosition(opportunity: Opportunity, executionHealthy?: () => boolean) {

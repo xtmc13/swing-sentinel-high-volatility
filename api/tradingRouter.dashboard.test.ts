@@ -189,4 +189,41 @@ describe("dashboard 持仓估值", () => {
     expect(data.portfolioRisk.totalRiskPct).toBeNaN();
     expect(mocks.getMarketSnapshot).toHaveBeenCalledTimes(1);
   });
+
+  it("公共行情首次加载失败时返回空降级 Dashboard 而不是 500", async () => {
+    engine.markets.splice(0, engine.markets.length);
+    vi.mocked(engine.refreshMarkets).mockRejectedValueOnce(new Error("offline"));
+    vi.mocked(engine.getDashboardObservability).mockReturnValue({ states: [], quality: {}, monitor });
+    vi.mocked(queries.getSettings).mockResolvedValue(DEFAULT_SETTINGS);
+    vi.mocked(queries.getOpenPositions).mockResolvedValue([]);
+    vi.mocked(queries.getAccount).mockResolvedValue(accountRow);
+    const tx = {
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: () => ({ for: vi.fn(async () => [accountRow]) }),
+          }),
+        }),
+      }),
+      update: () => ({ set: () => ({ where: vi.fn(async () => undefined) }) }),
+    };
+    vi.mocked(getDb).mockReturnValue({
+      select: () => ({
+        from: () => ({
+          where: () => ({ limit: vi.fn(async () => [{ armed: false }]) }),
+        }),
+      }),
+      transaction: async (callback: (transaction: typeof tx) => unknown) => callback(tx),
+    } as never);
+
+    const data = await tradingRouter.createCaller({
+      req: new Request("http://localhost/api/trpc"),
+      resHeaders: new Headers(),
+    }).dashboard();
+
+    expect(data.markets).toEqual([]);
+    expect(data.engineState).toBe("DEGRADED");
+    expect(data.account.equity).toBe(100_000);
+    expect(data.execution.canSubmit).toBe(false);
+  });
 });

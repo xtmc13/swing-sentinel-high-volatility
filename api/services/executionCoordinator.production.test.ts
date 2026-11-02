@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS, type AccountSnapshot, type PositionView, type TradingSettings } from "@contracts/trading";
-import { executionIntents, executionOrders, positions } from "@db/schema";
+import { executionIntents, executionOrders, livePositions, positions } from "@db/schema";
 import { createExecutionCoordinator, type ExecutionAdapter } from "./executionCoordinator";
 
 const database = vi.hoisted(() => ({
@@ -79,9 +79,11 @@ function setup(options: {
   positions?: PositionView[];
   intents?: { status: string }[];
   orders?: { status: string }[];
+  liveUnavailable?: boolean;
 } = {}) {
   database.rows.clear();
   database.rows.set(positions, []);
+  database.rows.set(livePositions, []);
   database.rows.set(executionIntents, options.intents ?? []);
   database.rows.set(executionOrders, options.orders ?? []);
   const settings = { ...DEFAULT_SETTINGS, ...options.settings };
@@ -89,7 +91,7 @@ function setup(options: {
   const saveSettings = vi.fn(async () => undefined);
   const coordinator = createExecutionCoordinator({
     paper: selectedAdapter,
-    live: selectedAdapter,
+    ...(options.liveUnavailable ? { getLiveAdapter: async () => null } : { live: selectedAdapter }),
     getSettings: async () => settings,
     saveSettings,
     market: { dataSource: "MAINNET" },
@@ -129,5 +131,12 @@ describe("生产默认未结风险查询", () => {
     await expect(h.coordinator.switchExecutionMode("PAPER")).rejects.toThrow("未结");
     expect(h.selectedAdapter.positions).toHaveBeenCalledTimes(1);
     expect(h.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("空 LIVE 在 adapter 不可用时仍可依据 DB 风险计数返回 PAPER", async () => {
+    const h = setup({ settings: { executionMode: "LIVE_MAINNET" }, liveUnavailable: true });
+
+    await expect(h.coordinator.switchExecutionMode("PAPER")).resolves.toMatchObject({ executionMode: "PAPER" });
+    expect(h.saveSettings).toHaveBeenCalledTimes(1);
   });
 });

@@ -65,7 +65,11 @@ function duplicateEntry(error: unknown): boolean {
 }
 
 export class DrizzleAccountingStore implements LiveAccountingStore {
-  constructor(private readonly db: LiveDatabase) {}
+  private readonly db: LiveDatabase;
+
+  constructor(db: LiveDatabase) {
+    this.db = db;
+  }
 
   async recordLedgerEntry(entry: NewLiveLedgerEntry): Promise<boolean> {
     try {
@@ -258,7 +262,11 @@ export interface LiveAccountingSynchronizerOptions {
 }
 
 export class LiveAccountingSynchronizer {
-  constructor(private readonly options: LiveAccountingSynchronizerOptions) {}
+  private readonly options: LiveAccountingSynchronizerOptions;
+
+  constructor(options: LiveAccountingSynchronizerOptions) {
+    this.options = options;
+  }
 
   async synchronize(): Promise<void> {
     const { client, store, incomeParams, symbols, limit } = this.options;

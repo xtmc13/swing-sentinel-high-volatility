@@ -1,0 +1,172 @@
+import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_SETTINGS, type ExecutionMode } from "@contracts/trading";
+import type { ExecutionAdapter } from "../services/executionCoordinator";
+import { createProductionLiveRuntime, type ProductionLiveServices } from "./productionRuntime";
+
+function adapter(): ExecutionAdapter {
+  const snapshot = async () => ({
+    account: {
+      equity: 1, cash: 1, availableMargin: 1, usedMargin: 0, unrealizedPnl: 0,
+      realizedPnl: 0, todayPnl: 0, todayPnlPct: 0, dayStartEquity: 1,
+      valuationValid: true, valuationIssues: [], dailyLocked: false,
+    },
+    positions: [],
+  });
+  return {
+    open: async () => ({ ok: false, reason: "fake adapter" }),
+    close: async () => ({ ok: false, reason: "fake adapter", unsettled: false, alreadyClosed: true, pnl: undefined }),
+    manage: async () => undefined,
+    emergency: async () => ({ ok: true, paused: true, settled: [], unsettled: [] }),
+    account: async () => (await snapshot()).account,
+    positions: async () => [],
+    snapshot,
+  };
+}
+
+function services(): ProductionLiveServices {
+  return {
+    adapter: adapter(),
+    start: async () => undefined,
+    stop: async () => undefined,
+    preflight: async () => ({ ready: true, reasons: [], checkedAt: new Date(1_800_000_000_000).toISOString() }),
+    privateWs: { health: () => ({ configured: true, running: true, connected: true, lastMessageAt: 1_800_000_000_000, reconnects: 0 }) },
+    reconciliation: { health: () => ({ configured: true, running: true, lastRunAt: 1_800_000_000_000 }) },
+  };
+}
+
+function setup(options: {
+  executionMode?: ExecutionMode;
+  env?: Record<string, string | undefined>;
+  armed?: boolean;
+  outstanding?: boolean;
+  createServices?: () => ProductionLiveServices;
+} = {}) {
+  const settings = { ...DEFAULT_SETTINGS, executionMode: options.executionMode ?? "LIVE_MAINNET" };
+  const runtime = createProductionLiveRuntime({
+    env: options.env ?? {
+      LIVE_TRADING_ENABLED: "true",
+      BINANCE_MAINNET_API_KEY: "fake-key",
+      BINANCE_MAINNET_API_SECRET: "fake-secret",
+    },
+    getSettings: async () => settings,
+    getLiveControls: async () => ({ armed: options.armed ?? false }),
+    hasOutstandingLiveRisk: async () => options.outstanding ?? false,
+    createServices: options.createServices ?? services,
+  });
+  return { runtime, settings };
+}
+
+describe("production live runtime gates", () => {
+  it("PAPER never constructs live services even with credentials and human approval", async () => {
+    const createServices = vi.fn(services);
+    const h = setup({ executionMode: "PAPER", armed: true, createServices });
+
+    await expect(h.runtime.getLiveAdapter(true)).resolves.toBeNull();
+    expect(createServices).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "environment", env: { BINANCE_MAINNET_API_KEY: "fake", BINANCE_MAINNET_API_SECRET: "fake" } },
+    { name: "credentials", env: { LIVE_TRADING_ENABLED: "true" } },
+  ])("missing $name gate fails closed without construction", async ({ env }) => {
+    const createServices = vi.fn(services);
+    const h = setup({ armed: true, env, createServices });
+
+    await expect(h.runtime.getLiveAdapter()).resolves.toBeNull();
+    expect(createServices).not.toHaveBeenCalled();
+    expect(h.runtime.privateWs.health().configured).toBe(false);
+  });
+
+  it("unarmed LIVE without outstanding risk stays unconstructed", async () => {
+    const createServices = vi.fn(services);
+    const h = setup({ createServices });
+
+    await expect(h.runtime.getLiveAdapter()).resolves.toBeNull();
+    expect(createServices).not.toHaveBeenCalled();
+  });
+
+  it("explicit arming approval constructs and starts one shared lifecycle", async () => {
+    const created = services();
+    const start = vi.fn(created.start);
+    created.start = start;
+    const createServices = vi.fn(() => created);
+    const h = setup({ createServices });
+
+    const first = await h.runtime.getLiveAdapter(true);
+    const second = await h.runtime.getLiveAdapter(true);
+    expect(first).toBe(created.adapter);
+    expect(second).toBe(created.adapter);
+    expect(createServices).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
+    await expect(h.runtime.runLivePreflight(true)).resolves.toMatchObject({ ready: true });
+    expect(h.runtime.privateWs.health().connected).toBe(true);
+    expect(h.runtime.reconciliation.health().running).toBe(true);
+  });
+
+  it("persisted armed and outstanding recovery can use the same adapter after disarm", async () => {
+    const createServices = vi.fn(services);
+    let armed = true;
+    const outstanding = false;
+    const runtime = createProductionLiveRuntime({
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake", BINANCE_MAINNET_API_SECRET: "fake" },
+      getSettings: async () => ({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" }),
+      getLiveControls: async () => ({ armed }),
+      hasOutstandingLiveRisk: async () => outstanding,
+      createServices,
+    });
+
+    const initial = await runtime.getLiveAdapter();
+    armed = false;
+    expect(await runtime.getLiveAdapter()).toBe(initial);
+    expect(createServices).toHaveBeenCalledTimes(1);
+  });
+
+  it("unarmed restart with outstanding live risk enables recovery without opening new entries", async () => {
+    const createServices = vi.fn(services);
+    const h = setup({ outstanding: true, createServices });
+
+    await expect(h.runtime.getLiveAdapter()).resolves.not.toBeNull();
+    expect(createServices).toHaveBeenCalledTimes(1);
+  });
+
+  it("failed startup closes partial services and is not cached as configured", async () => {
+    let attempts = 0;
+    let stops = 0;
+    const h = setup({
+      armed: true,
+      createServices: () => {
+        attempts += 1;
+        const current = services();
+        current.start = async () => { throw new Error("fake startup failure"); };
+        current.stop = async () => { stops += 1; };
+        return current;
+      },
+    });
+
+    await expect(h.runtime.getLiveAdapter()).rejects.toThrow("fake startup failure");
+    expect(h.runtime.privateWs.health().configured).toBe(false);
+    expect(stops).toBe(1);
+    await expect(h.runtime.getLiveAdapter()).rejects.toThrow("fake startup failure");
+    expect(attempts).toBe(2);
+    expect(stops).toBe(2);
+  });
+
+  it("shutdown during startup waits for and closes the partial lifecycle", async () => {
+    let release!: () => void;
+    let stops = 0;
+    const created = services();
+    created.start = () => new Promise<void>((resolve) => { release = resolve; });
+    created.stop = async () => { stops += 1; };
+    const h = setup({ armed: true, createServices: () => created });
+
+    const starting = h.runtime.getLiveAdapter(true);
+    await vi.waitFor(() => expect(release).toBeDefined());
+    const stopping = h.runtime.stop();
+    release();
+    await starting;
+    await stopping;
+
+    expect(stops).toBe(1);
+    expect(h.runtime.privateWs.health().configured).toBe(false);
+  });
+});

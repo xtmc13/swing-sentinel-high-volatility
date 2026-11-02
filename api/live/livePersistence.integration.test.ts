@@ -51,7 +51,7 @@ function intentInput(id: string, signalId: string, workerId = "worker-a"): Creat
     notional: "4000",
     reservedMargin: "800",
     reservedRisk: "60",
-    expiresAt: new Date(NOW + 60_000),
+    expiresAt: new Date(Date.now() + 60_000),
     workerId,
     leaseDurationMs: 5_000,
   };
@@ -106,6 +106,8 @@ beforeEach(async () => {
   await db.insert(schema.liveControls).values({ id: 1, armed: true, emergencyGeneration: 0 });
   await db.update(schema.tradingSettings).set({ executionMode: "LIVE_MAINNET" })
     .where(eq(schema.tradingSettings.id, 1));
+  await db.insert(schema.volatilityStates).values({ symbol: "BTCUSDT", mode: "NORMAL", lastDataAt: NOW })
+    .onDuplicateKeyUpdate({ set: { mode: "NORMAL" } });
 });
 
 afterAll(async () => {

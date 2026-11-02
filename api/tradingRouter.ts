@@ -61,7 +61,9 @@ export const settingsInput = z.object({
 });
 
 async function dashboard(): Promise<DashboardData> {
-  if (!engine.markets.length) await engine.refreshMarkets();
+  if (!engine.markets.length) {
+    try { await engine.refreshMarkets(); } catch { /* the dashboard remains available in degraded mode */ }
+  }
   const [tradeRows, orderRows, eventRows, equityRows, execution, initialAccount] = await Promise.all([
     getRecentTrades(), getRecentOrders(),
     getRecentEvents(), getEquityHistory(), executionCoordinator.dashboard(), getAccount(),
@@ -128,7 +130,7 @@ export const tradingRouter = createRouter({
     armed: z.boolean(),
     confirmationPhrase: z.string().max(64).optional(),
     adminSecret: z.string().max(512).optional(),
-  })).mutation(({ input }) => {
+  })).mutation(async ({ input }) => {
     if (input.armed) {
       if (!isFreshAdminSecret(input.adminSecret ?? "", env.appSecret)) {
         throw new TRPCError({ code: "UNAUTHORIZED", message: "armed 需要重新输入正确的管理员令牌" });
@@ -137,7 +139,15 @@ export const tradingRouter = createRouter({
         throw new TRPCError({ code: "PRECONDITION_FAILED", message: "请输入确认短语 ARM LIVE MAINNET" });
       }
     }
-    return executionCoordinator.setArmed(input.armed);
+    try {
+      return await executionCoordinator.setArmed(input.armed);
+    } catch (error) {
+      if (error instanceof TRPCError) throw error;
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: error instanceof Error ? error.message : "主网控制门控未通过",
+      });
+    }
   }),
   candles: publicQuery.input(z.object({
     symbol: z.string().regex(/^[A-Z0-9]{5,20}$/),

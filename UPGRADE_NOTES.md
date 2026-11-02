@@ -1,5 +1,14 @@
 # 多币波段系统升级记录（2026-10-27 至 2026-10-29）
 
+## Task 9：生产接线与全链路验收
+
+- 生产 singleton 接入懒加载主网 runtime；PAPER 不创建主网服务。LIVE_MAINNET、环境总开关、凭据、人工 armed/arming 或已有真实未结风险门控通过后，才组装签名 REST、订单状态机、私有 WS、费用同步、REST 对账和重启恢复。启动失败与停止都会清理部分生命周期。
+- 新增显式 `BINANCE_MAINNET_ALLOWED_SYMBOLS` 白名单。最终风险门使用 fresh signed account/preflight，DB 事务内只做数据库复核，不跨币安网络调用；真实强平数据缺失时拒绝开仓。
+- 真实 MariaDB 10.11 独立库执行 0000–0012 全部 13 条迁移，并运行 paper、volatility、live persistence 与 durable order store 集成。修复 Drizzle DECIMAL 尾零的规范化和集成夹具的波动状态/过期时间。
+- 公共行情首次失败时 Dashboard 返回空降级视图而不是 500；缺失主网门控以 HTTP 412 拒绝；空 LIVE 在无 adapter 时仍通过 DB 未结风险检查返回 PAPER。
+- 生产包浏览器实际验证 Dashboard、风险/动门控、PAPER/LIVE 标签、管理员 401/200、缺门 412、回测和样本外页面；最终回到 PAPER，动量、自动交易和 armed 全关，无真实订单。
+- 主网只读仍待权限受限凭据和另行确认；手动 canary、观察期及小范围自动交易均未执行。本记录不宣称实盘已启用或盈利。
+
 ## Validation round 1：长历史样本外验证
 
 - 新增“信号验证”页面和后台任务，支持 1–5 个合约、900–10000 根 5M／15M 主时间轴，避免长请求阻塞页面。

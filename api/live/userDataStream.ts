@@ -105,8 +105,10 @@ export class UserDataStream {
   private readonly reconnectDelayMs: number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly now: () => number;
+  private readonly options: UserDataStreamOptions;
 
-  constructor(private readonly options: UserDataStreamOptions) {
+  constructor(options: UserDataStreamOptions) {
+    this.options = options;
     this.keepAliveIntervalMs = options.keepAliveIntervalMs ?? 30 * 60_000;
     this.reconnectDelayMs = options.reconnectDelayMs ?? 1_000;
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));

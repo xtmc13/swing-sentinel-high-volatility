@@ -105,8 +105,10 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   private readonly replacementCounts = new Map<string, number>();
   private readonly entryMetadata = new Map<string,
     Pick<LivePositionSeed, "signalId" | "strategyType" | "breakoutPrice">>();
+  private readonly dependencies: MainnetLiveExecutionDependencies;
 
-  constructor(private readonly dependencies: MainnetLiveExecutionDependencies) {
+  constructor(dependencies: MainnetLiveExecutionDependencies) {
+    this.dependencies = dependencies;
     this.now = dependencies.now ?? Date.now;
     this.id = dependencies.id ?? (() => crypto.randomUUID());
     this.machine = new OrderStateMachine(

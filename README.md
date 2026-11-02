@@ -78,6 +78,14 @@ DATABASE_URL='mysql://user:password@host:port/database' APP_SECRET='replace-with
 
 端口被占用时选择其他空闲端口（例如 3001），不要终止不认识的进程。只读查询保持公开；扫描、参数修改、自动交易开关、平仓、重置及回测写操作均要求 `Authorization: Bearer <APP_SECRET>`。页面顶部“解锁控制”会完成同源验证，令牌只保存在当前标签页的 `sessionStorage`。公网部署仍必须使用 HTTPS 和反向代理访问控制，不得把 `APP_SECRET` 写入前端环境变量、Git 或 URL。
 
+### 主网执行门控
+
+默认始终是 `PAPER`、`momentumEnabled=false`、`LIVE_TRADING_ENABLED=false`、`armed=false`。生产 coordinator 只保存懒解析入口；只有数据库选择 `LIVE_MAINNET`、环境总开关和主网凭据同时存在，并由持久化 armed、当前 arming 人工授权或已有未结真实风险触发时，才创建签名客户端、订单 adapter、私有 WS、对账与恢复服务。PAPER 不解析这些服务，缺配置或启动失败均失败关闭且不会回退成 paper 账户。
+
+主网预检还要求 `BINANCE_MAINNET_ALLOWED_SYMBOLS` 显式白名单、固定 1–20 倍杠杆、one-way、关闭 multi-assets、isolated margin、真实档位/过滤值/强平数据、私有 WS 与新鲜对账。真实下单前会在数据库准入和 transport 前再次检查。凭据只从服务器环境读取，不进入 Rust、数据库、前端或日志。
+
+本轮只完成 fake/replay 与无凭据生产验证。主网只读仍需用户提供权限受限凭据并另行确认；真实 canary 必须再次明确授权、限制一个白名单合约和最小安全数量。小范围自动交易还要求 canary 与观察期通过。完成这些工程验证不代表已经启用实盘或能够盈利。
+
 Docker 采用多阶段构建，不复制 `.env` 进镜像：
 
 ```bash

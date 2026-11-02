@@ -176,6 +176,13 @@ describe("统一执行管理入口", () => {
     expect(mocks.setArmed).toHaveBeenLastCalledWith(false);
   });
 
+  it("缺失主网门控作为 PRECONDITION_FAILED 拒绝，而不是内部 500", async () => {
+    mocks.setArmed.mockRejectedValueOnce(new Error("LIVE_TRADING_ENABLED 未开启"));
+
+    await expect(caller().setLiveControls({ armed: true, confirmationPhrase: "ARM LIVE MAINNET", adminSecret: SECRET }))
+      .rejects.toMatchObject({ code: "PRECONDITION_FAILED", message: "LIVE_TRADING_ENABLED 未开启" });
+  });
+
   it("执行模式和 dashboard 都通过 coordinator，并保留 PAPER/LIVE 状态", async () => {
     await expect(caller().setExecutionMode({ executionMode: "LIVE_MAINNET" })).resolves.toMatchObject({ executionMode: "LIVE_MAINNET" });
     expect(mocks.switchExecutionMode).toHaveBeenCalledWith("LIVE_MAINNET");

@@ -13,7 +13,7 @@ import {
   type PrivateWsHealth,
   type TradingSettings,
 } from "@contracts/trading";
-import { liveControls } from "@db/schema";
+import { liveControls, livePositions, positions } from "@db/schema";
 import { getDb } from "../queries/connection";
 import { getOutstandingOrderCounts, getSettings, switchExecutionModeAtomic } from "../queries/trading";
 import {
@@ -43,6 +43,7 @@ import {
   type AssertCurrentLiveAdmission,
 } from "../live/liveConfig";
 import { setLiveArmed } from "../live/livePersistence";
+import { productionLiveRuntime } from "../live/productionSingleton";
 
 export { liveTradingEnabled } from "../live/liveConfig";
 
@@ -86,13 +87,14 @@ export interface ExecutionDashboard extends ExecutionSnapshot, LiveOperations {
 export interface ExecutionCoordinatorDependencies {
   paper?: ExecutionAdapter;
   live?: ExecutionAdapter;
+  getLiveAdapter?: (humanApproved?: boolean) => Promise<ExecutionAdapter | null>;
   getSettings?: () => Promise<TradingSettings>;
   saveSettings?: (settings: TradingSettings) => Promise<void>;
   getLiveControls?: () => Promise<LiveControls>;
   setLiveControls?: (controls: LiveControls) => Promise<void>;
   getOutstandingRisk?: () => Promise<OutstandingExecutionRisk>;
   getLiveOperations?: () => Promise<LiveOperations>;
-  runLivePreflight?: () => Promise<LiveReadiness>;
+  runLivePreflight?: (humanApproved?: boolean) => Promise<LiveReadiness>;
   privateWs?: { health(): PrivateWsHealth };
   reconciliation?: { health(): { configured: boolean; running: boolean; lastRunAt: number | null } };
   market?: { readonly dataSource: DataSource };
@@ -143,6 +145,16 @@ async function defaultOutstandingRisk(positionViews: Promise<PositionView[]>): P
   };
 }
 
+async function defaultDatabaseOutstandingRisk(): Promise<OutstandingExecutionRisk> {
+  const db = getDb();
+  const [paperRows, liveRows, counts] = await Promise.all([
+    db.select({ id: positions.id }).from(positions).where(eq(positions.status, "OPEN")),
+    db.select({ id: livePositions.id }).from(livePositions).where(eq(livePositions.status, "OPEN")),
+    getOutstandingOrderCounts(),
+  ]);
+  return { openPositions: paperRows.length + liveRows.length, ...counts };
+}
+
 export class ExecutionCoordinator {
   private readonly consumedMomentumSignals = new Set<string>();
   private readonly dependencies: ExecutionCoordinatorDependencies;
@@ -173,11 +185,17 @@ export class ExecutionCoordinator {
     return (this.dependencies.getSettings ?? getSettings)();
   }
 
-  private adapter(settings: TradingSettings): ExecutionAdapter {
+  private liveSupported(): boolean {
+    return this.dependencies.live !== undefined || this.dependencies.getLiveAdapter !== undefined;
+  }
+
+  private async adapter(settings: TradingSettings, humanApproved = false): Promise<ExecutionAdapter> {
     if (settings.executionMode === "PAPER") return this.paper;
     if (this.marketSource === "TESTNET") throw new Error("TESTNET 行情禁止选择 LIVE_MAINNET");
-    if (!this.dependencies.live) throw new Error("LIVE_MAINNET adapter 尚未配置");
-    return this.dependencies.live;
+    if (this.dependencies.live) return this.dependencies.live;
+    const live = await this.dependencies.getLiveAdapter?.(humanApproved);
+    if (!live) throw new Error("LIVE_MAINNET adapter 尚未配置");
+    return live;
   }
 
   private async serializeOpenSwitch<T>(operation: () => Promise<T>): Promise<T> {
@@ -212,12 +230,12 @@ export class ExecutionCoordinator {
     return this.serializeOpenSwitch(() => this.openWhenSerialized(opportunity, executionHealthy, true));
   }
 
-  private async currentPreflight(): Promise<LiveReadiness> {
+  private async currentPreflight(humanApproved = false): Promise<LiveReadiness> {
     if (!this.dependencies.runLivePreflight) {
       return { ready: false, reasons: ["主网预检未配置"], checkedAt: null };
     }
     try {
-      const result = await this.dependencies.runLivePreflight();
+      const result = await this.dependencies.runLivePreflight(humanApproved);
       const checkedAt = result.checkedAt === null ? Number.NaN : Date.parse(result.checkedAt);
       if (result.ready && (!Number.isFinite(checkedAt) || checkedAt > this.now() || this.now() - checkedAt > 10_000)) {
         return { ready: false, reasons: [...result.reasons, "预检结果缺少有效新鲜时间"], checkedAt: result.checkedAt };
@@ -254,7 +272,7 @@ export class ExecutionCoordinator {
       const controls = await (this.dependencies.getLiveControls ?? defaultLiveControls)();
       if (!controls.armed) return { ok: false, reason: "主网执行未 armed" };
       if (!manualCanary && !settings.autoTrade) return { ok: false, reason: "自动交易已暂停" };
-      if (!this.dependencies.live) return { ok: false, reason: "LIVE_MAINNET adapter 尚未配置" };
+      if (!this.liveSupported()) return { ok: false, reason: "LIVE_MAINNET adapter 尚未配置" };
       const preflight = await this.currentPreflight();
       if (!preflight.ready) return { ok: false, reason: `主网预检未通过：${preflight.reasons.join("；") || "未知原因"}` };
       const current = await this.status();
@@ -270,7 +288,7 @@ export class ExecutionCoordinator {
     }
     if (guardedMomentumSignal) this.consumedMomentumSignals.add(opportunity.signalId);
     try {
-      const selectedAdapter = this.adapter(settings);
+      const selectedAdapter = await this.adapter(settings);
       const result = manualCanary
         ? await selectedAdapter.open(opportunity, executionHealthy, { manualCanary: true })
         : await selectedAdapter.open(opportunity, executionHealthy);
@@ -283,18 +301,18 @@ export class ExecutionCoordinator {
   }
 
   async close(positionId: string, reason?: string): Promise<CloseExecutionResult> {
-    return this.adapter(await this.settings()).close(positionId, reason);
+    return (await this.adapter(await this.settings())).close(positionId, reason);
   }
 
   async manage(): Promise<void> {
-    const adapter = this.adapter(await this.settings());
+    const adapter = (await this.adapter(await this.settings()));
     await adapter.manage();
     await this.manageMomentumExits();
   }
 
   async manageMomentumExits(): Promise<void> {
     const settings = await this.settings();
-    const adapter = this.adapter(settings);
+    const adapter = await this.adapter(settings);
     const openPositions = await adapter.positions();
     for (const position of openPositions) {
       if (position.strategyType !== "MOMENTUM" || position.breakoutPrice === undefined
@@ -335,19 +353,19 @@ export class ExecutionCoordinator {
   }
 
   async emergency(): Promise<EmergencyExecutionResult> {
-    return this.adapter(await this.settings()).emergency();
+    return (await this.adapter(await this.settings())).emergency();
   }
 
   async account(): Promise<AccountSnapshot> {
-    return this.adapter(await this.settings()).account();
+    return (await this.adapter(await this.settings())).account();
   }
 
   async positions(): Promise<PositionView[]> {
-    return this.adapter(await this.settings()).positions();
+    return (await this.adapter(await this.settings())).positions();
   }
 
   async snapshot(): Promise<ExecutionSnapshot> {
-    return this.adapter(await this.settings()).snapshot();
+    return (await this.adapter(await this.settings())).snapshot();
   }
 
   private buildStatus(
@@ -357,11 +375,11 @@ export class ExecutionCoordinator {
     operations: LiveOperations,
     positions: PositionView[],
     preflight: LiveReadiness,
+    adapterConfigured: boolean,
   ): ExecutionStatus {
     const env = this.dependencies.env ?? process.env;
     const environmentEnabled = liveTradingEnabled(env);
     const credentialsConfigured = getLivePublicStatus(env).credentialsConfigured;
-    const adapterConfigured = this.dependencies.live !== undefined;
     const frame = this.lastMomentumFrame;
     const frameFresh = frame !== null && frame.quality === "GOOD"
       && this.now() >= frame.received_time && this.now() - frame.received_time <= 5_000;
@@ -444,10 +462,14 @@ export class ExecutionCoordinator {
     };
   }
 
-  private statusPreflight(settings: TradingSettings, controls: LiveControls): Promise<LiveReadiness> {
+  private statusPreflight(
+    settings: TradingSettings,
+    controls: LiveControls,
+    adapterConfigured: boolean,
+  ): Promise<LiveReadiness> {
     const env = this.dependencies.env ?? process.env;
     const basicGates = settings.executionMode === "LIVE_MAINNET" && controls.armed
-      && this.dependencies.live !== undefined && liveTradingEnabled(env)
+      && adapterConfigured && liveTradingEnabled(env)
       && getLivePublicStatus(env).credentialsConfigured;
     if (basicGates) return this.currentPreflight();
     return Promise.resolve({
@@ -459,21 +481,27 @@ export class ExecutionCoordinator {
 
   async status(): Promise<ExecutionStatus> {
     const settings = await this.settings();
-    const selectedAdapter = settings.executionMode === "PAPER" || this.dependencies.live
-      ? this.adapter(settings) : null;
+    const controls = await (this.dependencies.getLiveControls ?? defaultLiveControls)();
+    let selectedAdapter: ExecutionAdapter | null = null;
+    try {
+      selectedAdapter = await this.adapter(settings);
+    } catch {
+      if (settings.executionMode === "PAPER") throw new Error("PAPER adapter 不可用");
+    }
     const positionPromise = selectedAdapter?.positions() ?? Promise.resolve([]);
-    const [controls, operations, outstanding, positions] = await Promise.all([
-      (this.dependencies.getLiveControls ?? defaultLiveControls)(),
+    const [operations, outstanding, positions] = await Promise.all([
       (this.dependencies.getLiveOperations ?? defaultLiveOperations)(),
       this.dependencies.getOutstandingRisk?.() ?? defaultOutstandingRisk(positionPromise),
       positionPromise,
     ]);
-    const preflight = await this.statusPreflight(settings, controls);
-    return this.buildStatus(settings, controls, outstanding, operations, positions, preflight);
+    const adapterConfigured = settings.executionMode === "LIVE_MAINNET" && selectedAdapter !== null;
+    const preflight = await this.statusPreflight(settings, controls, adapterConfigured);
+    return this.buildStatus(settings, controls, outstanding, operations, positions, preflight, adapterConfigured);
   }
 
   async dashboard(): Promise<ExecutionDashboard> {
     const settings = await this.settings();
+    const controls = await (this.dependencies.getLiveControls ?? defaultLiveControls)();
     const unavailableSnapshot: ExecutionSnapshot = {
       account: {
         equity: Number.NaN,
@@ -491,22 +519,24 @@ export class ExecutionCoordinator {
       },
       positions: [],
     };
-    const snapshotPromise = settings.executionMode === "LIVE_MAINNET" && !this.dependencies.live
-      ? Promise.resolve(unavailableSnapshot) : this.adapter(settings).snapshot();
-    const [snapshot, controls, operations] = await Promise.all([
-      snapshotPromise,
-      (this.dependencies.getLiveControls ?? defaultLiveControls)(),
-      (this.dependencies.getLiveOperations ?? defaultLiveOperations)(),
-    ]);
+    let selectedAdapter: ExecutionAdapter | null = null;
+    try {
+      selectedAdapter = await this.adapter(settings);
+    } catch {
+      if (settings.executionMode === "PAPER") throw new Error("PAPER adapter 不可用");
+    }
+    const snapshot = selectedAdapter ? await selectedAdapter.snapshot() : unavailableSnapshot;
+    const operations = await (this.dependencies.getLiveOperations ?? defaultLiveOperations)();
     const outstanding = this.dependencies.getOutstandingRisk
       ? await this.dependencies.getOutstandingRisk()
       : await defaultOutstandingRisk(Promise.resolve(snapshot.positions));
-    const preflight = await this.statusPreflight(settings, controls);
+    const adapterConfigured = settings.executionMode === "LIVE_MAINNET" && selectedAdapter !== null;
+    const preflight = await this.statusPreflight(settings, controls, adapterConfigured);
     return {
       ...snapshot,
       ...operations,
       settings,
-      status: this.buildStatus(settings, controls, outstanding, operations, snapshot.positions, preflight),
+      status: this.buildStatus(settings, controls, outstanding, operations, snapshot.positions, preflight, adapterConfigured),
     };
   }
 
@@ -519,8 +549,8 @@ export class ExecutionCoordinator {
         const env = this.dependencies.env ?? process.env;
         if (!liveTradingEnabled(env)) throw new Error("LIVE_TRADING_ENABLED 未开启");
         if (!getLivePublicStatus(env).credentialsConfigured) throw new Error("主网凭据未配置");
-        if (!this.dependencies.live) throw new Error("LIVE_MAINNET adapter 尚未配置");
-        const preflight = await this.currentPreflight();
+        if (!this.liveSupported()) throw new Error("LIVE_MAINNET adapter 尚未配置");
+        const preflight = await this.currentPreflight(true);
         if (!preflight.ready) throw new Error(`主网预检未通过：${preflight.reasons.join("；") || "未知原因"}`);
       }
       if (this.dependencies.setLiveControls) await this.dependencies.setLiveControls({ armed });
@@ -539,9 +569,16 @@ export class ExecutionCoordinator {
     if (executionMode === "LIVE_MAINNET" && this.marketSource === "TESTNET") {
       throw new Error("TESTNET 行情禁止选择 LIVE_MAINNET");
     }
-    const risk = this.dependencies.getOutstandingRisk
-      ? await this.dependencies.getOutstandingRisk()
-      : await defaultOutstandingRisk(this.adapter(settings).positions());
+    let risk: OutstandingExecutionRisk;
+    if (this.dependencies.getOutstandingRisk) {
+      risk = await this.dependencies.getOutstandingRisk();
+    } else {
+      const selectedAdapter = settings.executionMode === "PAPER" ? this.paper
+        : this.dependencies.live ?? await this.dependencies.getLiveAdapter?.() ?? null;
+      risk = selectedAdapter
+        ? await defaultOutstandingRisk(selectedAdapter.positions())
+        : await defaultDatabaseOutstandingRisk();
+    }
     if (risk.openPositions > 0 || risk.pendingIntents > 0 || risk.unfinishedOrders > 0) {
       throw new Error("存在未结持仓、意图或未完成订单，禁止切换执行模式");
     }
@@ -556,4 +593,10 @@ export function createExecutionCoordinator(dependencies: ExecutionCoordinatorDep
   return new ExecutionCoordinator(dependencies);
 }
 
-export const executionCoordinator = createExecutionCoordinator({ market: binance });
+export const executionCoordinator = createExecutionCoordinator({
+  market: binance,
+  getLiveAdapter: (humanApproved) => productionLiveRuntime.getLiveAdapter(humanApproved),
+  runLivePreflight: (humanApproved) => productionLiveRuntime.runLivePreflight(humanApproved),
+  privateWs: productionLiveRuntime.privateWs,
+  reconciliation: productionLiveRuntime.reconciliation,
+});

@@ -111,10 +111,14 @@ async fn run_symbol(
     let sender =
         CandidateSender::new(endpoint, REQUEST_TIMEOUT).expect("candidate endpoint was validated");
     let mut reconnect_delay = Duration::from_millis(250);
+    let mut generation = 1;
     loop {
-        if let Err(error) = run_session(&symbol, &config, &client, &sender, &diagnostics).await {
+        if let Err(error) =
+            run_session(&symbol, &config, &client, &sender, &diagnostics, generation).await
+        {
             diagnostics.note_error(&symbol, error);
         }
+        generation = generation.saturating_add(1);
         sleep(reconnect_delay).await;
         reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
     }
@@ -126,6 +130,7 @@ async fn run_session(
     client: &BinancePublicClient,
     sender: &CandidateSender,
     diagnostics: &DiagnosticsState,
+    generation: u64,
 ) -> Result<(), String> {
     let mut socket = client
         .connect(symbol)
@@ -135,7 +140,8 @@ async fn run_session(
         .depth_snapshot(symbol, SNAPSHOT_LIMIT)
         .await
         .map_err(|error| error.to_string())?;
-    let mut runtime = SymbolRuntime::new(symbol, config.clone(), DEPTH_BUFFER);
+    let mut runtime =
+        SymbolRuntime::new_with_generation(symbol, config.clone(), DEPTH_BUFFER, generation);
     runtime.load_snapshot(snapshot);
 
     loop {

@@ -23,9 +23,18 @@ pub struct SymbolRuntime {
 
 impl SymbolRuntime {
     pub fn new(symbol: impl Into<String>, config: DetectorConfig, depth_buffer: usize) -> Self {
+        Self::new_with_generation(symbol, config, depth_buffer, 1)
+    }
+
+    pub fn new_with_generation(
+        symbol: impl Into<String>,
+        config: DetectorConfig,
+        depth_buffer: usize,
+        generation: u64,
+    ) -> Self {
         let symbol = symbol.into();
         Self {
-            depth: DepthSync::new(depth_buffer),
+            depth: DepthSync::with_generation(depth_buffer, generation),
             features: FeatureEngine::new(symbol, config.clone()),
             candidates: CandidateDetector::new(config),
             last_kline: None,
@@ -40,10 +49,22 @@ impl SymbolRuntime {
         let frame = match event {
             PublicEvent::Trade { data, .. } => {
                 self.features.push_trade(data);
+                if self.features.history_overflowed() {
+                    return RuntimeOutput {
+                        resync_required: true,
+                        ..RuntimeOutput::default()
+                    };
+                }
                 None
             }
             PublicEvent::MarkPrice { data, .. } => {
                 self.features.push_mark(data);
+                if self.features.history_overflowed() {
+                    return RuntimeOutput {
+                        resync_required: true,
+                        ..RuntimeOutput::default()
+                    };
+                }
                 None
             }
             PublicEvent::Kline { data, .. } => {

@@ -7,6 +7,7 @@ use crate::{
 pub struct CandidateDetector {
     config: DetectorConfig,
     config_hash: String,
+    last_generation: u64,
     last_sequence: u64,
     streak: u8,
     streak_side: Option<Side>,
@@ -18,6 +19,7 @@ impl CandidateDetector {
         Self {
             config,
             config_hash,
+            last_generation: 0,
             last_sequence: 0,
             streak: 0,
             streak_side: None,
@@ -25,6 +27,14 @@ impl CandidateDetector {
     }
 
     pub fn observe(&mut self, frame: FeatureFrame, now: i64) -> Option<Candidate> {
+        if frame.generation == 0 || frame.generation < self.last_generation {
+            return None;
+        }
+        if frame.generation > self.last_generation {
+            self.last_generation = frame.generation;
+            self.last_sequence = 0;
+            self.reset_streak();
+        }
         if frame.sequence == 0 || frame.sequence <= self.last_sequence {
             return None;
         }

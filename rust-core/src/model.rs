@@ -67,6 +67,7 @@ pub enum MarketQuality {
     OneSided,
     Crossed,
     InsufficientHistory,
+    HistoryOverflow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

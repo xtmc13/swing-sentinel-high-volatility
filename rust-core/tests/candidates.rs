@@ -58,7 +58,7 @@ fn no_candidate_on_stale_data_and_confirmation_streak_fails_closed() {
 }
 
 #[test]
-fn replayed_sequence_cannot_confirm_or_emit() {
+fn book_ticker_reusing_depth_sequence_cannot_confirm_or_emit() {
     let mut detector = CandidateDetector::new(DetectorConfig::default());
     assert!(detector.observe(qualifying_frame(8), 10_011).is_none());
     assert!(detector.observe(qualifying_frame(8), 10_012).is_none());
@@ -79,4 +79,19 @@ fn short_candidate_uses_mirrored_flow_and_depth_conditions() {
         .observe(frame, 10_012)
         .expect("mirrored short candidate");
     assert_eq!(candidate.side, Side::Short);
+}
+
+#[test]
+fn generation_change_resets_streak_and_allows_sequence_restart_but_rejects_old_generation() {
+    let mut detector = CandidateDetector::new(DetectorConfig::default());
+    assert!(detector.observe(qualifying_frame(8), 10_020).is_none());
+
+    let mut next_generation = qualifying_frame(1);
+    next_generation.generation = 4;
+    assert!(detector.observe(next_generation, 10_012).is_none());
+    let mut confirming = qualifying_frame(2);
+    confirming.generation = 4;
+    assert!(detector.observe(confirming, 10_013).is_some());
+
+    assert!(detector.observe(qualifying_frame(9), 10_021).is_none());
 }

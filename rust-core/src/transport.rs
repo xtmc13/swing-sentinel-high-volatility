@@ -34,6 +34,7 @@ impl CandidateSender {
         }
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            .no_proxy()
             .redirect(Policy::none())
             .build()
             .map_err(|error| error.to_string())?;

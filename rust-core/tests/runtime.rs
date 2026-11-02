@@ -101,3 +101,53 @@ fn runtime_depth_gap_fails_closed_and_requests_resync() {
     assert!(output.frame.is_none());
     assert!(output.candidate.is_none());
 }
+
+#[test]
+fn reconnect_runtime_preserves_supplied_monotonic_generation() {
+    let mut first = SymbolRuntime::new_with_generation("BTCUSDT", DetectorConfig::default(), 8, 41);
+    first.load_snapshot(DepthSnapshot {
+        last_update_id: 100,
+        bids: vec![level(100.4, 14.0)],
+        asks: vec![level(100.6, 6.0)],
+    });
+    let first_frame = first
+        .handle(depth(99, 101, 98, 10_000), 10_001)
+        .frame
+        .unwrap();
+    assert_eq!(first_frame.generation, 41);
+
+    let mut reconnected =
+        SymbolRuntime::new_with_generation("BTCUSDT", DetectorConfig::default(), 8, 42);
+    reconnected.load_snapshot(DepthSnapshot {
+        last_update_id: 200,
+        bids: vec![level(100.4, 14.0)],
+        asks: vec![level(100.6, 6.0)],
+    });
+    let frame = reconnected
+        .handle(depth(199, 201, 198, 10_010), 10_011)
+        .frame
+        .unwrap();
+    assert_eq!(frame.generation, 42);
+    assert!(frame.generation > first_frame.generation);
+}
+
+#[test]
+fn history_overflow_requests_fail_closed_resync() {
+    let mut runtime = runtime(DetectorConfig {
+        max_trade_history: 1,
+        ..DetectorConfig::default()
+    });
+    let trade = PublicEvent::Trade {
+        data: AggTrade {
+            event_time: 10_000,
+            price: 100.0,
+            quantity: 1.0,
+            is_buyer_maker: false,
+        },
+        received_time: 10_001,
+    };
+    assert!(!runtime.handle(trade.clone(), 10_001).resync_required);
+    let output = runtime.handle(trade, 10_001);
+    assert!(output.resync_required);
+    assert!(output.candidate.is_none());
+}

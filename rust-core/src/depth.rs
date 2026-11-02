@@ -91,11 +91,15 @@ pub struct DepthSync {
 
 impl DepthSync {
     pub fn new(max_buffer: usize) -> Self {
+        Self::with_generation(max_buffer, 1)
+    }
+
+    pub fn with_generation(max_buffer: usize, generation: u64) -> Self {
         Self {
             state: SyncState::AwaitingSnapshot,
             buffered: Vec::new(),
             max_buffer: max_buffer.max(1),
-            generation: 1,
+            generation: generation.max(1),
         }
     }
 

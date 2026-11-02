@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
 use tokio::{net::TcpStream, time::timeout};
 use tokio_tungstenite::{
@@ -72,18 +72,7 @@ impl BinancePublicClient {
             .map_err(|error| PublicError(error.to_string()))?
             .error_for_status()
             .map_err(|error| PublicError(error.to_string()))?;
-        if response
-            .content_length()
-            .is_some_and(|size| size > MAX_SNAPSHOT_RESPONSE_BYTES)
-        {
-            return Err(PublicError(
-                "public depth snapshot exceeds response bound".into(),
-            ));
-        }
-        let raw = response
-            .json::<RawSnapshot>()
-            .await
-            .map_err(|error| PublicError(error.to_string()))?;
+        let raw = bounded_json::<RawSnapshot>(response, MAX_SNAPSHOT_RESPONSE_BYTES).await?;
         Ok(DepthSnapshot {
             last_update_id: raw.last_update_id,
             bids: parse_levels(&raw.bids)?,
@@ -125,6 +114,30 @@ impl BinancePublicClient {
             _ => Ok(None),
         }
     }
+}
+
+async fn bounded_json<T: DeserializeOwned>(
+    mut response: reqwest::Response,
+    max_bytes: u64,
+) -> Result<T, PublicError> {
+    if response
+        .content_length()
+        .is_some_and(|size| size > max_bytes)
+    {
+        return Err(PublicError("public response exceeds response bound".into()));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| PublicError(error.to_string()))?
+    {
+        if (body.len() as u64).saturating_add(chunk.len() as u64) > max_bytes {
+            return Err(PublicError("public response exceeds response bound".into()));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|error| PublicError(error.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -306,4 +319,49 @@ fn parse_levels(levels: &[[String; 2]]) -> Result<Vec<DepthLevel>, PublicError> 
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn chunked_unknown_length_snapshot_is_rejected_at_cumulative_byte_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .await
+                .unwrap();
+            let body = br#"{"lastUpdateId":1,"bids":[],"asks":[],"padding":"this-chunked-body-exceeds-the-test-limit"}"#;
+            for chunk in body.chunks(16) {
+                socket
+                    .write_all(format!("{:X}\r\n", chunk.len()).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(chunk).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+            }
+            socket.write_all(b"0\r\n\r\n").await.unwrap();
+        });
+
+        let response = reqwest::get(format!("http://{address}/fapi/v1/depth"))
+            .await
+            .unwrap();
+        assert_eq!(response.content_length(), None);
+        let error = bounded_json::<RawSnapshot>(response, 64)
+            .await
+            .err()
+            .expect("body must be rejected");
+        assert!(
+            error.0.contains("exceeds response bound"),
+            "unexpected error: {error}"
+        );
+        server.await.unwrap();
+    }
 }

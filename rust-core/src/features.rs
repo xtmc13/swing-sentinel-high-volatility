@@ -22,6 +22,7 @@ pub struct FeatureEngine {
     config_hash: String,
     trades: VecDeque<AggTrade>,
     marks: VecDeque<MarkPrice>,
+    history_overflow: bool,
 }
 
 impl FeatureEngine {
@@ -33,6 +34,7 @@ impl FeatureEngine {
             config_hash,
             trades: VecDeque::new(),
             marks: VecDeque::new(),
+            history_overflow: false,
         }
     }
 
@@ -43,14 +45,26 @@ impl FeatureEngine {
             && trade.quantity.is_finite()
             && trade.quantity > 0.0
         {
-            self.trades.push_back(trade);
+            if self.trades.len() >= self.config.max_trade_history {
+                self.history_overflow = true;
+            } else {
+                self.trades.push_back(trade);
+            }
         }
     }
 
     pub fn push_mark(&mut self, mark: MarkPrice) {
         if mark.event_time >= 0 && mark.price.is_finite() && mark.price > 0.0 {
-            self.marks.push_back(mark);
+            if self.marks.len() >= self.config.max_mark_history {
+                self.history_overflow = true;
+            } else {
+                self.marks.push_back(mark);
+            }
         }
+    }
+
+    pub fn history_overflowed(&self) -> bool {
+        self.history_overflow
     }
 
     pub fn build_frame(&mut self, input: FrameInput, now: i64) -> FeatureFrame {
@@ -79,7 +93,9 @@ impl FeatureEngine {
             || now < input.event_time
             || now.saturating_sub(input.event_time) > self.config.max_frame_age_ms
             || now.saturating_sub(input.received_time) > self.config.max_frame_age_ms;
-        let quality = if stale {
+        let quality = if self.history_overflow {
+            MarketQuality::HistoryOverflow
+        } else if stale {
             MarketQuality::Stale
         } else {
             match (input.bid, input.ask, book_metrics) {
@@ -103,7 +119,12 @@ impl FeatureEngine {
             generation: input.generation,
             quality,
             config_hash: self.config_hash.clone(),
-            mark_price: self.marks.back().map(|mark| mark.price),
+            mark_price: self
+                .marks
+                .iter()
+                .rev()
+                .find(|mark| mark.event_time <= input.event_time)
+                .map(|mark| mark.price),
             microprice: book_metrics.map(|metrics| metrics.0),
             spread_bps: book_metrics.map(|metrics| metrics.1),
             depth_imbalance: book_metrics.map(|metrics| metrics.2),

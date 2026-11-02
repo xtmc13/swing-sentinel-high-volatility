@@ -87,3 +87,65 @@ fn one_sided_and_crossed_books_fail_closed() {
         MarketQuality::Crossed
     );
 }
+
+#[test]
+fn trade_and_mark_history_caps_fail_closed_on_overflow() {
+    let config = DetectorConfig {
+        max_trade_history: 1,
+        max_mark_history: 1,
+        ..DetectorConfig::default()
+    };
+    let trade = AggTrade {
+        event_time: 1_000,
+        price: 100.0,
+        quantity: 1.0,
+        is_buyer_maker: false,
+    };
+    let mut trade_engine = FeatureEngine::new("BTCUSDT", config.clone());
+    trade_engine.push_trade(trade);
+    trade_engine.push_trade(trade);
+    assert_eq!(
+        trade_engine.build_frame(input(1_000, 1_001), 1_001).quality,
+        MarketQuality::HistoryOverflow
+    );
+
+    let mark = MarkPrice {
+        event_time: 1_000,
+        price: 100.0,
+    };
+    let mut mark_engine = FeatureEngine::new("BTCUSDT", config);
+    mark_engine.push_mark(mark);
+    mark_engine.push_mark(mark);
+    assert_eq!(
+        mark_engine.build_frame(input(1_000, 1_001), 1_001).quality,
+        MarketQuality::HistoryOverflow
+    );
+}
+
+#[test]
+fn frame_uses_latest_mark_at_or_before_event_time_never_future_mark() {
+    let mut engine = FeatureEngine::new(
+        "BTCUSDT",
+        DetectorConfig {
+            min_history: 2,
+            ..DetectorConfig::default()
+        },
+    );
+    engine.push_mark(MarkPrice {
+        event_time: 900,
+        price: 100.0,
+    });
+    engine.push_mark(MarkPrice {
+        event_time: 1_000,
+        price: 101.0,
+    });
+    engine.push_mark(MarkPrice {
+        event_time: 1_100,
+        price: 999.0,
+    });
+
+    let frame = engine.build_frame(input(1_000, 1_001), 1_001);
+    assert_eq!(frame.quality, MarketQuality::Good);
+    assert_eq!(frame.mark_price, Some(101.0));
+    assert!((frame.short_return.unwrap() - 0.01).abs() < 1e-12);
+}

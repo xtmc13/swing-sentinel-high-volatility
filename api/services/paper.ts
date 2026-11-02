@@ -347,6 +347,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         await dependencies.beforeVolatilityStateLock?.(opportunity.symbol);
         const stateRow = (await tx.select().from(volatilityStates)
           .where(eq(volatilityStates.symbol, opportunity.symbol)).limit(1).for("update"))[0];
+        if (market.sourceGeneration !== preflightSourceGeneration) return { retry: true as const };
         if (!stateRow) return { ok: false as const, reason: "缺少当前波动状态，禁止开仓" };
         const riskPositions: EntryRiskPosition[] = openRows.map((row) => ({
           symbol: row.symbol,

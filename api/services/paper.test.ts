@@ -97,7 +97,7 @@ describe("持仓管理行情新鲜度", () => {
   it("即使原始质量标记有效，也不能绕过基于当前时间的重新校验", () => {
     const oldMark = snapshot({
       bookTime: NOW,
-      markTime: NOW - (DEFAULT_SETTINGS.candleStaleSeconds + 1) * 1000,
+      markTime: NOW - (DEFAULT_SETTINGS.bookStaleSeconds + 1) * 1000,
     });
     expect(oldMark.quality.valid).toBe(true);
     expect(revalidateSnapshot(oldMark, settings, NOW).quality.valid).toBe(false);

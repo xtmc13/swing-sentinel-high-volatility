@@ -550,6 +550,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       return sum + (snapshot.markPrice - row.entryPrice) * row.qty * (row.side === "LONG" ? 1 : -1);
     }, 0) : Number.NaN;
     const dailyBaseline = await db.transaction(async (tx) => {
+      if (market.sourceGeneration !== sourceGeneration) return null;
       const account = (await tx.select().from(simulationAccounts)
         .where(eq(simulationAccounts.id, 1)).limit(1).for("update"))[0];
       if (!account) return null;
@@ -565,7 +566,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       }
       return { dailyLocked: dailyLockDay === baseline.dayKey };
     });
-    if (!dailyBaseline) return;
+    if (!dailyBaseline || market.sourceGeneration !== sourceGeneration) return;
     const dailyLocked = dailyBaseline.dailyLocked;
     for (const row of rows) {
       if (market.sourceGeneration !== sourceGeneration) {
@@ -574,9 +575,13 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       }
       const capturedSnapshot = managementSnapshots.get(row.symbol);
       if (!capturedSnapshot) continue;
+      const state = (await db.select().from(volatilityStates).where(eq(volatilityStates.symbol, row.symbol)).limit(1))[0];
+      if (market.sourceGeneration !== sourceGeneration) {
+        log.warn("market source changed while loading position state; stopping cycle");
+        return;
+      }
       const snapshot = revalidateSnapshot(capturedSnapshot, settings, now());
       if (!snapshot.quality.valid) continue;
-      const state = (await db.select().from(volatilityStates).where(eq(volatilityStates.symbol, row.symbol)).limit(1))[0];
       const mode: VolatilityMode = state?.mode === "HIGH" || state?.mode === "EXTREME" ? state.mode : "NORMAL";
       const managed = managePositionPrice({
         side: row.side as Side,

@@ -267,6 +267,17 @@ export async function loadPortfolioData(
   return Object.fromEntries(entries);
 }
 
+function candlesClosedAt(candles: Candle[], closeTime: number) {
+  let low = 0;
+  let high = candles.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (candles[middle].closeTime <= closeTime) low = middle + 1;
+    else high = middle;
+  }
+  return candles.slice(0, low);
+}
+
 export async function runPortfolioBacktest(
   symbols: string[],
   timeframe: PortfolioTimeframe,
@@ -602,9 +613,9 @@ export async function runPortfolioBacktest(
       const item = data[position.symbol];
       const assessment = evaluateMomentumExhaustion({
         side: position.side,
-        candles15m: item.candles["15m"].filter((bar) => bar.closeTime <= closeTime),
-        candles1h: item.candles["1h"].filter((bar) => bar.closeTime <= closeTime),
-        candles4h: item.candles["4h"].filter((bar) => bar.closeTime <= closeTime),
+        candles15m: candlesClosedAt(item.candles["15m"], closeTime),
+        candles1h: candlesClosedAt(item.candles["1h"], closeTime),
+        candles4h: candlesClosedAt(item.candles["4h"], closeTime),
         now: closeTime,
       });
       if (assessment.protection !== "NONE") momentumExhaustion.push({

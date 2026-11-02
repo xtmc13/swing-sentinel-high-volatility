@@ -520,10 +520,22 @@ export class OrderStateMachine {
   async closePosition(positionId: string): Promise<LiveOrder | null> {
     const position = await this.store.getPosition(positionId);
     if (!position || position.status !== "OPEN" || compareDecimals(position.quantity, "0") <= 0) return null;
+    const clientOrderId = `close-${positionId}`;
+    const reuse = async () => {
+      const existing = await this.store.getOrder(clientOrderId);
+      if (!existing) return null;
+      if (existing.intentId !== positionId || existing.symbol !== position.symbol
+        || existing.type !== "MARKET" || !existing.reduceOnly) {
+        throw new Error("Deterministic close order ownership mismatch");
+      }
+      return existing.status === "PENDING_SEND" ? this.submit(clientOrderId) : existing;
+    };
+    const existing = await reuse();
+    if (existing) return existing;
     const order: LiveOrder = {
       id: this.id(),
       intentId: position.id,
-      clientOrderId: `close-${this.id()}`,
+      clientOrderId,
       exchangeOrderId: null,
       symbol: position.symbol,
       side: position.side,
@@ -538,8 +550,14 @@ export class OrderStateMachine {
       reduceOnly: true,
       createdAt: Date.now(),
     };
-    await this.createOrder(order);
-    return this.submit(order.clientOrderId);
+    try {
+      await this.createOrder(order);
+    } catch (error) {
+      const raced = await reuse();
+      if (!raced) throw error;
+      return raced;
+    }
+    return this.submit(clientOrderId);
   }
 
   async emergency(): Promise<{

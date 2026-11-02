@@ -19,6 +19,7 @@ import type {
   LiveFinalGateResult,
 } from "./livePersistence";
 import { createExecutionCoordinator } from "../services/executionCoordinator";
+import { InMemoryMomentumStateStore } from "../services/momentumState";
 import { InMemoryLiveOrderStore, type LivePositionSeed } from "./orderStateMachine";
 import { createMainnetLiveExecutionAdapter, MainnetLiveExecutionAdapter } from "./liveExecution";
 
@@ -115,6 +116,27 @@ function seedFor(input: CreateLiveIntentInput): LivePositionSeed {
     maintenanceBracket: 1,
     maintMarginRatio: "0.01",
     cumMaintenance: "0",
+  };
+}
+
+function reversalFrame(eventTime: number, sequence: number) {
+  return {
+    symbol: "BTCUSDT",
+    event_time: eventTime,
+    received_time: eventTime + 10,
+    sequence,
+    generation: 4,
+    quality: "GOOD" as const,
+    config_hash: "a".repeat(64),
+    mark_price: 99.99,
+    microprice: 99.99,
+    spread_bps: 1,
+    depth_imbalance: -0.2,
+    aggressive_buy_volume: 1,
+    aggressive_sell_volume: 3,
+    short_return: -0.001,
+    burst_z: 2.5,
+    realized_volatility: 0.02,
   };
 }
 
@@ -430,6 +452,90 @@ describe("mainnet live execution adapter", () => {
     expect(result.unsettled).toBe(true);
     expect(h.gateway.placed.length).toBe(beforeClose + 1);
     expect(h.gateway.placed.at(-1)).toMatchObject({ type: "MARKET", reduceOnly: true, side: "SELL" });
+  });
+
+  it("lease takeover during an in-flight close reuses one exchange order", async () => {
+    const h = setup();
+    await h.adapter.open(opportunity);
+    const positionId = h.created[0].id;
+    await h.adapter.handleFill(`${positionId}-entry`, {
+      exchangeTradeId: "takeover-fill",
+      exchangeOrderId: "500",
+      symbol: "BTCUSDT",
+      side: "BUY",
+      price: "100",
+      quantity: "2",
+      commission: "0.1",
+      commissionAsset: "USDT",
+      realizedPnl: "0",
+      isMaker: false,
+      executedAt: 10,
+    }, seedFor(h.created[0]));
+    const secondAdapter = new MainnetLiveExecutionAdapter({
+      ...h,
+      workerId: "worker-b",
+      prepareIntent: () => { throw new Error("not used by close takeover"); },
+      finalGate: () => { throw new Error("not used by close takeover"); },
+    });
+    const momentumStore = new InMemoryMomentumStateStore();
+    let now = 1_800_000_001_000;
+    const settings: TradingSettings = {
+      ...DEFAULT_SETTINGS,
+      executionMode: "LIVE_MAINNET",
+      autoTrade: true,
+      momentumEnabled: true,
+      strategyMode: "MOMENTUM",
+    };
+    const coordinatorFor = (adapter: MainnetLiveExecutionAdapter) => createExecutionCoordinator({
+      live: adapter,
+      getSettings: async () => settings,
+      momentumStore,
+      now: () => now,
+    });
+    const first = coordinatorFor(h.adapter);
+    const second = coordinatorFor(secondAdapter);
+    let markCloseStarted!: () => void;
+    let releaseClose!: () => void;
+    const closeStarted = new Promise<void>((resolve) => { markCloseStarted = resolve; });
+    const closeRelease = new Promise<void>((resolve) => { releaseClose = resolve; });
+    h.gateway.placeOrder = async (request) => {
+      h.gateway.placed.push(request);
+      expect(request.type).toBe("MARKET");
+      markCloseStarted();
+      await closeRelease;
+      return {
+        symbol: request.symbol,
+        orderId: 900,
+        clientOrderId: request.newClientOrderId ?? "close",
+        price: "0",
+        origQty: request.quantity,
+        executedQty: "0",
+        status: "NEW",
+        side: request.side,
+        type: request.type,
+        reduceOnly: request.reduceOnly,
+      };
+    };
+    const claim = momentumStore.claimExit.bind(momentumStore);
+    let markTakeover!: () => void;
+    const takeover = new Promise<void>((resolve) => { markTakeover = resolve; });
+    momentumStore.claimExit = async (...args) => {
+      const claimed = await claim(...args);
+      if (claimed && args[4] > 1_800_000_001_000) markTakeover();
+      return claimed;
+    };
+
+    const firstExit = first.receiveMomentumFrame(reversalFrame(now - 10, 1));
+    await closeStarted;
+    now += 5_001;
+    const secondExit = second.receiveMomentumFrame(reversalFrame(now - 10, 2));
+    await takeover;
+    await new Promise((resolve) => setImmediate(resolve));
+    releaseClose();
+    await Promise.all([firstExit, secondExit]);
+
+    expect(h.gateway.placed.filter((request) => request.type === "MARKET")).toHaveLength(1);
+    expect((await h.store.listOrders()).filter((order) => order.type === "MARKET" && order.reduceOnly)).toHaveLength(1);
   });
 
   it("live emergency pauses auto trading and paper reset is disabled", async () => {

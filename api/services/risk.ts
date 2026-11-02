@@ -154,13 +154,10 @@ export function portfolioRisk(input: PortfolioRiskInput): PortfolioRiskResult {
     const breakeven = position.side === "LONG"
       ? position.stopPrice >= position.entryPrice
       : position.stopPrice <= position.entryPrice;
-    // A breakeven-or-better stop removes price-loss exposure only while price remains on its safe side.
-    // If mark has already crossed the stop, count the loss from entry to current mark (gap-through risk).
-    // Always reserve stop-exit taker fees and adverse slippage, including after moving to breakeven.
-    const stopBreached = (position.markPrice - position.stopPrice) * direction <= 0;
-    const adverseDistance = stopBreached
-      ? Math.max(0, (position.entryPrice - position.markPrice) * direction)
-      : Math.max(0, (position.markPrice - position.stopPrice) * direction);
+    // Risk here is the remaining mark-to-stop exposure; unrealized PnL is already reflected in equity.
+    // A breached stop therefore has no remaining price distance, but still incurs stop-exit costs.
+    // A breakeven-or-better stop removes price-loss exposure, not the cost of executing the stop.
+    const adverseDistance = Math.max(0, (position.markPrice - position.stopPrice) * direction);
     const exitCost = position.stopPrice * (input.takerFeeBps + input.slippageBps) / 10_000;
     const risk = Math.max(0, position.qty * (adverseDistance + exitCost));
     if (!Number.isFinite(risk)) reasons.push(`${position.symbol}持仓风险贡献无效`);

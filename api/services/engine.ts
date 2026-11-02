@@ -481,10 +481,10 @@ export class TradingEngine {
     }
   }
 
-  async engineState(): Promise<EngineState> {
+  async engineState(snapshot?: AccountSnapshot): Promise<EngineState> {
     if (!this.sourceHealthy()) return "DEGRADED";
     const settings = await this.deps.getSettings();
-    const account = await this.deps.getAccountSnapshot();
+    const account = snapshot ?? await this.deps.getAccountSnapshot();
     if (!account.valuationValid) return "DEGRADED";
     if (account.dailyLocked || account.todayPnlPct <= -settings.dailyLossLimitPct) return "LOCKED";
     if (!settings.autoTrade) return "PAUSED";

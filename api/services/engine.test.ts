@@ -252,6 +252,14 @@ async function settle() {
 }
 
 describe("三态引擎编排", () => {
+  it("引擎状态复用已估值账户快照而不重复请求", async () => {
+    const getAccountSnapshot = vi.fn(async () => account);
+    const h = harness({ dependencies: { getAccountSnapshot } });
+
+    await expect(h.engine.engineState(account)).resolves.toBe("PAUSED");
+    expect(getAccountSnapshot).not.toHaveBeenCalled();
+  });
+
   it("NORMAL 只在 45 秒正式扫描生成并执行新信号，不因风险 tick 加速开仓", async () => {
     const h = harness({ settings: { autoTrade: true } });
     await h.engine.tick();

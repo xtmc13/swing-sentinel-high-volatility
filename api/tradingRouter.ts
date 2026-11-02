@@ -5,11 +5,11 @@ import { adminQuery } from "./admin";
 import { engine } from "./services/engine";
 import { binance } from "./services/binance";
 import {
-  getSettings, getAccount, saveSettings, getOpenPositions, getRecentTrades,
+  getSettings, getAccount, saveSettings, getRecentTrades,
   getRecentOrders, getRecentEvents, getEquityHistory,
 } from "./queries/trading";
 import {
-  getAccountSnapshot, toPositionView, toTradeView, calculatePerformance,
+  getAccountSnapshotWithPositions, toTradeView, calculatePerformance,
   closePaperPosition, emergencyStop, resetPaperSimulation,
 } from "./services/paper";
 import { getDb } from "./queries/connection";
@@ -58,12 +58,11 @@ export const settingsInput = z.object({
 
 async function dashboard(): Promise<DashboardData> {
   if (!engine.markets.length) await engine.refreshMarkets();
-  const [settings, openRows, tradeRows, orderRows, eventRows, equityRows, account, initialAccount] = await Promise.all([
-    getSettings(), getOpenPositions(), getRecentTrades(), getRecentOrders(),
-    getRecentEvents(), getEquityHistory(), getAccountSnapshot(), getAccount(),
+  const [settings, tradeRows, orderRows, eventRows, equityRows, snapshot, initialAccount] = await Promise.all([
+    getSettings(), getRecentTrades(), getRecentOrders(),
+    getRecentEvents(), getEquityHistory(), getAccountSnapshotWithPositions(), getAccount(),
   ]);
-  const marketMap = new Map(engine.markets.map((market) => [market.symbol, market]));
-  const positions = openRows.map((row) => toPositionView(row, marketMap.get(row.symbol)));
+  const { account, positions } = snapshot;
   const observability = engine.getDashboardObservability();
   const currentPortfolioRisk = portfolioRisk({
     equity: account.equity,
@@ -78,7 +77,7 @@ async function dashboard(): Promise<DashboardData> {
     source: binance.dataSource,
     sourceLabel: binance.sourceLabel,
     connected: binance.isConnected,
-    engineState: await engine.engineState(),
+    engineState: await engine.engineState(account),
     lastScanAt: engine.lastScanAt,
     account,
     settings,

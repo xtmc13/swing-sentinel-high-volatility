@@ -183,7 +183,7 @@ export function portfolioRisk(input: PortfolioRiskInput): PortfolioRiskResult {
     reasons,
     positions,
     totalRisk,
-    totalRiskPct: input.equity > 0 ? totalRisk / input.equity * 100 : Number.POSITIVE_INFINITY,
+    totalRiskPct: Number.isFinite(input.equity) && input.equity > 0 ? totalRisk / input.equity * 100 : Number.NaN,
     totalLimit,
     remainingTotalRisk: Math.max(0, totalLimit - totalRisk),
     correlatedRisk,

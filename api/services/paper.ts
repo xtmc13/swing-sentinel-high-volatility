@@ -85,9 +85,13 @@ async function rollUtcDayBaseline(
   return { dayKey, dayStartEquity, dailyLockDay: null };
 }
 
-export async function getAccountSnapshot(rows?: PositionRow[]): Promise<AccountSnapshot> {
-  const [openRows, settings] = await Promise.all([rows ? Promise.resolve(rows) : getOpenPositions(), getSettings()]);
-  const valued = await Promise.all(openRows.map(async (row) => {
+export interface PositionValuation {
+  view: PositionView;
+  issue: string | null;
+}
+
+export async function getPositionValuations(rows: PositionRow[]): Promise<PositionValuation[]> {
+  return Promise.all(rows.map(async (row) => {
     try {
       const snapshot = await binance.getMarketSnapshot(row.symbol);
       return {
@@ -98,6 +102,11 @@ export async function getAccountSnapshot(rows?: PositionRow[]): Promise<AccountS
       return { view: toPositionView(row), issue: `${row.symbol}：${error instanceof Error ? error.message : String(error)}` };
     }
   }));
+}
+
+export async function getAccountSnapshot(rows?: PositionRow[], valuations?: PositionValuation[]): Promise<AccountSnapshot> {
+  const [openRows, settings] = await Promise.all([rows ? Promise.resolve(rows) : getOpenPositions(), getSettings()]);
+  const valued = valuations ?? await getPositionValuations(openRows);
   const valuationValid = valued.every((item) => item.view.valuationValid);
   const valuationIssues = valued.flatMap((item) => item.issue ? [item.issue] : []);
   const unrealizedPnl = valuationValid ? valued.reduce((sum, item) => sum + item.view.unrealizedPnl, 0) : Number.NaN;
@@ -133,6 +142,13 @@ export async function getAccountSnapshot(rows?: PositionRow[]): Promise<AccountS
     valuationIssues,
     dailyLocked,
   };
+}
+
+export async function getAccountSnapshotWithPositions(rows?: PositionRow[]) {
+  const openRows = rows ?? await getOpenPositions();
+  const valuations = await getPositionValuations(openRows);
+  const account = await getAccountSnapshot(openRows, valuations);
+  return { account, positions: valuations.map((valuation) => valuation.view) };
 }
 
 export function calculatePerformance(trades: TradeRow[], initialEquity = 100000): PerformanceMetrics {

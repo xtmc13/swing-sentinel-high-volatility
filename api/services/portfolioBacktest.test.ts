@@ -427,15 +427,19 @@ describe("Task 6 评审回归：现金费用、SHORT 与跨日日损", () => {
     expect(result.finalEquity).toBeCloseTo(1003.596, 10);
   });
 
-  it("23:55 触发的日损锁在 00:00 先强制退出再允许新日开仓", async () => {
+  it("23:59 触发的日损锁在 00:00 重置，不错误退出旧持仓且允许新日开仓", async () => {
     const bars = candles([
       [100, 101, 99, 100],
       [100, 101, 96, 97],
       [97, 98, 96, 97],
       [97, 98, 96, 97],
-    ]).map((bar) => ({ ...bar, time: bar.time + 85_800, closeTime: bar.closeTime + 85_800_000 }));
+    ]).map((bar) => ({ ...bar, time: bar.time + 86_040, closeTime: bar.closeTime + 86_040_000 }));
+    const btc = data("BTCUSDT", bars);
+    const eth = data("ETHUSDT", bars);
+    btc.candles["15m"] = trendingCandles([100, 101, 100, 101, 100, 101]);
+    eth.candles["15m"] = trendingCandles([100, 101, 100, 101, 100, 101]);
     const result = await run({
-      data: { BTCUSDT: data("BTCUSDT", bars), ETHUSDT: data("ETHUSDT", bars) },
+      data: { BTCUSDT: btc, ETHUSDT: eth },
       settings: settings({ riskPerTradePct: 5, portfolioStopRiskPct: 100, correlatedDirectionRiskPct: 100 }),
       signals: {
         BTCUSDT: { [bars[0].closeTime]: { side: "LONG" } },
@@ -444,8 +448,7 @@ describe("Task 6 评审回归：现金费用、SHORT 与跨日日损", () => {
     });
 
     expect(result.tradesBySymbol.BTCUSDT).toHaveLength(1);
-    expect(result.tradesBySymbol.BTCUSDT[0]).toMatchObject({ exitPrice: 97, exitReason: "日损熔断退出" });
-    expect(result.tradesBySymbol.BTCUSDT[0].closedAt).toBe(new Date(bars[2].time * 1000).toISOString());
+    expect(result.tradesBySymbol.BTCUSDT[0].exitReason).not.toBe("日损熔断退出");
     expect(result.tradesBySymbol.ETHUSDT).toHaveLength(1);
     expect(result.tradesBySymbol.ETHUSDT[0].openedAt).toBe(new Date(bars[2].time * 1000).toISOString());
   });

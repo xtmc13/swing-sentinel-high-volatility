@@ -399,6 +399,7 @@ export async function runPortfolioBacktest(
     if (newDay) {
       currentDay = dayKey(openTime);
       dayStartEquity = equityAt((position) => currentBars.get(position.symbol)!.open);
+      dailyLossLocked = false;
     }
 
     if (dailyLossLocked) {
@@ -406,7 +407,6 @@ export async function runPortfolioBacktest(
         closePosition(position, currentBars.get(position.symbol)!.open, openTime, "日损熔断退出");
       }
     }
-    if (newDay) dailyLossLocked = false;
 
     for (const symbol of symbols) {
       const opportunity = pending.get(symbol);

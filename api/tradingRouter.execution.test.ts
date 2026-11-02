@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   emergency: vi.fn(async () => ({ ok: true, paused: true as const, settled: [], unsettled: [] })),
   paperClose: vi.fn(),
   paperEmergency: vi.fn(),
+  paperReset: vi.fn(async () => ({ ok: true, paused: true as const, settled: [], unsettled: [] })),
   saveSettings: vi.fn(async () => undefined),
   getSettings: vi.fn(async () => ({ ...DEFAULT_SETTINGS })),
 }));
@@ -40,6 +41,7 @@ vi.mock("./services/paper", async (importOriginal) => ({
   ...await importOriginal<typeof import("./services/paper")>(),
   closePaperPosition: mocks.paperClose,
   emergencyStop: mocks.paperEmergency,
+  resetPaperSimulation: mocks.paperReset,
 }));
 
 vi.mock("./services/binance", () => ({
@@ -144,5 +146,15 @@ describe("统一执行管理入口", () => {
       strategyMode: "BOTH",
       momentumEnabled: true,
     }));
+  });
+
+  it("LIVE_MAINNET 禁止 paper reset，PAPER 行为保持不变", async () => {
+    mocks.paperReset.mockClear();
+    await expect(caller().reset()).resolves.toMatchObject({ ok: true });
+    expect(mocks.paperReset).toHaveBeenCalledTimes(1);
+
+    mocks.getSettings.mockResolvedValueOnce({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" });
+    await expect(caller().reset()).rejects.toThrow("禁止 paper reset");
+    expect(mocks.paperReset).toHaveBeenCalledTimes(1);
   });
 });

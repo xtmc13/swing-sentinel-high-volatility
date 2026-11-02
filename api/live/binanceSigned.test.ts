@@ -304,13 +304,67 @@ describe("Binance signed mainnet client", () => {
     expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method, headers: { "X-MBX-APIKEY": "test-key" } });
   });
 
-  it("exposes only type-level order and cancel scaffolding", () => {
+  it("submits signed IOC orders without automatic retries and preserves decimal parameters", async () => {
+    const acknowledgement = {
+      symbol: "BTCUSDT", orderId: 123, clientOrderId: "entry-1", price: "67000.100000000000000001",
+      origQty: "0.000000000000000003", executedQty: "0", status: "NEW", side: "BUY", type: "LIMIT",
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ serverTime: NOW }))
+      .mockResolvedValueOnce(jsonResponse(acknowledgement));
+    const client = clientWith(fetchMock);
+
+    await expect(client.placeOrder({
+      symbol: "BTCUSDT", side: "BUY", type: "LIMIT", quantity: "0.000000000000000003",
+      price: "67000.100000000000000001", timeInForce: "IOC", newClientOrderId: "entry-1",
+    })).resolves.toEqual(acknowledgement);
+    const url = requestUrl(fetchMock, 1);
+    expect(url.pathname).toBe("/fapi/v1/order");
+    expect(url.searchParams.get("price")).toBe("67000.100000000000000001");
+    expect(url.searchParams.get("quantity")).toBe("0.000000000000000003");
+    expect(url.searchParams.get("timeInForce")).toBe("IOC");
+    expect(fetchMock.mock.calls[1]![1]).toMatchObject({ method: "POST", headers: { "X-MBX-APIKEY": "test-key" } });
+  });
+
+  it("never retries a timed-out or rate-limited order submission", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ serverTime: NOW }))
+      .mockResolvedValueOnce(jsonResponse({ code: -1003 }, { status: 429, headers: { "Retry-After": "0" } }));
+    const client = clientWith(fetchMock);
+
+    await expect(client.placeOrder({ symbol: "BTCUSDT", side: "BUY", type: "MARKET", quantity: "1" }))
+      .rejects.toMatchObject({ status: 429 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels and queries orders through signed endpoints; unknown query orders return null", async () => {
+    const cancelled = {
+      symbol: "BTCUSDT", orderId: 123, clientOrderId: "entry-1", price: "100", origQty: "1",
+      executedQty: "0", status: "CANCELED", side: "BUY", type: "LIMIT",
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ serverTime: NOW }))
+      .mockResolvedValueOnce(jsonResponse(cancelled))
+      .mockResolvedValueOnce(jsonResponse(cancelled))
+      .mockResolvedValueOnce(jsonResponse({ code: -2011 }, { status: 400 }));
+    const client = clientWith(fetchMock);
+
+    await expect(client.cancelOrder({ symbol: "BTCUSDT", origClientOrderId: "entry-1" })).resolves.toEqual(cancelled);
+    await expect(client.queryOrder({ symbol: "BTCUSDT", origClientOrderId: "entry-1" })).resolves.toEqual(cancelled);
+    await expect(client.queryOrder({ symbol: "BTCUSDT", origClientOrderId: "missing" })).resolves.toBeNull();
+    expect(fetchMock.mock.calls[1]![1]).toMatchObject({ method: "DELETE" });
+    expect(fetchMock.mock.calls[2]![1]).toMatchObject({ method: "GET" });
+    expect(requestUrl(fetchMock, 1).pathname).toBe("/fapi/v1/order");
+    expect(requestUrl(fetchMock, 2).pathname).toBe("/fapi/v1/order");
+  });
+
+  it("keeps the gateway fake-transport friendly", () => {
     const gateway: LiveOrderGateway = {
       placeOrder: async (request) => ({ quantity: request.quantity }),
       cancelOrder: async (request) => ({ symbol: request.symbol }),
+      queryOrder: async () => null,
+      userTrades: async () => [],
     };
-    expect("placeOrder" in new BinanceSignedClient({ ...credentials, fetch: vi.fn() })).toBe(false);
-    expect("cancelOrder" in new BinanceSignedClient({ ...credentials, fetch: vi.fn() })).toBe(false);
     expect(gateway).toBeDefined();
   });
 });

@@ -133,7 +133,10 @@ export const tradingRouter = createRouter({
   }),
   closePosition: adminQuery.input(z.object({ positionId: z.string().uuid() })).mutation(({ input }) => executionCoordinator.close(input.positionId)),
   emergencyStop: adminQuery.mutation(() => executionCoordinator.emergency()),
-  reset: adminQuery.mutation(() => resetPaperSimulation()),
+  reset: adminQuery.mutation(async () => {
+    if ((await getSettings()).executionMode === "LIVE_MAINNET") throw new Error("LIVE_MAINNET 禁止 paper reset");
+    return resetPaperSimulation();
+  }),
   runBacktest: adminQuery.input(z.object({
     symbol: z.string().regex(/^[A-Z0-9]{5,20}$/),
     timeframe: z.enum(["5m", "15m"]),

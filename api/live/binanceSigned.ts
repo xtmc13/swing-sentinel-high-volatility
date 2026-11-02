@@ -174,6 +174,8 @@ export interface CancelOrderRequest {
 export interface LiveOrderGateway {
   placeOrder(request: PlaceOrderRequest): Promise<unknown>;
   cancelOrder(request: CancelOrderRequest): Promise<unknown>;
+  queryOrder(request: CancelOrderRequest): Promise<BinanceOpenOrder | null>;
+  userTrades(params: UserTradesParams): Promise<BinanceUserTrade[]>;
 }
 
 export class BinanceSignedClient {
@@ -243,6 +245,26 @@ export class BinanceSignedClient {
 
   openOrders(symbol?: string): Promise<BinanceOpenOrder[]> {
     return this.signedRequest("GET", "/fapi/v1/openOrders", { symbol });
+  }
+
+  async placeOrder(request: PlaceOrderRequest): Promise<BinanceOpenOrder> {
+    await this.ensureServerTime();
+    return this.perform("POST", "/fapi/v1/order", { ...request }, true, true, 0);
+  }
+
+  async cancelOrder(request: CancelOrderRequest): Promise<BinanceOpenOrder> {
+    await this.ensureServerTime();
+    return this.perform("DELETE", "/fapi/v1/order", { ...request }, true, true, 0);
+  }
+
+  async queryOrder(request: CancelOrderRequest): Promise<BinanceOpenOrder | null> {
+    await this.ensureServerTime();
+    try {
+      return await this.perform("GET", "/fapi/v1/order", { ...request }, true, true, 0);
+    } catch (error) {
+      if (error instanceof BinanceSignedError && error.code === -2011) return null;
+      throw error;
+    }
   }
 
   private validateSignedNumericParams(params: UserTradesParams | IncomeParams): void {

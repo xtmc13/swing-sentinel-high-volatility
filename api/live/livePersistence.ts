@@ -184,6 +184,7 @@ export async function claimLiveIntent(
   input: ClaimLiveIntentInput,
   _options: { now?: () => number } = {},
 ): Promise<ClaimLiveIntentResult> {
+  void _options;
   if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1
     || !validLease(input.workerId, input.leaseDurationMs)) {
     return { ok: false, reason: "版本或 worker lease 无效" };

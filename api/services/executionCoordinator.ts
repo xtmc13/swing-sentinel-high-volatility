@@ -25,7 +25,8 @@ import {
 export type OpenExecutionResult =
   | { ok: true; positionId: string; reason: string }
   | { ok: false; reason: string };
-export type CloseExecutionResult = Awaited<ReturnType<typeof closePaperPosition>>;
+export type CloseExecutionResult = Awaited<ReturnType<typeof closePaperPosition>>
+  | { ok: true; reason: string; pnl: number; unsettled: true; alreadyClosed: false };
 export type EmergencyExecutionResult = Awaited<ReturnType<typeof emergencyStop>>;
 
 export interface ExecutionSnapshot {

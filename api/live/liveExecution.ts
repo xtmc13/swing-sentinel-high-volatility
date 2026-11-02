@@ -1,0 +1,242 @@
+import { eq } from "drizzle-orm";
+import type { AccountSnapshot, Opportunity, PositionView } from "@contracts/trading";
+import { tradingSettings } from "@db/schema";
+import type { BinanceAccountResponse, LiveOrderGateway } from "./binanceSigned";
+import { divideDecimals, multiplyDecimals, subtractDecimals, type DecimalString } from "./decimal";
+import {
+  claimLiveIntent,
+  createLiveIntent,
+  type ClaimLiveIntentInput,
+  type ClaimLiveIntentResult,
+  type CreateLiveIntentInput,
+  type CreateLiveIntentOptions,
+  type CreateLiveIntentResult,
+  type LiveDatabase,
+  type LiveFinalGateResult,
+  type LiveTransaction,
+} from "./livePersistence";
+import {
+  OrderStateMachine,
+  type LiveFill,
+  type LiveOrderStore,
+  type LivePosition,
+  type LivePositionSeed,
+} from "./orderStateMachine";
+import type {
+  CloseExecutionResult,
+  EmergencyExecutionResult,
+  ExecutionAdapter,
+  ExecutionSnapshot,
+  OpenExecutionResult,
+} from "../services/executionCoordinator";
+
+export type PrepareLiveIntent = (
+  opportunity: Opportunity,
+) => Omit<CreateLiveIntentInput, "id" | "workerId">;
+
+export interface MainnetLiveExecutionDependencies {
+  store: LiveOrderStore;
+  gateway: LiveOrderGateway & { account(): Promise<BinanceAccountResponse> };
+  workerId: string;
+  createIntent: (
+    input: CreateLiveIntentInput,
+    options: CreateLiveIntentOptions,
+  ) => Promise<CreateLiveIntentResult>;
+  claimIntent: (input: ClaimLiveIntentInput) => Promise<ClaimLiveIntentResult>;
+  prepareIntent: PrepareLiveIntent;
+  finalGate: (
+    opportunity: Opportunity,
+    input: CreateLiveIntentInput,
+    tx: LiveTransaction,
+  ) => LiveFinalGateResult | Promise<LiveFinalGateResult>;
+  pauseAutoTrade?: () => Promise<void>;
+  alert?: (message: string) => unknown;
+  now?: () => number;
+  id?: () => string;
+}
+
+export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
+  readonly machine: OrderStateMachine;
+  private readonly now: () => number;
+  private readonly id: () => string;
+
+  constructor(private readonly dependencies: MainnetLiveExecutionDependencies) {
+    this.now = dependencies.now ?? Date.now;
+    this.id = dependencies.id ?? (() => crypto.randomUUID());
+    this.machine = new OrderStateMachine(dependencies.store, dependencies.gateway, {
+      alert: dependencies.alert,
+      id: this.id,
+    });
+  }
+
+  async open(opportunity: Opportunity, executionHealthy?: () => boolean): Promise<OpenExecutionResult> {
+    if (executionHealthy && !executionHealthy()) return { ok: false, reason: "实时执行健康检查未通过" };
+    const input: CreateLiveIntentInput = {
+      ...this.dependencies.prepareIntent(opportunity),
+      id: this.id(),
+      workerId: this.dependencies.workerId,
+    };
+    const approvals: Extract<LiveFinalGateResult, { approved: true }>[] = [];
+    const created = await this.dependencies.createIntent(input, {
+      finalGate: async (tx) => {
+        const approval = await this.dependencies.finalGate(opportunity, input, tx);
+        if (approval.approved) approvals.push(approval);
+        return approval;
+      },
+    });
+    if (!created.ok) return { ok: false, reason: created.reason };
+    const approval = approvals[0];
+    if (!approval) return { ok: false, reason: "final gate 未返回已持久化的批准值" };
+    const claimed = await this.dependencies.claimIntent({
+      id: input.id,
+      workerId: this.dependencies.workerId,
+      expectedVersion: created.version,
+      leaseDurationMs: input.leaseDurationMs,
+    });
+    if (!claimed.ok) return { ok: false, reason: claimed.reason };
+
+    const clientOrderId = `${input.id}-entry`;
+    await this.machine.createOrder({
+      id: this.id(),
+      intentId: input.id,
+      clientOrderId,
+      exchangeOrderId: null,
+      symbol: input.symbol,
+      side: input.side,
+      type: "LIMIT",
+      status: "PENDING_SEND",
+      price: input.limitPrice,
+      stopPrice: null,
+      originalQuantity: approval.quantity,
+      executedQuantity: "0",
+      averagePrice: "0",
+      commission: "0",
+      reduceOnly: false,
+      createdAt: this.now(),
+    });
+    const submitted = await this.machine.submit(clientOrderId);
+    if (submitted.status === "UNKNOWN") {
+      return { ok: false, reason: "订单提交结果 UNKNOWN；必须先对账，禁止盲目重试" };
+    }
+    return { ok: true, positionId: input.id, reason: "live IOC 已提交，等待实际成交回报" };
+  }
+
+  handleFill(clientOrderId: string, fill: LiveFill, seed: LivePositionSeed) {
+    return this.machine.handleFill(clientOrderId, fill, seed);
+  }
+
+  recover(clientOrderId: string, seed: LivePositionSeed) {
+    return this.machine.recover(clientOrderId, seed);
+  }
+
+  replaceOrder(clientOrderId: string, newLimitPrice: DecimalString) {
+    return this.machine.replaceOrder(clientOrderId, newLimitPrice);
+  }
+
+  async close(positionId: string, reason = "人工平仓"): Promise<CloseExecutionResult> {
+    const order = await this.machine.closePosition(positionId);
+    if (!order) {
+      return { ok: false, reason: "真实持仓不存在或已关闭", unsettled: false, alreadyClosed: true, pnl: undefined };
+    }
+    if (order.status === "UNKNOWN") {
+      return { ok: false, reason: "reduceOnly 平仓结果 UNKNOWN，必须先对账", unsettled: true, alreadyClosed: false };
+    }
+    return { ok: true, reason: `${reason}：reduceOnly 已提交，等待实际成交`, pnl: Number.NaN, unsettled: true, alreadyClosed: false };
+  }
+
+  async manage(): Promise<void> {
+    return undefined;
+  }
+
+  async emergency(): Promise<EmergencyExecutionResult> {
+    await this.dependencies.pauseAutoTrade?.();
+    const result = await this.machine.emergency();
+    return { ok: result.unsettled.length === 0, paused: true, settled: [], unsettled: result.unsettled };
+  }
+
+  async account(): Promise<AccountSnapshot> {
+    const response = await this.dependencies.gateway.account();
+    const asset = response.assets.find((candidate) => candidate.asset === "USDT");
+    if (!asset) throw new Error("签名账户缺少 USDT 余额");
+    const equity = Number(asset.walletBalance);
+    const availableMargin = Number(asset.availableBalance);
+    if (!Number.isFinite(equity) || !Number.isFinite(availableMargin)) throw new Error("签名账户余额无效");
+    return {
+      equity,
+      cash: equity,
+      availableMargin,
+      usedMargin: Math.max(0, equity - availableMargin),
+      unrealizedPnl: 0,
+      realizedPnl: 0,
+      todayPnl: 0,
+      todayPnlPct: 0,
+      dayStartEquity: equity,
+      valuationValid: true,
+      valuationIssues: [],
+      dailyLocked: false,
+    };
+  }
+
+  async positions(): Promise<PositionView[]> {
+    const positions = await this.dependencies.store.listOpenPositions();
+    return positions.map((position) => this.positionView(position));
+  }
+
+  async snapshot(): Promise<ExecutionSnapshot> {
+    const [account, positions] = await Promise.all([this.account(), this.positions()]);
+    return { account, positions };
+  }
+
+  async resetPaperSimulation(): Promise<never> {
+    throw new Error("LIVE_MAINNET 禁止 paper reset");
+  }
+
+  private positionView(position: LivePosition): PositionView {
+    const quantity = Number(position.quantity);
+    const entryPrice = Number(position.entryPrice);
+    const markPrice = Number(position.markPrice);
+    const direction = position.side === "LONG" ? 1 : -1;
+    const unrealizedPnl = direction * quantity * (markPrice - entryPrice);
+    const margin = Number(divideDecimals(
+      multiplyDecimals(position.quantity, position.entryPrice),
+      position.leverage,
+      { decimalPlaces: 30, roundingMode: "ROUND_DOWN" },
+    ));
+    const stopDistance = Number(subtractDecimals(entryPrice.toString(), position.stopPrice));
+    const initialRisk = Math.abs(Number(position.initialQuantity) * stopDistance);
+    return {
+      id: position.id,
+      symbol: position.symbol,
+      side: position.side,
+      qty: quantity,
+      initialQty: Number(position.initialQuantity),
+      entryPrice,
+      markPrice,
+      stopPrice: Number(position.stopPrice),
+      targetPrice: 0,
+      liquidationPrice: Number(position.liquidationPrice),
+      leverage: Number(position.leverage),
+      margin,
+      unrealizedPnl,
+      unrealizedPct: margin > 0 ? unrealizedPnl / margin * 100 : 0,
+      realizedPnl: 0,
+      openedAt: new Date(position.openedAt).toISOString(),
+      holdingMinutes: Math.max(0, (this.now() - position.openedAt) / 60_000),
+      rMultiple: initialRisk > 0 ? unrealizedPnl / initialRisk : 0,
+      valuationValid: Number.isFinite(unrealizedPnl),
+    };
+  }
+}
+
+export function createMainnetLiveExecutionAdapter(
+  dependencies: Omit<MainnetLiveExecutionDependencies, "createIntent" | "claimIntent"> & { db: LiveDatabase },
+): MainnetLiveExecutionAdapter {
+  return new MainnetLiveExecutionAdapter({
+    ...dependencies,
+    createIntent: (input, options) => createLiveIntent(dependencies.db, input, options),
+    claimIntent: (input) => claimLiveIntent(dependencies.db, input),
+    pauseAutoTrade: dependencies.pauseAutoTrade ?? (async () => {
+      await dependencies.db.update(tradingSettings).set({ autoTrade: false }).where(eq(tradingSettings.id, 1));
+    }),
+  });
+}

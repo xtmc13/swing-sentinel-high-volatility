@@ -107,3 +107,21 @@
 - `npm run check`：exit 0；`npm run lint`：exit 0。
 - `git diff --check` 与 staged diff check：exit 0。
 - 本轮无 schema/Rust 修改；真实 DB integration 继续按授权边界 skipped。
+
+
+## Review fix round 4
+
+代码/测试提交 SHA：`2a83e10bf9edac3bb6e9f97267a62e3a976909c1`（`fix: resume persisted pending momentum closes`）。报告更新单独提交；未 push，未使用真实凭据、真实订单、preview DB/server 或真实交易调用。
+
+### RED / GREEN
+
+- 插入后 crash RED：实际 coordinator、live adapter 与 `DrizzleMomentumStateStore` 共享 fake DB/store/gateway；首笔 reduceOnly MARKET close 持久化为 PENDING_SEND 后、transport 前模拟进程中断。过期 claim 恢复时旧 guard 因已有 close 直接拒绝，MARKET 请求为 0，用例按预期失败（1 failed，其余 13 passed）。
+- GREEN：LIVE claim 仅在 lease 已过期且唯一已有 close 同时满足确定性 `close-${positionId}`、匹配 intent/symbol、reduceOnly MARKET、PENDING_SEND 时放行，由 adapter 恢复原单。恢复提交处于 SUBMITTING 时以及成为 NEW 后，后续过期接管均不换 claim、不新增订单或请求；最终始终一笔 close order、一次 MARKET 请求。Paper 已有 CLOSE 的抑制逻辑不变。
+
+### Final verification
+
+- Focused liveExecution + orderStateMachine + executionCoordinator：**59 passed，0 failed**。
+- `npm test`：38 files passed，4 skipped；**371 passed，53 skipped，0 failed**。
+- `npm run check`：exit 0；`npm run lint`：exit 0。
+- `git diff --check` 与 staged diff check：exit 0。
+- 本轮无 schema/Rust 修改；真实 DB integration 继续按授权边界 skipped。

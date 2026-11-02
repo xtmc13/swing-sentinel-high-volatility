@@ -160,18 +160,32 @@ export class DrizzleMomentumStateStore implements MomentumStateStore {
     return getDb().transaction(async (tx) => {
       const row = (await tx.select().from(table).where(eq(table.id, positionId)).limit(1).for("update"))[0];
       if (!row || row.status !== "OPEN") return false;
-      const existingClose = mode === "LIVE_MAINNET"
-        ? await tx.select({ id: liveOrders.id }).from(liveOrders).where(and(
+      const claimedAt = row.exitClaimedAt?.getTime();
+      if (mode === "LIVE_MAINNET") {
+        const existingClose = await tx.select({
+          id: liveOrders.id,
+          clientOrderId: liveOrders.clientOrderId,
+          symbol: liveOrders.symbol,
+          status: liveOrders.status,
+        }).from(liveOrders).where(and(
           eq(liveOrders.intentId, positionId),
           eq(liveOrders.reduceOnly, true),
           eq(liveOrders.type, "MARKET"),
-        )).limit(1)
-        : await tx.select({ id: executionOrders.id }).from(executionOrders).where(and(
+        )).limit(2);
+        const claimExpired = row.exitPending && row.exitClaimId !== null && claimedAt !== undefined
+          && now - claimedAt >= leaseMs;
+        const resumableClose = existingClose.length === 1
+          && existingClose[0].clientOrderId === `close-${positionId}`
+          && existingClose[0].symbol === row.symbol
+          && existingClose[0].status === "PENDING_SEND";
+        if (existingClose.length && !(claimExpired && resumableClose)) return false;
+      } else {
+        const existingClose = await tx.select({ id: executionOrders.id }).from(executionOrders).where(and(
           eq(executionOrders.positionId, positionId),
           eq(executionOrders.purpose, "CLOSE"),
         )).limit(1);
-      if (existingClose.length) return false;
-      const claimedAt = row.exitClaimedAt?.getTime();
+        if (existingClose.length) return false;
+      }
       const claimBusy = row.exitPending && row.exitClaimId !== claimId && claimedAt !== undefined
         && now - claimedAt < leaseMs;
       if (claimBusy) return false;

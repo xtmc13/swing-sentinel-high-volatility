@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS, type Opportunity, type TradingSettings } from "@contracts/trading";
-import { liveControls, tradingSettings } from "@db/schema";
+import { liveControls, liveOrders, livePositions, tradingSettings } from "@db/schema";
+import { getDb } from "../queries/connection";
 import type {
   BinanceAccountResponse,
   BinanceOpenOrder,
@@ -19,9 +20,11 @@ import type {
   LiveFinalGateResult,
 } from "./livePersistence";
 import { createExecutionCoordinator } from "../services/executionCoordinator";
-import { InMemoryMomentumStateStore } from "../services/momentumState";
+import { DrizzleMomentumStateStore, InMemoryMomentumStateStore } from "../services/momentumState";
 import { InMemoryLiveOrderStore, type LivePositionSeed } from "./orderStateMachine";
 import { createMainnetLiveExecutionAdapter, MainnetLiveExecutionAdapter } from "./liveExecution";
+
+vi.mock("../queries/connection", () => ({ getDb: vi.fn() }));
 
 class AdapterGateway implements LiveOrderGateway {
   readonly placed: PlaceOrderRequest[] = [];
@@ -204,6 +207,44 @@ function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH" } = {}) 
     },
   });
   return { store, gateway, created, claims, createIntent, claimIntent, pauseAutoTrade, adapter, finalMode: () => finalMode };
+}
+
+function useMomentumClaimDatabase(store: InMemoryLiveOrderStore, positionId: string) {
+  const position = {
+    id: positionId,
+    symbol: "BTCUSDT",
+    status: "OPEN",
+    exitPending: false,
+    exitReason: null as string | null,
+    exitClaimId: null as string | null,
+    exitClaimedAt: null as Date | null,
+  };
+  const tx = {
+    select: () => ({
+      from: (table: unknown) => ({
+        where: () => ({
+          limit: (count: number) => table === livePositions
+            ? { for: async () => [position] }
+            : table === liveOrders
+              ? store.listOrders().then((orders) => orders.filter((order) => order.intentId === positionId
+                && order.reduceOnly && order.type === "MARKET").slice(0, count))
+              : Promise.reject(new Error("Unexpected claim table")),
+        }),
+      }),
+    }),
+    update: (table: unknown) => {
+      expect(table).toBe(livePositions);
+      return {
+        set: (values: Partial<typeof position>) => ({
+          where: async () => { Object.assign(position, values); },
+        }),
+      };
+    },
+  };
+  vi.mocked(getDb).mockReturnValue({
+    transaction: async (operation: (transaction: typeof tx) => Promise<unknown>) => operation(tx),
+  } as never);
+  return position;
 }
 
 describe("mainnet live execution adapter", () => {
@@ -452,6 +493,113 @@ describe("mainnet live execution adapter", () => {
     expect(result.unsettled).toBe(true);
     expect(h.gateway.placed.length).toBe(beforeClose + 1);
     expect(h.gateway.placed.at(-1)).toMatchObject({ type: "MARKET", reduceOnly: true, side: "SELL" });
+  });
+
+  it("crash after close insertion resumes PENDING_SEND once and suppresses later takeover", async () => {
+    const h = setup();
+    await h.adapter.open(opportunity);
+    const positionId = h.created[0].id;
+    await h.adapter.handleFill(`${positionId}-entry`, {
+      exchangeTradeId: "crash-recovery-fill",
+      exchangeOrderId: "500",
+      symbol: "BTCUSDT",
+      side: "BUY",
+      price: "100",
+      quantity: "2",
+      commission: "0.1",
+      commissionAsset: "USDT",
+      realizedPnl: "0",
+      isMaker: false,
+      executedAt: 10,
+    }, seedFor(h.created[0]));
+    const claimPosition = useMomentumClaimDatabase(h.store, positionId);
+    const frames = new InMemoryMomentumStateStore();
+    const claims = new DrizzleMomentumStateStore();
+    const momentumStore = {
+      saveFrame: frames.saveFrame.bind(frames),
+      latestFrame: frames.latestFrame.bind(frames),
+      claimExit: claims.claimExit.bind(claims),
+      markExitSubmitted: claims.markExitSubmitted.bind(claims),
+      releaseExit: claims.releaseExit.bind(claims),
+    };
+    let now = 1_800_000_001_000;
+    const settings: TradingSettings = {
+      ...DEFAULT_SETTINGS,
+      executionMode: "LIVE_MAINNET",
+      autoTrade: true,
+      momentumEnabled: true,
+      strategyMode: "MOMENTUM",
+    };
+    const coordinatorFor = (adapter: MainnetLiveExecutionAdapter) => createExecutionCoordinator({
+      live: adapter,
+      getSettings: async () => settings,
+      momentumStore,
+      now: () => now,
+    });
+    const insertOrder = h.store.insertOrder.bind(h.store);
+    const getOrder = h.store.getOrder.bind(h.store);
+    let crashed = false;
+    h.store.insertOrder = async (order) => {
+      await insertOrder(order);
+      if (order.clientOrderId === `close-${positionId}`) {
+        crashed = true;
+        throw new Error("crash after close insertion");
+      }
+    };
+    h.store.getOrder = async (clientOrderId) => {
+      if (crashed && clientOrderId === `close-${positionId}`) throw new Error("crash after close insertion");
+      return getOrder(clientOrderId);
+    };
+
+    await expect(coordinatorFor(h.adapter).receiveMomentumFrame(reversalFrame(now - 10, 1)))
+      .rejects.toThrow("crash after close insertion");
+    h.store.insertOrder = insertOrder;
+    h.store.getOrder = getOrder;
+    expect(await h.store.getOrder(`close-${positionId}`)).toMatchObject({ status: "PENDING_SEND" });
+    expect(claimPosition.exitPending).toBe(true);
+    expect(h.gateway.placed.filter((request) => request.type === "MARKET")).toHaveLength(0);
+
+    let markSubmitted!: () => void;
+    let releaseClose!: () => void;
+    const submitted = new Promise<void>((resolve) => { markSubmitted = resolve; });
+    const closeRelease = new Promise<void>((resolve) => { releaseClose = resolve; });
+    h.gateway.placeOrder = async (request) => {
+      h.gateway.placed.push(request);
+      markSubmitted();
+      await closeRelease;
+      return {
+        symbol: request.symbol,
+        orderId: 900,
+        clientOrderId: request.newClientOrderId ?? "close",
+        price: "0",
+        origQty: request.quantity,
+        executedQty: "0",
+        status: "NEW",
+        side: request.side,
+        type: request.type,
+        reduceOnly: request.reduceOnly,
+      };
+    };
+    now += 5_001;
+    const resumed = coordinatorFor(h.adapter).receiveMomentumFrame(reversalFrame(now - 10, 2));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(h.gateway.placed.filter((request) => request.type === "MARKET")).toHaveLength(1);
+    await submitted;
+    expect(await h.store.getOrder(`close-${positionId}`)).toMatchObject({ status: "SUBMITTING" });
+    const resumedClaimId = claimPosition.exitClaimId;
+
+    now += 5_001;
+    await coordinatorFor(h.adapter).receiveMomentumFrame(reversalFrame(now - 10, 3));
+    expect(claimPosition.exitClaimId).toBe(resumedClaimId);
+    expect(h.gateway.placed.filter((request) => request.type === "MARKET")).toHaveLength(1);
+    expect((await h.store.listOrders()).filter((order) => order.type === "MARKET" && order.reduceOnly)).toHaveLength(1);
+
+    releaseClose();
+    await resumed;
+    now += 5_001;
+    await coordinatorFor(h.adapter).receiveMomentumFrame(reversalFrame(now - 10, 4));
+    expect(h.gateway.placed.filter((request) => request.type === "MARKET")).toHaveLength(1);
+    expect((await h.store.listOrders()).filter((order) => order.type === "MARKET" && order.reduceOnly)).toHaveLength(1);
   });
 
   it("lease takeover during an in-flight close reuses one exchange order", async () => {

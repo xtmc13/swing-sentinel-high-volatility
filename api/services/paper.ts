@@ -554,17 +554,22 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       const account = (await tx.select().from(simulationAccounts)
         .where(eq(simulationAccounts.id, 1)).limit(1).for("update"))[0];
       if (!account) return null;
-      const equity = valuationValid ? account.cash + unrealizedPnl : Number.NaN;
+      // The rows and quotes were collected before this lock. Reconcile the open-position
+      // identity set before mixing their unrealized PnL with the locked cash balance.
+      const currentRows = await tx.select({ id: positions.id }).from(positions).where(eq(positions.status, "OPEN"));
+      const positionSetStable = sameOpenPositionSet(rows, currentRows);
+      const consistentValuationValid = valuationValid && positionSetStable;
+      const equity = consistentValuationValid ? account.cash + unrealizedPnl : Number.NaN;
       const baseline = await rollUtcDayBaseline(account, equity, now(), (values) =>
         tx.update(simulationAccounts).set(values).where(eq(simulationAccounts.id, 1)));
-      const todayPnlPct = valuationValid && baseline.dayStartEquity > 0
+      const todayPnlPct = consistentValuationValid && baseline.dayStartEquity > 0
         ? (equity - baseline.dayStartEquity) / baseline.dayStartEquity * 100 : Number.NaN;
       let dailyLockDay = baseline.dailyLockDay;
       if (todayPnlPct <= -settings.dailyLossLimitPct && dailyLockDay !== baseline.dayKey) {
         dailyLockDay = baseline.dayKey;
         await tx.update(simulationAccounts).set({ dailyLockDay }).where(eq(simulationAccounts.id, 1));
       }
-      return { dailyLocked: dailyLockDay === baseline.dayKey };
+      return { dailyLocked: dailyLockDay === baseline.dayKey, positionSetStable };
     });
     if (!dailyBaseline || market.sourceGeneration !== sourceGeneration) return;
     const dailyLocked = dailyBaseline.dailyLocked;

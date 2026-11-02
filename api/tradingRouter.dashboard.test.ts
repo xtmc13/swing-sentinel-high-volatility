@@ -73,6 +73,8 @@ const openRow: PositionRow = {
   breakoutPrice: null,
   exitPending: false,
   exitReason: null,
+  exitClaimId: null,
+  exitClaimedAt: null,
   symbol: "BTCUSDT",
   side: "LONG",
   status: "OPEN",

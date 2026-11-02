@@ -32,6 +32,7 @@ interface UserDataStreamOptions {
   orders: LiveOrderStore;
   store: ReconciliationStore;
   seedFor: (order: LiveOrder) => Promise<LivePositionSeed>;
+  loadIntentMetadata: (order: LiveOrder) => Promise<Pick<LivePositionSeed, "signalId" | "strategyType" | "breakoutPrice">>;
   reconcile: () => Promise<{ ok: boolean }>;
   pauseNewEntries: () => Promise<void>;
   keepAliveIntervalMs?: number;
@@ -251,6 +252,14 @@ export class UserDataStream {
     const lastQuantity = decimal(requiredString(update.l ?? "0", "last filled quantity"));
     if (compareDecimals(lastQuantity, "0") > 0) {
       const seed = await this.options.orders.getPosition(local.intentId) ?? await this.options.seedFor(local);
+      const metadata = await this.options.loadIntentMetadata(local);
+      const enrichedSeed: LivePositionSeed = {
+        ...seed,
+        signalId: metadata.signalId,
+        strategyType: metadata.strategyType,
+        breakoutPrice: metadata.breakoutPrice,
+        exitPending: seed.exitPending ?? false,
+      };
       const fill: LiveFill = {
         exchangeTradeId: requiredString(update.t, "trade ID"),
         exchangeOrderId: requiredString(update.i, "order ID"),
@@ -264,7 +273,7 @@ export class UserDataStream {
         isMaker: update.m === true,
         executedAt: eventTime(event.T ?? event.E),
       };
-      const applied = await this.options.machine.handleFill(clientOrderId, fill, seed);
+      const applied = await this.options.machine.handleFill(clientOrderId, fill, enrichedSeed);
       for (const unresolved of applied.unresolved ?? []) {
         await this.recordIssue("UNPROTECTED_POSITION", local.symbol, unresolved);
       }

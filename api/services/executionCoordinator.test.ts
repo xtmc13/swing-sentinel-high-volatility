@@ -51,6 +51,27 @@ const position: PositionView = {
   valuationValid: true,
 };
 
+function reversalFrame() {
+  return {
+    symbol: "BTCUSDT",
+    event_time: 1_800_000_000_990,
+    received_time: 1_800_000_001_000,
+    sequence: 3,
+    generation: 4,
+    quality: "GOOD" as const,
+    config_hash: "a".repeat(64),
+    mark_price: 99.99,
+    microprice: 99.99,
+    spread_bps: 1,
+    depth_imbalance: -0.2,
+    aggressive_buy_volume: 1,
+    aggressive_sell_volume: 3,
+    short_return: -0.001,
+    burst_z: 2.5,
+    realized_volatility: 0.02,
+  };
+}
+
 function opportunity(overrides: Partial<Opportunity> = {}): Opportunity {
   return {
     id: "BTCUSDT-LONG",
@@ -350,6 +371,71 @@ describe("ExecutionCoordinator", () => {
     expect(await momentumStore.latestFrame("BTCUSDT")).toMatchObject({ sequence: 3 });
 
     const restarted = setup({ paper, momentumStore });
+    await restarted.coordinator.manage();
+    expect(paper.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("两个 coordinator 竞争同一退出时只有一个能提交 close", async () => {
+    const failed: PositionView = {
+      ...position,
+      strategyType: "MOMENTUM",
+      breakoutPrice: 100,
+      entryPrice: 100.02,
+      markPrice: 99.99,
+      openedAt: new Date(1_800_000_001_000).toISOString(),
+      exitPending: false,
+    };
+    const paper = adapter({
+      positions: async () => [failed],
+      close: vi.fn(async () => ({ ok: true as const, reason: "等待平仓", pnl: Number.NaN, unsettled: true as const, alreadyClosed: false as const })),
+    });
+    const momentumStore = new InMemoryMomentumStateStore();
+    const first = setup({ paper, momentumStore });
+    const second = setup({ paper, momentumStore });
+
+    await Promise.all([
+      first.coordinator.receiveMomentumFrame(reversalFrame()),
+      second.coordinator.receiveMomentumFrame(reversalFrame()),
+    ]);
+
+    expect(paper.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("crash 留下 pending 但没有 close order 时，过期 claim 可重试；已有订单则不重发", async () => {
+    const failed: PositionView = {
+      ...position,
+      strategyType: "MOMENTUM",
+      breakoutPrice: 100,
+      entryPrice: 100.02,
+      markPrice: 99.99,
+      openedAt: new Date(1_800_000_001_000).toISOString(),
+      exitPending: true,
+    };
+    const paper = adapter({
+      positions: async () => [failed],
+      close: vi.fn(async () => ({ ok: true as const, reason: "等待平仓", pnl: Number.NaN, unsettled: true as const, alreadyClosed: false as const })),
+    });
+    const momentumStore = new InMemoryMomentumStateStore();
+    await momentumStore.saveFrame(reversalFrame());
+    await momentumStore.claimExit(
+      "PAPER",
+      failed.id,
+      "跌回突破位且流向反转",
+      "crashed-owner",
+      1_800_000_001_000,
+      5_000,
+    );
+    const restarted = setup({ paper, momentumStore, now: () => 1_800_000_006_001 });
+    await momentumStore.saveFrame({
+      ...reversalFrame(),
+      event_time: 1_800_000_006_000,
+      received_time: 1_800_000_006_001,
+      sequence: 4,
+    });
+
+    await restarted.coordinator.manage();
+    expect(paper.close).toHaveBeenCalledTimes(1);
+
     await restarted.coordinator.manage();
     expect(paper.close).toHaveBeenCalledTimes(1);
   });

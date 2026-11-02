@@ -12,6 +12,7 @@ import {
   UserDataStream,
   type UserDataSocket,
 } from "./userDataStream";
+import { loadLiveIntentMetadata } from "./livePersistence";
 
 class FakeSocket implements UserDataSocket {
   onmessage: ((event: { data: unknown }) => void) | null = null;
@@ -97,6 +98,11 @@ interface HarnessOptions {
   withOrder?: boolean;
   reconcile?: () => Promise<{ ok: boolean }>;
   pause?: () => Promise<void>;
+  intentMetadata?: {
+    signalId: string;
+    strategyType: "SWING" | "MOMENTUM";
+    breakoutPrice: string | null;
+  };
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -161,6 +167,19 @@ function harness(options: HarnessOptions = {}) {
     orders,
     store,
     seedFor: async () => seed,
+    loadIntentMetadata: async (currentOrder) => loadLiveIntentMetadata({
+      select: () => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => [options.intentMetadata ?? {
+              signalId: "swing-persisted",
+              strategyType: "SWING",
+              breakoutPrice: null,
+            }],
+          }),
+        }),
+      }),
+    } as never, currentOrder),
     reconcile: options.reconcile ?? (async () => {
       calls.push("reconcile");
       return { ok: true };
@@ -423,6 +442,28 @@ describe("private order and account events", () => {
     const latest = await h.orders.getOrder("client-1");
     expect(latest).toMatchObject({ status: "FILLED", executedQuantity: "2", commission: "0.02" });
     expect((await h.orders.listOpenPositions())[0]?.quantity).toBe("2");
+  });
+
+  it("loads persisted intent metadata into positions created by actual private fill events", async () => {
+    const h = harness({
+      intentMetadata: {
+        signalId: "MOMENTUM:persisted-private-fill",
+        strategyType: "MOMENTUM",
+        breakoutPrice: "99.9",
+      },
+    });
+    running.push(h.stream);
+    await h.stream.start();
+
+    h.sockets[0]?.emit(fillEvent(200, 2));
+    await vi.waitFor(async () => expect((await h.orders.listOpenPositions()).length).toBe(1));
+
+    expect(await h.orders.getPosition("intent-1")).toMatchObject({
+      signalId: "MOMENTUM:persisted-private-fill",
+      strategyType: "MOMENTUM",
+      breakoutPrice: "99.9",
+      exitPending: false,
+    });
   });
 
   it("advances NEW to CANCELED when both events share a millisecond", async () => {

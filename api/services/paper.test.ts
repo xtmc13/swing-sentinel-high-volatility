@@ -183,6 +183,8 @@ describe("数据库结果与不可变初始风险", () => {
       breakoutPrice: 99,
       exitPending: true,
       exitReason: "等待平仓",
+      exitClaimId: null,
+      exitClaimedAt: null,
       symbol: "BTCUSDT",
       side: "LONG",
       status: "OPEN",

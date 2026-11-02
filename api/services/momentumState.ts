@@ -1,18 +1,22 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { ExecutionMode } from "@contracts/trading";
-import { livePositions, momentumFrames, positions } from "@db/schema";
+import { executionOrders, liveOrders, livePositions, momentumFrames, positions } from "@db/schema";
 import { getDb } from "../queries/connection";
 import { momentumFeatureFrameSchema, type MomentumFeatureFrame } from "./momentum";
 
 export interface MomentumStateStore {
   saveFrame(frame: MomentumFeatureFrame): Promise<void>;
   latestFrame(symbol: string): Promise<MomentumFeatureFrame | null>;
-  setExitPending(
+  claimExit(
     mode: ExecutionMode,
     positionId: string,
-    pending: boolean,
-    reason?: string,
-  ): Promise<void>;
+    reason: string,
+    claimId: string,
+    now: number,
+    leaseMs: number,
+  ): Promise<boolean>;
+  markExitSubmitted(mode: ExecutionMode, positionId: string, claimId: string): Promise<void>;
+  releaseExit(mode: ExecutionMode, positionId: string, claimId: string): Promise<void>;
 }
 
 function newerFrame(current: MomentumFeatureFrame, incoming: MomentumFeatureFrame): boolean {
@@ -20,8 +24,15 @@ function newerFrame(current: MomentumFeatureFrame, incoming: MomentumFeatureFram
     || (incoming.event_time === current.event_time && incoming.received_time >= current.received_time);
 }
 
+interface ExitClaim {
+  claimId: string;
+  claimedAt: number;
+  submitted: boolean;
+}
+
 export class InMemoryMomentumStateStore implements MomentumStateStore {
   private readonly frames = new Map<string, MomentumFeatureFrame>();
+  private readonly exits = new Map<string, ExitClaim>();
 
   async saveFrame(frame: MomentumFeatureFrame) {
     const parsed = momentumFeatureFrameSchema.parse(frame);
@@ -34,8 +45,30 @@ export class InMemoryMomentumStateStore implements MomentumStateStore {
     return frame ? { ...frame } : null;
   }
 
-  async setExitPending() {
-    return undefined;
+  async claimExit(
+    mode: ExecutionMode,
+    positionId: string,
+    _reason: string,
+    claimId: string,
+    now: number,
+    leaseMs: number,
+  ) {
+    const key = `${mode}:${positionId}`;
+    const current = this.exits.get(key);
+    if (current?.submitted) return false;
+    if (current && current.claimId !== claimId && now - current.claimedAt < leaseMs) return false;
+    this.exits.set(key, { claimId, claimedAt: now, submitted: false });
+    return true;
+  }
+
+  async markExitSubmitted(mode: ExecutionMode, positionId: string, claimId: string) {
+    const current = this.exits.get(`${mode}:${positionId}`);
+    if (current?.claimId === claimId) current.submitted = true;
+  }
+
+  async releaseExit(mode: ExecutionMode, positionId: string, claimId: string) {
+    const key = `${mode}:${positionId}`;
+    if (this.exits.get(key)?.claimId === claimId) this.exits.delete(key);
   }
 }
 
@@ -115,10 +148,57 @@ export class DrizzleMomentumStateStore implements MomentumStateStore {
     });
   }
 
-  async setExitPending(mode: ExecutionMode, positionId: string, pending: boolean, reason?: string) {
+  async claimExit(
+    mode: ExecutionMode,
+    positionId: string,
+    reason: string,
+    claimId: string,
+    now: number,
+    leaseMs: number,
+  ): Promise<boolean> {
     const table = mode === "LIVE_MAINNET" ? livePositions : positions;
-    await getDb().update(table).set({ exitPending: pending, exitReason: pending ? reason ?? null : null })
-      .where(eq(table.id, positionId));
+    return getDb().transaction(async (tx) => {
+      const row = (await tx.select().from(table).where(eq(table.id, positionId)).limit(1).for("update"))[0];
+      if (!row || row.status !== "OPEN") return false;
+      const existingClose = mode === "LIVE_MAINNET"
+        ? await tx.select({ id: liveOrders.id }).from(liveOrders).where(and(
+          eq(liveOrders.intentId, positionId),
+          eq(liveOrders.reduceOnly, true),
+          eq(liveOrders.type, "MARKET"),
+        )).limit(1)
+        : await tx.select({ id: executionOrders.id }).from(executionOrders).where(and(
+          eq(executionOrders.positionId, positionId),
+          eq(executionOrders.purpose, "CLOSE"),
+        )).limit(1);
+      if (existingClose.length) return false;
+      const claimedAt = row.exitClaimedAt?.getTime();
+      const claimBusy = row.exitPending && row.exitClaimId !== claimId && claimedAt !== undefined
+        && now - claimedAt < leaseMs;
+      if (claimBusy) return false;
+      await tx.update(table).set({
+        exitPending: true,
+        exitReason: reason,
+        exitClaimId: claimId,
+        exitClaimedAt: new Date(now),
+      }).where(eq(table.id, positionId));
+      return true;
+    });
+  }
+
+  async markExitSubmitted(mode: ExecutionMode, positionId: string, claimId: string) {
+    void mode;
+    void positionId;
+    void claimId;
+  }
+
+  async releaseExit(mode: ExecutionMode, positionId: string, claimId: string) {
+    const table = mode === "LIVE_MAINNET" ? livePositions : positions;
+    await getDb().update(table).set({
+      exitPending: false,
+      exitReason: null,
+      exitClaimId: null,
+      exitClaimedAt: null,
+    }).where(and(eq(table.id, positionId), eq(table.exitClaimId, claimId)));
   }
 }
 

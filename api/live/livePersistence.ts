@@ -73,6 +73,24 @@ export type ClaimLiveIntentResult =
   | { ok: true; version: number }
   | { ok: false; reason: string };
 
+export async function loadLiveIntentMetadata(
+  db: Pick<LiveDatabase, "select">,
+  order: { intentId: string },
+): Promise<Pick<CreateLiveIntentInput, "signalId" | "strategyType" | "breakoutPrice">> {
+  const rows = await db.select({
+    signalId: liveIntents.signalId,
+    strategyType: liveIntents.strategyType,
+    breakoutPrice: liveIntents.breakoutPrice,
+  }).from(liveIntents).where(eq(liveIntents.id, order.intentId)).limit(1);
+  const row = rows[0];
+  if (!row) throw new Error("Live position intent is missing");
+  return {
+    signalId: row.signalId,
+    strategyType: row.strategyType === "MOMENTUM" ? "MOMENTUM" : "SWING",
+    breakoutPrice: row.breakoutPrice ?? undefined,
+  };
+}
+
 function duplicateEntry(error: unknown): boolean {
   const cause = (error as { cause?: unknown })?.cause;
   return (error as { code?: unknown })?.code === "ER_DUP_ENTRY"

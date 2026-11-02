@@ -219,7 +219,7 @@ export class ExecutionCoordinator {
     const openPositions = await adapter.positions();
     for (const position of openPositions) {
       if (position.strategyType !== "MOMENTUM" || position.breakoutPrice === undefined
-        || position.exitPending || !position.valuationValid) continue;
+        || !position.valuationValid) continue;
       const frame = await this.momentumStore.latestFrame(position.symbol);
       const now = this.now();
       const freshFramePrice = frame?.quality === "GOOD" && frame.received_time >= frame.event_time
@@ -236,13 +236,21 @@ export class ExecutionCoordinator {
         frame,
       });
       if (!reason) continue;
-      await this.momentumStore.setExitPending(settings.executionMode, position.id, true, reason);
-      try {
-        const result = await adapter.close(position.id, reason);
-        if (!result.ok) await this.momentumStore.setExitPending(settings.executionMode, position.id, false);
-      } catch (error) {
-        await this.momentumStore.setExitPending(settings.executionMode, position.id, false);
-        throw error;
+      const claimId = crypto.randomUUID();
+      const claimed = await this.momentumStore.claimExit(
+        settings.executionMode,
+        position.id,
+        reason,
+        claimId,
+        now,
+        5_000,
+      );
+      if (!claimed) continue;
+      const result = await adapter.close(position.id, reason);
+      if (result.ok || result.unsettled) {
+        await this.momentumStore.markExitSubmitted(settings.executionMode, position.id, claimId);
+      } else {
+        await this.momentumStore.releaseExit(settings.executionMode, position.id, claimId);
       }
     }
   }

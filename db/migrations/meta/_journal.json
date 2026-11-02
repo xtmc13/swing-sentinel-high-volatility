@@ -43,6 +43,13 @@
       "when": 1793258610100,
       "tag": "0005_past_valkyrie",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1793591879724,
+      "tag": "0006_live_persistence",
+      "breakpoints": true
     }
   ]
 }

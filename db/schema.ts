@@ -7,6 +7,7 @@ import {
   timestamp,
   int,
   double,
+  decimal,
   boolean,
   index,
   uniqueIndex,
@@ -192,3 +193,141 @@ export const backtestRuns = mysqlTable("backtest_runs", {
   resultJson: text("result_json").notNull(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
+
+const money = (name: string) => decimal(name, { precision: 65, scale: 30 }).notNull();
+
+export const liveIntents = mysqlTable("live_intents", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  signalId: varchar("signal_id", { length: 160 }).notNull(),
+  symbol: varchar("symbol", { length: 24 }).notNull(),
+  side: varchar("side", { length: 8 }).notNull(),
+  status: varchar("status", { length: 24 }).notNull().default("PENDING_SEND"),
+  quantity: money("quantity"),
+  limitPrice: money("limit_price"),
+  stopPrice: money("stop_price"),
+  liquidationPrice: money("liquidation_price"),
+  leverage: int("leverage").notNull(),
+  notional: money("notional"),
+  reservedMargin: money("reserved_margin"),
+  reservedRisk: money("reserved_risk"),
+  version: int("version").notNull().default(1),
+  expiresAt: timestamp("expires_at", { fsp: 3 }).notNull(),
+  leaseOwner: varchar("lease_owner", { length: 80 }),
+  leaseExpiresAt: timestamp("lease_expires_at", { fsp: 3 }),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at", { fsp: 3 }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { fsp: 3 }).notNull().defaultNow().onUpdateNow(),
+}, (table) => ({
+  signalUnique: uniqueIndex("live_intents_signal_unique").on(table.signalId),
+  statusIdx: index("live_intents_status_idx").on(table.status),
+  leaseIdx: index("live_intents_lease_idx").on(table.leaseExpiresAt),
+}));
+
+export const liveOrders = mysqlTable("live_orders", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  intentId: varchar("intent_id", { length: 36 }).notNull(),
+  clientOrderId: varchar("client_order_id", { length: 64 }).notNull(),
+  exchangeOrderId: varchar("exchange_order_id", { length: 64 }),
+  symbol: varchar("symbol", { length: 24 }).notNull(),
+  side: varchar("side", { length: 8 }).notNull(),
+  type: varchar("type", { length: 24 }).notNull(),
+  status: varchar("status", { length: 24 }).notNull(),
+  price: money("price"),
+  originalQuantity: money("original_quantity"),
+  executedQuantity: money("executed_quantity"),
+  reduceOnly: boolean("reduce_only").notNull().default(false),
+  createdAt: timestamp("created_at", { fsp: 3 }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { fsp: 3 }).notNull().defaultNow().onUpdateNow(),
+}, (table) => ({
+  clientOrderUnique: uniqueIndex("live_orders_client_order_unique").on(table.clientOrderId),
+  exchangeOrderUnique: uniqueIndex("live_orders_exchange_order_unique").on(table.exchangeOrderId),
+  intentIdx: index("live_orders_intent_idx").on(table.intentId),
+  statusIdx: index("live_orders_status_idx").on(table.status),
+}));
+
+export const liveFills = mysqlTable("live_fills", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  orderId: varchar("order_id", { length: 36 }).notNull(),
+  exchangeTradeId: varchar("exchange_trade_id", { length: 64 }).notNull(),
+  exchangeOrderId: varchar("exchange_order_id", { length: 64 }).notNull(),
+  symbol: varchar("symbol", { length: 24 }).notNull(),
+  side: varchar("side", { length: 8 }).notNull(),
+  price: money("price"),
+  quantity: money("quantity"),
+  quoteQuantity: money("quote_quantity"),
+  commission: money("commission"),
+  commissionAsset: varchar("commission_asset", { length: 12 }).notNull(),
+  realizedPnl: money("realized_pnl"),
+  isMaker: boolean("is_maker").notNull().default(false),
+  executedAt: timestamp("executed_at", { fsp: 3 }).notNull(),
+  createdAt: timestamp("created_at", { fsp: 3 }).notNull().defaultNow(),
+}, (table) => ({
+  tradeUnique: uniqueIndex("live_fills_trade_unique").on(table.exchangeTradeId),
+  orderIdx: index("live_fills_order_idx").on(table.orderId),
+  exchangeOrderIdx: index("live_fills_exchange_order_idx").on(table.exchangeOrderId),
+}));
+
+export const livePositions = mysqlTable("live_positions", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  symbol: varchar("symbol", { length: 24 }).notNull(),
+  side: varchar("side", { length: 8 }).notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("OPEN"),
+  initialQuantity: money("initial_quantity"),
+  quantity: money("quantity"),
+  entryPrice: money("entry_price"),
+  markPrice: money("mark_price"),
+  liquidationPrice: money("liquidation_price"),
+  isolatedWallet: money("isolated_wallet"),
+  leverage: money("leverage"),
+  maintenanceBracket: int("maintenance_bracket").notNull(),
+  maintMarginRatio: money("maint_margin_ratio"),
+  cumMaintenance: money("cum_maintenance"),
+  openedAt: timestamp("opened_at", { fsp: 3 }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { fsp: 3 }).notNull().defaultNow().onUpdateNow(),
+  closedAt: timestamp("closed_at", { fsp: 3 }),
+}, (table) => ({
+  symbolStatusIdx: index("live_positions_symbol_status_idx").on(table.symbol, table.status),
+}));
+
+export const liveAccountSnapshots = mysqlTable("live_account_snapshots", {
+  id: bigint("id", { mode: "number" }).autoincrement().primaryKey(),
+  asset: varchar("asset", { length: 12 }).notNull(),
+  walletBalance: money("wallet_balance"),
+  availableBalance: money("available_balance"),
+  crossWalletBalance: money("cross_wallet_balance"),
+  observedAt: timestamp("observed_at", { fsp: 3 }).notNull(),
+  createdAt: timestamp("created_at", { fsp: 3 }).notNull().defaultNow(),
+}, (table) => ({
+  assetObservedIdx: index("live_account_asset_observed_idx").on(table.asset, table.observedAt),
+}));
+
+export const liveLedgerEntries = mysqlTable("live_ledger_entries", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  exchangeTransactionId: varchar("exchange_transaction_id", { length: 64 }).notNull(),
+  symbol: varchar("symbol", { length: 24 }),
+  asset: varchar("asset", { length: 12 }).notNull(),
+  entryType: varchar("entry_type", { length: 32 }).notNull(),
+  amount: money("amount"),
+  occurredAt: timestamp("occurred_at", { fsp: 3 }).notNull(),
+  createdAt: timestamp("created_at", { fsp: 3 }).notNull().defaultNow(),
+}, (table) => ({
+  transactionUnique: uniqueIndex("live_ledger_transaction_unique").on(table.exchangeTransactionId),
+  occurredIdx: index("live_ledger_occurred_idx").on(table.occurredAt),
+}));
+
+export const reconciliationIssues = mysqlTable("reconciliation_issues", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  category: varchar("category", { length: 32 }).notNull(),
+  severity: varchar("severity", { length: 16 }).notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("OPEN"),
+  symbol: varchar("symbol", { length: 24 }),
+  expectedValue: decimal("expected_value", { precision: 65, scale: 30 }),
+  actualValue: decimal("actual_value", { precision: 65, scale: 30 }),
+  message: text("message").notNull(),
+  detectedAt: timestamp("detected_at", { fsp: 3 }).notNull(),
+  resolvedAt: timestamp("resolved_at", { fsp: 3 }),
+  createdAt: timestamp("created_at", { fsp: 3 }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { fsp: 3 }).notNull().defaultNow().onUpdateNow(),
+}, (table) => ({
+  statusSeverityIdx: index("reconciliation_status_severity_idx").on(table.status, table.severity),
+}));

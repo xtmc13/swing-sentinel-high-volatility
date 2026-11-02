@@ -70,6 +70,23 @@ export interface BinanceLeverageBracket {
   [key: string]: unknown;
 }
 
+export interface BinanceSymbolContract {
+  symbol: string;
+  pair: string;
+  contractType: string;
+  status: string;
+  baseAsset: string;
+  quoteAsset: string;
+  marginAsset: string;
+  filters: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+export interface BinanceExchangeInfoResponse {
+  symbols: BinanceSymbolContract[];
+  [key: string]: unknown;
+}
+
 export interface BinancePositionSideResponse {
   dualSidePosition: boolean;
 }
@@ -202,6 +219,10 @@ export class BinanceSignedClient {
 
   account(): Promise<BinanceAccountResponse> {
     return this.signedRequest("GET", "/fapi/v2/account");
+  }
+
+  exchangeInfo(symbol?: string): Promise<BinanceExchangeInfoResponse> {
+    return this.perform("GET", "/fapi/v1/exchangeInfo", { symbol }, false, false, this.maxRateLimitRetries);
   }
 
   positionRisk(symbol?: string): Promise<BinancePositionRisk[]> {

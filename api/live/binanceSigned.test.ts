@@ -260,6 +260,20 @@ describe("Binance signed mainnet client", () => {
     expect(url.searchParams.get("signature")).toBeTruthy();
   });
 
+  it("reads contract filters through the unsigned exchangeInfo endpoint without a time sync", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ symbols: [] }));
+    const client = clientWith(fetchMock);
+
+    await client.exchangeInfo("BTCUSDT");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const url = requestUrl(fetchMock);
+    expect(url.pathname).toBe("/fapi/v1/exchangeInfo");
+    expect(url.searchParams.get("symbol")).toBe("BTCUSDT");
+    expect(url.searchParams.has("signature")).toBe(false);
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: "GET", headers: undefined });
+  });
+
   it("preserves trade and income decimal strings without numeric conversion", async () => {
     const trade = { symbol: "BTCUSDT", price: "67000.100000000000000001", qty: "0.000000000000000003", commission: "0.000000000000000001" };
     const income = { symbol: "BTCUSDT", incomeType: "COMMISSION", income: "-0.000000000000000001" };

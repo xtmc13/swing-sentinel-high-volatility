@@ -85,6 +85,15 @@ async function rollUtcDayBaseline(
   return { dayKey, dayStartEquity, dailyLockDay: null };
 }
 
+export function sameOpenPositionSet(
+  snapshotRows: Array<Pick<PositionRow, "id">>,
+  currentRows: Array<Pick<PositionRow, "id">>,
+) {
+  if (snapshotRows.length !== currentRows.length) return false;
+  const snapshotIds = new Set(snapshotRows.map((row) => row.id));
+  return snapshotIds.size === snapshotRows.length && currentRows.every((row) => snapshotIds.has(row.id));
+}
+
 export async function getAccountSnapshot(rows?: PositionRow[]): Promise<AccountSnapshot> {
   const [openRows, settings] = await Promise.all([rows ? Promise.resolve(rows) : getOpenPositions(), getSettings()]);
   const valued = await Promise.all(openRows.map(async (row) => {
@@ -102,36 +111,53 @@ export async function getAccountSnapshot(rows?: PositionRow[]): Promise<AccountS
   const valuationIssues = valued.flatMap((item) => item.issue ? [item.issue] : []);
   const unrealizedPnl = valuationValid ? valued.reduce((sum, item) => sum + item.view.unrealizedPnl, 0) : Number.NaN;
   const usedMargin = openRows.reduce((sum, row) => sum + row.margin, 0);
-  const { account, dayStartEquity, dailyLocked } = await getDb().transaction(async (tx) => {
+  const snapshotState = await getDb().transaction(async (tx) => {
     const locked = (await tx.select().from(simulationAccounts)
       .where(eq(simulationAccounts.id, 1)).limit(1).for("update"))[0];
     if (!locked) throw new Error("Simulation account is missing");
-    const equity = valuationValid ? locked.cash + unrealizedPnl : Number.NaN;
+    // Reconcile the position identity set after acquiring the account lock. An open/close
+    // between market valuation and this transaction would otherwise mix stale positions
+    // with post-trade cash and double-count (or omit) their unrealized PnL.
+    const currentRows = await tx.select({ id: positions.id }).from(positions).where(eq(positions.status, "OPEN"));
+    const positionSetStable = sameOpenPositionSet(openRows, currentRows);
+    const consistentValuationValid = valuationValid && positionSetStable;
+    const equity = consistentValuationValid ? locked.cash + unrealizedPnl : Number.NaN;
     const baseline = await rollUtcDayBaseline(locked, equity, Date.now(), (values) =>
       tx.update(simulationAccounts).set(values).where(eq(simulationAccounts.id, 1)));
-    const todayPnlPct = valuationValid && baseline.dayStartEquity > 0
+    const todayPnlPct = consistentValuationValid && baseline.dayStartEquity > 0
       ? (equity - baseline.dayStartEquity) / baseline.dayStartEquity * 100 : Number.NaN;
     let dailyLockDay = baseline.dailyLockDay;
     if (todayPnlPct <= -settings.dailyLossLimitPct && dailyLockDay !== baseline.dayKey) {
       dailyLockDay = baseline.dayKey;
       await tx.update(simulationAccounts).set({ dailyLockDay }).where(eq(simulationAccounts.id, 1));
     }
-    return { account: locked, dayStartEquity: baseline.dayStartEquity, dailyLocked: dailyLockDay === baseline.dayKey };
+    return {
+      account: locked,
+      dayStartEquity: baseline.dayStartEquity,
+      dailyLocked: dailyLockDay === baseline.dayKey,
+      valuationValid: consistentValuationValid,
+      positionSetStable,
+    };
   });
-  const equity = valuationValid ? account.cash + unrealizedPnl : Number.NaN;
+  const consistentUnrealizedPnl = snapshotState.valuationValid ? unrealizedPnl : Number.NaN;
+  const consistentUsedMargin = snapshotState.valuationValid ? usedMargin : Number.NaN;
+  const equity = snapshotState.valuationValid ? snapshotState.account.cash + consistentUnrealizedPnl : Number.NaN;
   return {
     equity,
-    cash: account.cash,
-    availableMargin: valuationValid ? Math.max(0, equity - usedMargin) : Number.NaN,
-    usedMargin,
-    unrealizedPnl,
-    realizedPnl: account.realizedPnl,
-    todayPnl: valuationValid ? equity - dayStartEquity : Number.NaN,
-    todayPnlPct: valuationValid && dayStartEquity > 0 ? (equity - dayStartEquity) / dayStartEquity * 100 : Number.NaN,
-    dayStartEquity,
-    valuationValid,
-    valuationIssues,
-    dailyLocked,
+    cash: snapshotState.account.cash,
+    availableMargin: snapshotState.valuationValid ? Math.max(0, equity - consistentUsedMargin) : Number.NaN,
+    usedMargin: consistentUsedMargin,
+    unrealizedPnl: consistentUnrealizedPnl,
+    realizedPnl: snapshotState.account.realizedPnl,
+    todayPnl: snapshotState.valuationValid ? equity - snapshotState.dayStartEquity : Number.NaN,
+    todayPnlPct: snapshotState.valuationValid && snapshotState.dayStartEquity > 0
+      ? (equity - snapshotState.dayStartEquity) / snapshotState.dayStartEquity * 100 : Number.NaN,
+    dayStartEquity: snapshotState.dayStartEquity,
+    valuationValid: snapshotState.valuationValid,
+    valuationIssues: snapshotState.positionSetStable
+      ? valuationIssues
+      : [...valuationIssues, "持仓在行情估值期间发生变化，请重新获取账户快照"],
+    dailyLocked: snapshotState.dailyLocked,
   };
 }
 

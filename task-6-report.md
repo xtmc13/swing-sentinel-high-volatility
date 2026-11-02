@@ -46,3 +46,28 @@ Coverage includes depth gap/resync, stale frames, one/two-sided and crossed book
 - Detector thresholds are initial engineering defaults, not calibrated trading parameters or evidence of profitability. TS acceptance/risk remains a separate task; this task does not place orders.
 - K-lines are consumed and closed K-line diagnostics are tracked; higher-timeframe direction/structure stays outside Rust. Burst uses a 1-second-bucket score with a zero-baseline-variance fallback, and realized volatility is not annualized; replay/calibration should validate both choices.
 - No long-duration soak, TS/Rust replay equivalence, or TS receiver integration was performed. The live smoke is intentionally ignored in the default suite to keep tests hermetic.
+
+
+## Review fix round 1
+
+Code/test commit SHA: `14979d3f818b156296ca1867e57a57c39ca42e41` (`fix: harden Rust momentum review boundaries`). The report update is committed separately so this SHA remains exact.
+
+### RED / GREEN
+
+- Generation RED: `reconnect_runtime_preserves_supplied_monotonic_generation` failed because `SymbolRuntime::new_with_generation` did not exist. `generation_change_resets_streak_and_allows_sequence_restart_but_rejects_old_generation` failed when a new generation's second frame could not confirm. GREEN: `run_session` receives an outer monotonically increasing generation; depth/runtime preserve it; candidate confirmation resets on generation advancement, permits sequence restart, and rejects older generations.
+- Proxy RED: `candidate_delivery_bypasses_system_proxy_environment` set HTTP/HTTPS/ALL proxy variables to a real local 502 proxy and failed with `candidate endpoint returned 502 Bad Gateway`. GREEN: reqwest `no_proxy()` bypasses the system proxy; the loopback receiver accepts the candidate and the proxy remains unused.
+- Snapshot RED: the chunked unknown-length test initially failed because cumulative `bounded_json` streaming did not exist. A raw-fixture request-exchange error was corrected without changing the assertion. GREEN: response chunks are accumulated with a pre-append hard byte check and rejected before JSON decoding; `depth_snapshot` uses this path for both known and unknown lengths.
+- History RED: cap tests failed because `max_trade_history`, `max_mark_history`, and `HISTORY_OVERFLOW` were absent. GREEN: defaults cap trades at 50,000 and marks at 2,000 entries; overflow is sticky and fail-closed, emits `HISTORY_OVERFLOW`, and runtime requests resync for either history type.
+- Mark causality RED: the regression selected `Some(999.0)` from a future mark instead of `Some(101.0)` at the frame event time. GREEN: frames select the latest mark with `event_time <= frame.event_time`.
+- BookTicker sequence reuse is intentional: it emits a feature frame but cannot advance candidate confirmation until the depth sequence advances. The renamed `book_ticker_reusing_depth_sequence_cannot_confirm_or_emit` regression documents and verifies this behavior.
+
+### Final verification
+
+Using `/root/.cargo/bin/cargo` from `rust-core/`:
+
+- `cargo fmt --check`: exit 0.
+- `cargo test`: exit 0; **34 passed, 0 failed, 1 ignored** live-network smoke; doc tests 0 failed.
+- `cargo clippy --all-targets -- -D warnings`: exit 0.
+- `git diff --check`: exit 0 before commit.
+
+No real credentials, account/order calls, preview services, or push were used. The prior environment-related public smoke limitation is unchanged.

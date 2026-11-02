@@ -13,7 +13,7 @@ export default function ExecutionStatusPanel({ status }: { status: ExecutionStat
     ["凭据", status.credentialsConfigured ? "已配置（内容不显示）" : "凭据未配置"],
     ["未结持仓／意图／订单", `${status.outstanding.openPositions} / ${status.outstanding.pendingIntents} / ${status.outstanding.unfinishedOrders}`],
     ["私有 WS", `${status.privateWs.connected ? "已连接" : "未连接"} · 重连 ${status.privateWs.reconnects} 次`],
-    ["对账", `${status.reconciliation.healthy ? "正常" : "存在严重问题"} · 未解决 ${status.reconciliation.openIssues} 项`],
+    ["对账", `${status.reconciliation.healthy ? "正常" : !status.reconciliation.configured ? "未配置" : !status.reconciliation.running ? "未运行" : "陈旧或存在严重问题"} · 未解决 ${status.reconciliation.openIssues} 项`],
     ["动量检测", status.momentum.reason],
   ];
   return (
@@ -29,7 +29,7 @@ export default function ExecutionStatusPanel({ status }: { status: ExecutionStat
           {rows.map(([label, value]) => <div key={label}><dt className="text-[#8290aa]">{label}</dt><dd className="mt-1 leading-5 text-[#c5d0df]">{value}</dd></div>)}
         </dl>
         <div className="mt-4 border-t border-[#141f33] pt-3 text-[10px] leading-5">
-          <div className="mb-1 flex justify-between gap-3"><span className="text-[#8290aa]">完整预检</span>{health(status.preflight.ready, "通过", "未通过")}</div>
+          <div className="mb-1 flex justify-between gap-3"><span className="text-[#8290aa]">完整预检</span>{live ? health(status.preflight.ready && status.reasons.length === 0, "通过", "未通过") : <span className="text-[#8290aa]">不适用</span>}</div>
           {status.preflight.reasons.length > 0 && <p className="reading text-[#a8b5c8]">{status.preflight.reasons.join("；")}</p>}
           {live && status.reasons.length > 0 && <p className="reading mt-2 text-[#fbbf24]">提交门控：{status.reasons.join("；")}</p>}
         </div>

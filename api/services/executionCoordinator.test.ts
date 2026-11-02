@@ -5,6 +5,7 @@ import {
   type AccountSnapshot,
   type Opportunity,
   type PositionView,
+  type PrivateWsHealth,
   type TradingSettings,
 } from "@contracts/trading";
 import {
@@ -127,6 +128,14 @@ function setup(options: {
   env?: Record<string, string | undefined>;
   armed?: boolean;
   preflight?: { ready: boolean; reasons: string[]; checkedAt: string | null };
+  operations?: {
+    orders: { id: string; intentId: string; clientOrderId: string; exchangeOrderId: string | null; symbol: string; side: "LONG" | "SHORT"; type: "LIMIT" | "MARKET" | "STOP_MARKET"; status: string; price: string; originalQuantity: string; executedQuantity: string; averagePrice: string; commission: string; reduceOnly: boolean; createdAt: string }[];
+    protectionOrders: { id: string; intentId: string; clientOrderId: string; exchangeOrderId: string | null; symbol: string; side: "LONG" | "SHORT"; type: "LIMIT" | "MARKET" | "STOP_MARKET"; status: string; price: string; originalQuantity: string; executedQuantity: string; averagePrice: string; commission: string; reduceOnly: boolean; createdAt: string }[];
+    unsettledIntents: { id: string; symbol: string; status: string }[];
+    reconciliationIssues: { id: string; category: string; severity: "INFO" | "WARN" | "ERROR" | "CRITICAL"; status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED"; symbol: string | null; message: string; detectedAt: string }[];
+  };
+  privateWs?: { health(): PrivateWsHealth };
+  reconciliation?: { health(): { configured: boolean; running: boolean; lastRunAt: number | null } };
   risk?: { openPositions: number; pendingIntents: number; unfinishedOrders: number };
   riskLoader?: () => Promise<{ openPositions: number; pendingIntents: number; unfinishedOrders: number }>;
   now?: () => number;
@@ -146,6 +155,12 @@ function setup(options: {
     reasons: [],
     checkedAt: new Date(1_800_000_001_000).toISOString(),
   });
+  const confirmedStop = {
+    id: "confirmed-stop", intentId: position.id, clientOrderId: "confirmed-stop", exchangeOrderId: "1",
+    symbol: position.symbol, side: "SHORT" as const, type: "STOP_MARKET" as const, status: "NEW",
+    price: "99", originalQuantity: "1", executedQuantity: "0", averagePrice: "0", commission: "0",
+    reduceOnly: true, createdAt: new Date(1_800_000_000_000).toISOString(),
+  };
   const coordinator = createExecutionCoordinator({
     paper,
     live,
@@ -154,7 +169,9 @@ function setup(options: {
     getLiveControls: async () => ({ armed }),
     setLiveControls,
     runLivePreflight,
-    getLiveOperations: async () => ({ orders: [], unsettledIntents: [], reconciliationIssues: [] }),
+    getLiveOperations: async () => options.operations ?? { orders: [], protectionOrders: [confirmedStop], unsettledIntents: [], reconciliationIssues: [] },
+    privateWs: options.privateWs ?? { health: () => ({ configured: true, running: true, connected: true, lastMessageAt: 1_800_000_001_000, reconnects: 0 }) },
+    reconciliation: options.reconciliation ?? { health: () => ({ configured: true, running: true, lastRunAt: 1_800_000_001_000 }) },
     getOutstandingRisk: options.riskLoader ?? (async () => options.risk ?? { openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
     market: { dataSource: options.source ?? "MAINNET" },
     env: options.env ?? {},
@@ -242,7 +259,7 @@ describe("ExecutionCoordinator", () => {
     const order: string[] = [];
     const h = setup({
       settings: { executionMode: "LIVE_MAINNET" },
-      env: { LIVE_TRADING_ENABLED: "true" },
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key", BINANCE_MAINNET_API_SECRET: "fake-secret" },
       armed: true,
       riskLoader: async () => {
         order.push("risk");
@@ -280,8 +297,8 @@ describe("ExecutionCoordinator", () => {
 
   it.each([
     { name: "总开关", env: {}, armed: true, autoTrade: true },
-    { name: "armed", env: { LIVE_TRADING_ENABLED: "true" }, armed: false, autoTrade: true },
-    { name: "autoTrade", env: { LIVE_TRADING_ENABLED: "true" }, armed: true, autoTrade: false },
+    { name: "armed", env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key", BINANCE_MAINNET_API_SECRET: "fake-secret" }, armed: false, autoTrade: true },
+    { name: "autoTrade", env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key", BINANCE_MAINNET_API_SECRET: "fake-secret" }, armed: true, autoTrade: false },
   ])("缺少 $name 条件时 live 开仓失败关闭", async (gate) => {
     const h = setup({
       settings: { executionMode: "LIVE_MAINNET", autoTrade: gate.autoTrade },
@@ -296,7 +313,7 @@ describe("ExecutionCoordinator", () => {
   it("全部 live 门控满足时才委托 live adapter", async () => {
     const h = setup({
       settings: { executionMode: "LIVE_MAINNET" },
-      env: { LIVE_TRADING_ENABLED: "true" },
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key", BINANCE_MAINNET_API_SECRET: "fake-secret" },
       armed: true,
     });
     const signal = opportunity();
@@ -466,7 +483,7 @@ describe("ExecutionCoordinator", () => {
   it("手动 canary 只绕过 autoTrade，预检失败仍拒绝提交", async () => {
     const h = setup({
       settings: { executionMode: "LIVE_MAINNET", autoTrade: false },
-      env: { LIVE_TRADING_ENABLED: "true" },
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key", BINANCE_MAINNET_API_SECRET: "fake-secret" },
       armed: true,
     });
     const signal = opportunity();
@@ -476,7 +493,7 @@ describe("ExecutionCoordinator", () => {
 
     const failed = setup({
       settings: { executionMode: "LIVE_MAINNET", autoTrade: false },
-      env: { LIVE_TRADING_ENABLED: "true" },
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key", BINANCE_MAINNET_API_SECRET: "fake-secret" },
       armed: true,
       preflight: { ready: false, reasons: ["私有 WS 未连接"], checkedAt: null },
     });
@@ -496,18 +513,18 @@ describe("ExecutionCoordinator", () => {
 
     const h = setup({
       settings: { executionMode: "LIVE_MAINNET" },
-      env: { LIVE_TRADING_ENABLED: "true" },
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key", BINANCE_MAINNET_API_SECRET: "fake-secret" },
     });
     await expect(h.coordinator.setArmed(true)).resolves.toMatchObject({ armed: true });
     expect(h.setLiveControls).toHaveBeenCalledWith({ armed: true });
     await expect(h.coordinator.setArmed(false)).resolves.toMatchObject({ armed: false });
-    expect(h.runLivePreflight).toHaveBeenCalledTimes(1);
+    expect(h.runLivePreflight).toHaveBeenCalledTimes(2);
   });
 
-  it("状态只报告凭据是否配置，不泄露凭据值", async () => {
+  it("状态复用 MAINNET 凭据公共配置且只报告布尔值", async () => {
     const h = setup({
       settings: { executionMode: "LIVE_MAINNET" },
-      env: { LIVE_TRADING_ENABLED: "true", BINANCE_API_KEY: "not-a-real-key", BINANCE_API_SECRET: "not-a-real-secret" },
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "not-a-real-key", BINANCE_MAINNET_API_SECRET: "not-a-real-secret" },
       armed: true,
     });
 
@@ -517,13 +534,60 @@ describe("ExecutionCoordinator", () => {
     expect(JSON.stringify(status)).not.toContain("not-a-real-secret");
   });
 
+  it("当前预检、私有 WS、对账、动量或保护不健康时 canSubmit 失败关闭", async () => {
+    const h = setup({
+      settings: { executionMode: "LIVE_MAINNET", momentumEnabled: true, strategyMode: "BOTH" },
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key", BINANCE_MAINNET_API_SECRET: "fake-secret" },
+      armed: true,
+      preflight: { ready: true, reasons: [], checkedAt: new Date(1_799_999_900_000).toISOString() },
+      privateWs: { health: () => ({ configured: true, running: true, connected: true, lastMessageAt: 1_799_999_900_000, reconnects: 0 }) },
+      reconciliation: { health: () => ({ configured: true, running: false, lastRunAt: 1_799_999_900_000 }) },
+      operations: { orders: [], protectionOrders: [], unsettledIntents: [], reconciliationIssues: [] },
+    });
+
+    const status = await h.coordinator.status();
+    expect(h.runLivePreflight).toHaveBeenCalledTimes(1);
+    expect(status.preflight.ready).toBe(false);
+    expect(status.canSubmit).toBe(false);
+    expect(status.reconciliation).toMatchObject({ running: false, healthy: false });
+    expect(status.reasons.join("；")).toContain("私有 WS");
+    expect(status.reasons.join("；")).toContain("对账");
+    expect(status.reasons.join("；")).toContain("动量");
+    expect(status.missingProtections).toContain("BTCUSDT 缺少有效止损保护");
+  });
+
+  it.each([
+    { status: "PENDING_SEND", reduceOnly: true },
+    { status: "SUBMITTING", reduceOnly: true },
+    { status: "UNKNOWN", reduceOnly: true },
+    { status: "RECONCILING", reduceOnly: true },
+    { status: "NEW", reduceOnly: false },
+  ])("未确认或非 reduceOnly 止损不算保护：%j", async ({ status: orderStatus, reduceOnly }) => {
+    const h = setup({
+      settings: { executionMode: "LIVE_MAINNET" },
+      operations: {
+        orders: [],
+        unsettledIntents: [],
+        reconciliationIssues: [],
+        protectionOrders: [{
+          id: "stop-1", intentId: position.id, clientOrderId: "stop-1", exchangeOrderId: null,
+          symbol: position.symbol, side: "SHORT", type: "STOP_MARKET", status: orderStatus,
+          price: "99", originalQuantity: "1", executedQuantity: "0", averagePrice: "0",
+          commission: "0", reduceOnly, createdAt: new Date(1_800_000_000_000).toISOString(),
+        }],
+      },
+    });
+
+    expect((await h.coordinator.status()).missingProtections).toContain("BTCUSDT 缺少有效止损保护");
+  });
+
   it("LIVE adapter 未配置时 dashboard 显示不可用而不回退 paper 账户", async () => {
     const paper = adapter();
     const coordinator = createExecutionCoordinator({
       paper,
       getSettings: async () => ({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" }),
       getLiveControls: async () => ({ armed: false }),
-      getLiveOperations: async () => ({ orders: [], unsettledIntents: [], reconciliationIssues: [] }),
+      getLiveOperations: async () => ({ orders: [], protectionOrders: [], unsettledIntents: [], reconciliationIssues: [] }),
       getOutstandingRisk: async () => ({ openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
       env: {},
       market: { dataSource: "MAINNET" },

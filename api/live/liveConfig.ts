@@ -1,4 +1,7 @@
+import type { LiveReadiness } from "@contracts/trading";
+
 export type ServerEnvironment = Record<string, string | undefined>;
+export type AssertCurrentLiveAdmission = () => Promise<void>;
 
 export interface LiveCredentials {
   apiKey: string;
@@ -18,6 +21,21 @@ function configuredCredentials(env: ServerEnvironment): LiveCredentials | null {
 
 export function liveTradingEnabled(env: ServerEnvironment): boolean {
   return env.LIVE_TRADING_ENABLED === "true";
+}
+
+export function createLiveAdmissionGuard(
+  env: ServerEnvironment,
+  runPreflight: () => Promise<LiveReadiness>,
+  now: () => number = Date.now,
+): AssertCurrentLiveAdmission {
+  return async () => {
+    if (!liveTradingEnabled(env)) throw new Error("LIVE_TRADING_ENABLED 未开启");
+    const preflight = await runPreflight();
+    const checkedAt = preflight.checkedAt === null ? Number.NaN : Date.parse(preflight.checkedAt);
+    if (!preflight.ready || !Number.isFinite(checkedAt) || checkedAt > now() || now() - checkedAt > 10_000) {
+      throw new Error(`当前主网预检未通过或已陈旧：${preflight.reasons.join("；") || "检查时间无效"}`);
+    }
+  };
 }
 
 export function getLivePublicStatus(env: ServerEnvironment): LivePublicStatus {

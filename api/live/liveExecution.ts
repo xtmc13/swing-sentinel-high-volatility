@@ -2,6 +2,7 @@ import type { AccountSnapshot, Opportunity, PositionView } from "@contracts/trad
 import { DEFAULT_MOMENTUM_CONFIG } from "../services/momentum";
 import type { BinanceAccountResponse, LiveOrderGateway } from "./binanceSigned";
 import { withFullUserTradePagination } from "./accounting";
+import type { AssertCurrentLiveAdmission } from "./liveConfig";
 import { compareDecimals, decimal, divideDecimals, multiplyDecimals, subtractDecimals, type DecimalString } from "./decimal";
 import {
   claimLiveIntent,
@@ -41,6 +42,7 @@ export interface MainnetLiveExecutionDependencies {
   gateway: LiveOrderGateway & { account(): Promise<BinanceAccountResponse> };
   userTradesPageLimit?: number;
   workerId: string;
+  assertCurrentAdmission: AssertCurrentLiveAdmission;
   createIntent: (
     input: CreateLiveIntentInput,
     options: CreateLiveIntentOptions,
@@ -110,7 +112,11 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     this.machine = new OrderStateMachine(
       dependencies.store,
       withFullUserTradePagination(dependencies.gateway, dependencies.userTradesPageLimit),
-      { alert: dependencies.alert, id: this.id },
+      {
+        alert: dependencies.alert,
+        id: this.id,
+        assertCurrentAdmission: dependencies.assertCurrentAdmission,
+      },
     );
   }
 
@@ -150,6 +156,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     const approvals: Extract<LiveFinalGateResult, { approved: true }>[] = [];
     const created = await this.dependencies.createIntent(input, {
       requireAutoTrade: !options.manualCanary,
+      assertCurrentAdmission: this.dependencies.assertCurrentAdmission,
       finalGate: async (tx, context) => {
         const approval = await this.dependencies.finalGate(opportunity, input, tx, context);
         if (approval.approved) approvals.push(approval);

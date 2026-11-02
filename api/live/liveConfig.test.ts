@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createLiveAdapter, getLivePublicStatus, liveTradingEnabled } from "./liveConfig";
+import { createLiveAdapter, createLiveAdmissionGuard, getLivePublicStatus, liveTradingEnabled } from "./liveConfig";
 
 const credentials = {
   BINANCE_MAINNET_API_KEY: "fake-key",
@@ -47,5 +47,24 @@ describe("live configuration", () => {
     const factory = vi.fn().mockReturnValue(adapter);
     expect(createLiveAdapter({ ...credentials, LIVE_TRADING_ENABLED: "true" }, factory)).toBe(adapter);
     expect(factory).toHaveBeenCalledWith({ apiKey: "fake-key", apiSecret: "fake-secret" });
+  });
+
+  it("admission guard reevaluates current env and fresh preflight without caching", async () => {
+    let enabled = "true";
+    let checkedAt = 1_800_000_000_000;
+    const preflight = vi.fn(async () => ({ ready: true, reasons: [], checkedAt: new Date(checkedAt).toISOString() }));
+    const guard = createLiveAdmissionGuard(
+      { get LIVE_TRADING_ENABLED() { return enabled; } },
+      preflight,
+      () => 1_800_000_001_000,
+    );
+
+    await expect(guard()).resolves.toBeUndefined();
+    enabled = "false";
+    await expect(guard()).rejects.toThrow("LIVE_TRADING_ENABLED");
+    enabled = "true";
+    checkedAt = 1_799_999_900_000;
+    await expect(guard()).rejects.toThrow("预检");
+    expect(preflight).toHaveBeenCalledTimes(2);
   });
 });

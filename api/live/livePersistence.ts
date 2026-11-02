@@ -1,6 +1,7 @@
-import { and, eq, gt, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import type { MySql2Database } from "drizzle-orm/mysql2";
-import { liveControls, liveIntents, tradingSettings, volatilityStates } from "@db/schema";
+import { liveControls, liveIntents, liveOrders, tradingSettings, volatilityStates } from "@db/schema";
+import type { AssertCurrentLiveAdmission } from "./liveConfig";
 import type { Side, StrategyType, VolatilityMode } from "@contracts/trading";
 import {
   addDecimals,
@@ -56,6 +57,7 @@ export interface LiveFinalGateContext {
 export interface CreateLiveIntentOptions {
   finalGate: (tx: LiveTransaction, context: LiveFinalGateContext) => Promise<LiveFinalGateResult>;
   requireAutoTrade?: boolean;
+  assertCurrentAdmission?: AssertCurrentLiveAdmission;
 }
 
 export type CreateLiveIntentResult =
@@ -143,15 +145,18 @@ function approvalError(
   return null;
 }
 
-export async function lockEmergencyGeneration(tx: LiveTransaction): Promise<number> {
-  const locked = await tx.select({ generation: liveControls.emergencyGeneration }).from(liveControls)
-    .where(eq(liveControls.id, 1)).for("update");
-  if (locked[0]) return locked[0].generation;
+export async function lockLiveControls(tx: LiveTransaction): Promise<{ armed: boolean; generation: number }> {
+  const selection = { armed: liveControls.armed, generation: liveControls.emergencyGeneration };
+  const locked = await tx.select(selection).from(liveControls).where(eq(liveControls.id, 1)).for("update");
+  if (locked[0]) return locked[0];
   await tx.insert(liveControls).values({ id: 1 });
-  const inserted = await tx.select({ generation: liveControls.emergencyGeneration }).from(liveControls)
-    .where(eq(liveControls.id, 1)).for("update");
+  const inserted = await tx.select(selection).from(liveControls).where(eq(liveControls.id, 1)).for("update");
   if (!inserted[0]) throw new Error("Live controls are missing");
-  return inserted[0].generation;
+  return inserted[0];
+}
+
+export async function lockEmergencyGeneration(tx: LiveTransaction): Promise<number> {
+  return (await lockLiveControls(tx)).generation;
 }
 
 export async function createLiveIntent(
@@ -188,13 +193,17 @@ export async function createLiveIntent(
       if (options.requireAutoTrade && !settingsLock[0].autoTrade) {
         return { ok: false, reason: "自动交易已暂停" };
       }
+      const controls = await lockLiveControls(tx);
+      if (!controls.armed) return { ok: false, reason: "主网执行未 armed" };
+      if (!options.assertCurrentAdmission) return { ok: false, reason: "缺少当前环境/预检授权" };
+      await options.assertCurrentAdmission();
       const stateLock = await tx.select({ mode: volatilityStates.mode }).from(volatilityStates)
         .where(eq(volatilityStates.symbol, input.symbol)).for("update");
       const mode = stateLock[0]?.mode === "HIGH" || stateLock[0]?.mode === "EXTREME"
         ? stateLock[0].mode
         : stateLock[0]?.mode === "NORMAL" ? "NORMAL" : null;
       if (!mode) return { ok: false, reason: "缺少当前波动状态，禁止开仓" };
-      const emergencyGeneration = await lockEmergencyGeneration(tx);
+      const emergencyGeneration = controls.generation;
 
       const approval = await options.finalGate(tx, {
         mode,
@@ -268,18 +277,23 @@ export async function claimLiveIntent(
 export interface AssertLiveSubmissionInput {
   intentId: string;
   expectedGeneration: number;
+  assertCurrentAdmission?: AssertCurrentLiveAdmission;
 }
 
 export function liveSubmissionPermitted(input: {
+  armed: boolean;
+  executionMode: string;
   autoTrade: boolean;
   manualCanary: boolean;
   generation: number;
   expectedGeneration: number;
   intentStatus: string;
 }): boolean {
-  return (input.autoTrade || input.manualCanary)
+  return input.armed
+    && input.executionMode === "LIVE_MAINNET"
+    && (input.autoTrade || input.manualCanary)
     && input.generation === input.expectedGeneration
-    && input.intentStatus === "PENDING_SEND";
+    && ["PENDING_SEND", "SUBMITTING"].includes(input.intentStatus);
 }
 
 export async function assertLiveSubmission(
@@ -290,34 +304,67 @@ export async function assertLiveSubmission(
     throw new Error("Invalid emergency generation");
   }
   await db.transaction(async (tx) => {
-    const settings = await tx.select({ autoTrade: tradingSettings.autoTrade }).from(tradingSettings)
+    const settings = await tx.select({ autoTrade: tradingSettings.autoTrade, executionMode: tradingSettings.executionMode }).from(tradingSettings)
       .where(eq(tradingSettings.id, 1)).for("update");
-    const generation = await lockEmergencyGeneration(tx);
+    const controls = await lockLiveControls(tx);
     const intent = await tx.select({ status: liveIntents.status, manualCanary: liveIntents.manualCanary }).from(liveIntents)
       .where(eq(liveIntents.id, input.intentId)).for("update");
     if (!liveSubmissionPermitted({
+      armed: controls.armed,
+      executionMode: settings[0]?.executionMode ?? "MISSING",
       autoTrade: settings[0]?.autoTrade ?? false,
       manualCanary: intent[0]?.manualCanary ?? false,
-      generation,
+      generation: controls.generation,
       expectedGeneration: input.expectedGeneration,
       intentStatus: intent[0]?.status ?? "MISSING",
     })) {
       throw new Error("Live submission changed after emergency or pause");
     }
+    if (!input.assertCurrentAdmission) throw new Error("缺少当前环境/预检授权");
+    await input.assertCurrentAdmission();
   });
 }
 
-export async function pauseLiveExecution(db: LiveDatabase): Promise<void> {
+async function invalidateLiveAdmission(db: LiveDatabase, pauseAutoTrade: boolean): Promise<void> {
   await db.transaction(async (tx) => {
     await tx.select({ id: tradingSettings.id }).from(tradingSettings)
       .where(eq(tradingSettings.id, 1)).for("update");
-    await lockEmergencyGeneration(tx);
-    await tx.update(tradingSettings).set({ autoTrade: false }).where(eq(tradingSettings.id, 1));
+    await lockLiveControls(tx);
+    if (pauseAutoTrade) await tx.update(tradingSettings).set({ autoTrade: false }).where(eq(tradingSettings.id, 1));
     await tx.update(liveControls).set({
+      armed: false,
       emergencyGeneration: sql`${liveControls.emergencyGeneration} + 1`,
     }).where(eq(liveControls.id, 1));
-    await tx.update(liveIntents).set({ status: "CANCEL" }).where(eq(liveIntents.status, "PENDING_SEND"));
+    await tx.update(liveIntents).set({ status: "CANCEL" })
+      .where(inArray(liveIntents.status, ["PENDING_SEND", "SUBMITTING"]));
+    await tx.update(liveOrders).set({ status: "CANCEL" })
+      .where(inArray(liveOrders.status, ["PENDING_SEND", "SUBMITTING"]));
   });
+}
+
+export function disarmLiveExecution(db: LiveDatabase): Promise<void> {
+  return invalidateLiveAdmission(db, false);
+}
+
+export async function setLiveArmed(
+  db: LiveDatabase,
+  armed: boolean,
+  assertCurrentAdmission?: AssertCurrentLiveAdmission,
+): Promise<void> {
+  if (!armed) return disarmLiveExecution(db);
+  await db.transaction(async (tx) => {
+    const settings = await tx.select({ executionMode: tradingSettings.executionMode }).from(tradingSettings)
+      .where(eq(tradingSettings.id, 1)).for("update");
+    if (settings[0]?.executionMode !== "LIVE_MAINNET") throw new Error("只有 LIVE_MAINNET 模式可以 armed");
+    await lockLiveControls(tx);
+    if (!assertCurrentAdmission) throw new Error("缺少当前环境/预检授权");
+    await assertCurrentAdmission();
+    await tx.update(liveControls).set({ armed: true }).where(eq(liveControls.id, 1));
+  });
+}
+
+export function pauseLiveExecution(db: LiveDatabase): Promise<void> {
+  return invalidateLiveAdmission(db, true);
 }
 
 const TERMINAL_INTENT_STATUSES = new Set(["FILLED", "CANCEL", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"]);

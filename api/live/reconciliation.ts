@@ -56,8 +56,8 @@ export interface UnsettledLiveIntent {
 
 export interface ReconciliationStore {
   recordIssue(issue: NewReconciliationIssue): Promise<ReconciliationIssue>;
-  listIssues(): Promise<ReconciliationIssue[]>;
-  listUnsettledIntents(): Promise<UnsettledLiveIntent[]>;
+  listIssues(limit?: number): Promise<ReconciliationIssue[]>;
+  listUnsettledIntents(limit?: number): Promise<UnsettledLiveIntent[]>;
   appendAccountSnapshot(snapshot: LiveAccountSnapshot): Promise<boolean>;
   latestAccountSnapshots(): Promise<LiveAccountSnapshot[]>;
 }
@@ -71,8 +71,9 @@ export class InMemoryReconciliationStore implements ReconciliationStore {
     this.unsettledIntents = unsettledIntents;
   }
 
-  async listUnsettledIntents(): Promise<UnsettledLiveIntent[]> {
-    return this.unsettledIntents.map((intent) => ({ ...intent }));
+  async listUnsettledIntents(limit?: number): Promise<UnsettledLiveIntent[]> {
+    const rows = limit === undefined ? this.unsettledIntents : this.unsettledIntents.slice(0, limit);
+    return rows.map((intent) => ({ ...intent }));
   }
 
   async recordIssue(issue: NewReconciliationIssue): Promise<ReconciliationIssue> {
@@ -86,8 +87,9 @@ export class InMemoryReconciliationStore implements ReconciliationStore {
     return { ...recorded };
   }
 
-  async listIssues(): Promise<ReconciliationIssue[]> {
-    return this.issues.map((issue) => ({ ...issue }));
+  async listIssues(limit?: number): Promise<ReconciliationIssue[]> {
+    const rows = limit === undefined ? this.issues : this.issues.slice(0, limit);
+    return rows.map((issue) => ({ ...issue }));
   }
 
   async appendAccountSnapshot(snapshot: LiveAccountSnapshot): Promise<boolean> {
@@ -115,11 +117,12 @@ export class DrizzleReconciliationStore implements ReconciliationStore {
     this.db = db;
   }
 
-  async listUnsettledIntents(): Promise<UnsettledLiveIntent[]> {
-    return this.db.select({ id: liveIntents.id, symbol: liveIntents.symbol, status: liveIntents.status })
+  async listUnsettledIntents(limit?: number): Promise<UnsettledLiveIntent[]> {
+    const query = this.db.select({ id: liveIntents.id, symbol: liveIntents.symbol, status: liveIntents.status })
       .from(liveIntents).where(notInArray(liveIntents.status, [
         "FILLED", "CANCEL", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED",
       ]));
+    return limit === undefined ? query : query.limit(limit);
   }
 
   async recordIssue(issue: NewReconciliationIssue): Promise<ReconciliationIssue> {
@@ -138,9 +141,10 @@ export class DrizzleReconciliationStore implements ReconciliationStore {
     return { ...issue, id, status: "OPEN", resolvedAt: null };
   }
 
-  async listIssues(): Promise<ReconciliationIssue[]> {
-    const rows = await this.db.select().from(reconciliationIssues)
+  async listIssues(limit?: number): Promise<ReconciliationIssue[]> {
+    const query = this.db.select().from(reconciliationIssues)
       .orderBy(asc(reconciliationIssues.detectedAt), asc(reconciliationIssues.id));
+    const rows = await (limit === undefined ? query : query.limit(limit));
     return rows.map((row) => ({
       id: row.id,
       category: row.category as ReconciliationIssueCategory,

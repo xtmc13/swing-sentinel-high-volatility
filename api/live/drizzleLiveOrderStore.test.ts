@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { livePositions } from "@db/schema";
+import { describe, expect, it, vi } from "vitest";
+import { liveControls, liveFills, liveIntents, liveOrders, livePositions, tradingSettings } from "@db/schema";
 import { DrizzleLiveOrderStore } from "./drizzleLiveOrderStore";
 import type { LiveDatabase } from "./livePersistence";
 
@@ -51,5 +51,51 @@ describe("durable live position recovery", () => {
     const store = new DrizzleLiveOrderStore(db);
 
     expect(await store.listOpenPositions()).toMatchObject([{ stopPrice: "99" }]);
+  });
+
+  it("locks and rejects final admission when current controls are disarmed", async () => {
+    const orderRow = {
+      id: "order-1", intentId: "intent-1", clientOrderId: "client-1", exchangeOrderId: null,
+      symbol: "BTCUSDT", side: "LONG", type: "LIMIT", status: "PENDING_SEND", price: "100",
+      maxEntryPrice: "100", originalQuantity: "2", reduceOnly: false, createdAt: openedAt,
+    };
+    const locked: unknown[] = [];
+    const rowsFor = (table: unknown): unknown[] => {
+      if (table === liveOrders) return [orderRow];
+      if (table === liveFills) return [];
+      if (table === tradingSettings) return [{ executionMode: "LIVE_MAINNET", autoTrade: true }];
+      if (table === liveControls) return [{ armed: false, generation: 7 }];
+      if (table === liveIntents) return [{ status: "PENDING_SEND", manualCanary: true }];
+      throw new Error("unexpected table");
+    };
+    const tx = {
+      select: () => ({
+        from: (table: unknown) => ({
+          where: () => {
+            const rows = rowsFor(table);
+            return Object.assign(Promise.resolve(rows), {
+              limit: () => ({ for: async () => { locked.push(table); return rows; } }),
+              for: async () => { locked.push(table); return rows; },
+            });
+          },
+        }),
+      }),
+      update: (table: unknown) => ({
+        set: (values: { status?: string }) => ({
+          where: async () => {
+            if (table === liveOrders && values.status) orderRow.status = values.status;
+            return [{ affectedRows: 1 }];
+          },
+        }),
+      }),
+    };
+    const db = {
+      transaction: async (operation: (transaction: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as LiveDatabase;
+    const store = new DrizzleLiveOrderStore(db);
+    const currentAuthorization = vi.fn(async () => undefined);
+
+    await expect(store.admitOrder("client-1", 7, currentAuthorization)).resolves.toMatchObject({ status: "CANCEL" });
+    expect(locked).toEqual(expect.arrayContaining([liveOrders, tradingSettings, liveControls, liveIntents]));
   });
 });

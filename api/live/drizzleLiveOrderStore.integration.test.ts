@@ -161,7 +161,7 @@ describeDatabase("Task 4 dedicated durable order store", () => {
     await pauseLiveExecution(db);
 
     expect((await db.select().from(schema.liveIntents))[0]?.status).toBe("CANCEL");
-    expect(await store.admitOrder(order.clientOrderId, 0)).toMatchObject({ status: "CANCEL" });
+    expect(await store.admitOrder(order.clientOrderId, 0, async () => undefined)).toMatchObject({ status: "CANCEL" });
     expect((await db.select().from(schema.liveOrders))[0]?.status).toBe("CANCEL");
   });
 

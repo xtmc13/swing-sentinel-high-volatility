@@ -4,37 +4,44 @@ import type { ReconciliationStore } from "./reconciliation";
 
 export interface LiveOperations {
   orders: LiveOrderView[];
+  protectionOrders: LiveOrderView[];
   unsettledIntents: UnsettledIntentView[];
   reconciliationIssues: ReconciliationIssueView[];
 }
 
+function orderView(order: Awaited<ReturnType<LiveOrderStore["listOrders"]>>[number]): LiveOrderView {
+  return {
+    id: order.id,
+    intentId: order.intentId,
+    clientOrderId: order.clientOrderId,
+    exchangeOrderId: order.exchangeOrderId,
+    symbol: order.symbol,
+    side: order.side,
+    type: order.type,
+    status: order.status,
+    price: order.price,
+    originalQuantity: order.originalQuantity,
+    executedQuantity: order.executedQuantity,
+    averagePrice: order.averagePrice,
+    commission: order.commission,
+    reduceOnly: order.reduceOnly,
+    createdAt: new Date(order.createdAt).toISOString(),
+  };
+}
+
 export async function readLiveOperations(
-  orderStore: Pick<LiveOrderStore, "listOrders">,
+  orderStore: Pick<LiveOrderStore, "listRecentOrders" | "listActiveProtectionOrders">,
   reconciliationStore: Pick<ReconciliationStore, "listIssues" | "listUnsettledIntents">,
 ): Promise<LiveOperations> {
-  const [orders, unsettledIntents, issues] = await Promise.all([
-    orderStore.listOrders(),
-    reconciliationStore.listUnsettledIntents(),
-    reconciliationStore.listIssues(),
+  const [orders, protectionOrders, unsettledIntents, issues] = await Promise.all([
+    orderStore.listRecentOrders(60),
+    orderStore.listActiveProtectionOrders(),
+    reconciliationStore.listUnsettledIntents(100),
+    reconciliationStore.listIssues(100),
   ]);
   return {
-    orders: orders.map((order) => ({
-      id: order.id,
-      intentId: order.intentId,
-      clientOrderId: order.clientOrderId,
-      exchangeOrderId: order.exchangeOrderId,
-      symbol: order.symbol,
-      side: order.side,
-      type: order.type,
-      status: order.status,
-      price: order.price,
-      originalQuantity: order.originalQuantity,
-      executedQuantity: order.executedQuantity,
-      averagePrice: order.averagePrice,
-      commission: order.commission,
-      reduceOnly: order.reduceOnly,
-      createdAt: new Date(order.createdAt).toISOString(),
-    })).sort((left, right) => right.createdAt.localeCompare(left.createdAt)).slice(0, 60),
+    orders: orders.map(orderView),
+    protectionOrders: protectionOrders.map(orderView),
     unsettledIntents,
     reconciliationIssues: issues.map((issue) => ({
       id: issue.id,

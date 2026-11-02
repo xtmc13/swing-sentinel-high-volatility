@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { trpc } from "@/providers/trpc";
 import { formatCompact, formatPercent, formatPrice, formatTime } from "@/lib/format";
 import AdminAccess from "@/components/AdminAccess";
+import { executionEngineActive } from "@/lib/executionStatus";
 
 const navItems = [
   { to: "/", label: "交易总览", code: "OVERVIEW", icon: LayoutDashboard },
@@ -35,7 +36,8 @@ export default function TerminalLayout() {
     return () => clearInterval(timer);
   }, []);
   const data = dashboard.data;
-  const running = data?.settings.autoTrade ?? false;
+  const autoTrade = data?.settings.autoTrade ?? false;
+  const running = data ? executionEngineActive(data.settings, data.execution) : false;
   const executionMode = data?.settings.executionMode ?? "PAPER";
   const modeLabel = executionMode === "LIVE_MAINNET" ? "LIVE" : "PAPER";
   const activeSelectedSymbol = data?.markets.some((market) => market.symbol === selectedSymbol)
@@ -81,12 +83,12 @@ export default function TerminalLayout() {
               </div>
               <button className="btn-secondary !min-h-10 !px-3" onClick={() => navigate("/risk")} aria-label="风险参数设置"><Settings2 size={15} /></button>
               <button
-                className={running ? "btn-secondary !min-h-10" : "btn-primary !min-h-10"}
+                className={autoTrade ? "btn-secondary !min-h-10" : "btn-primary !min-h-10"}
                 disabled={!data || toggle.isPending}
-                onClick={() => toggle.mutate({ enabled: !running })}
+                onClick={() => toggle.mutate({ enabled: !autoTrade })}
               >
-                {running ? <Pause size={14} /> : <Play size={14} />}
-                <span className="hidden sm:inline">{running ? "暂停" : "启动"}</span>
+                {autoTrade ? <Pause size={14} /> : <Play size={14} />}
+                <span className="hidden sm:inline">{autoTrade ? "暂停" : "启动"}</span>
               </button>
             </div>
           </div>

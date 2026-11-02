@@ -1,4 +1,6 @@
 import type { Side, StrategyType } from "@contracts/trading";
+import type { AssertCurrentLiveAdmission } from "./liveConfig";
+import { liveSubmissionPermitted } from "./livePersistence";
 import type {
   BinanceOpenOrder,
   LiveOrderGateway,
@@ -98,6 +100,8 @@ export interface LiveOrderStore {
   insertOrder(order: LiveOrder): Promise<void>;
   getOrder(clientOrderId: string): Promise<LiveOrder | null>;
   listOrders(): Promise<LiveOrder[]>;
+  listRecentOrders(limit: number): Promise<LiveOrder[]>;
+  listActiveProtectionOrders(): Promise<LiveOrder[]>;
   transitionOrder(
     clientOrderId: string,
     expectedStatuses: LiveOrderStatus[],
@@ -109,7 +113,11 @@ export interface LiveOrderStore {
     replacement: LiveOrder,
     expectedPositionQuantity?: DecimalString,
   ): Promise<LiveOrder | null>;
-  admitOrder(clientOrderId: string, expectedGeneration: number): Promise<LiveOrder>;
+  admitOrder(
+    clientOrderId: string,
+    expectedGeneration: number,
+    assertCurrentAdmission: AssertCurrentLiveAdmission,
+  ): Promise<LiveOrder>;
   applyFill(orderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication>;
   getPosition(positionId: string): Promise<LivePosition | null>;
   listOpenPositions(): Promise<LivePosition[]>;
@@ -216,17 +224,22 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
   private readonly positions = new Map<string, LivePosition>();
   private emergencyGeneration: number;
   private autoTrade: boolean;
+  private armed: boolean;
 
-  constructor(options: { emergencyGeneration?: number; autoTrade?: boolean } = {}) {
+  constructor(options: { emergencyGeneration?: number; autoTrade?: boolean; armed?: boolean } = {}) {
     this.emergencyGeneration = options.emergencyGeneration ?? 0;
     this.autoTrade = options.autoTrade ?? true;
+    this.armed = options.armed ?? true;
   }
 
   pauseExecution(): void {
     this.emergencyGeneration += 1;
     this.autoTrade = false;
+    this.armed = false;
     for (const [clientOrderId, order] of this.orders) {
-      if (order.status === "PENDING_SEND") this.orders.set(clientOrderId, { ...order, status: "CANCEL" });
+      if (["PENDING_SEND", "SUBMITTING"].includes(order.status)) {
+        this.orders.set(clientOrderId, { ...order, status: "CANCEL" });
+      }
     }
   }
 
@@ -246,6 +259,16 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
 
   async listOrders(): Promise<LiveOrder[]> {
     return [...this.orders.values()].map(copyOrder);
+  }
+
+  async listRecentOrders(limit: number): Promise<LiveOrder[]> {
+    return [...this.orders.values()].sort((left, right) => right.createdAt - left.createdAt)
+      .slice(0, limit).map(copyOrder);
+  }
+
+  async listActiveProtectionOrders(): Promise<LiveOrder[]> {
+    return [...this.orders.values()].filter((order) => order.type === "STOP_MARKET" && order.reduceOnly
+      && ["NEW", "PARTIALLY_FILLED"].includes(order.status)).map(copyOrder);
   }
 
   async transitionOrder(
@@ -279,15 +302,41 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
     return copyOrder(replacement);
   }
 
-  async admitOrder(clientOrderId: string, expectedGeneration: number): Promise<LiveOrder> {
+  async admitOrder(
+    clientOrderId: string,
+    expectedGeneration: number,
+    assertCurrentAdmission: AssertCurrentLiveAdmission,
+  ): Promise<LiveOrder> {
     const order = this.orders.get(clientOrderId);
     if (!order) throw new Error("Live order not found");
-    if (order.status !== "PENDING_SEND") return copyOrder(order);
-    if ((!this.autoTrade && !order.manualCanary) || this.emergencyGeneration !== expectedGeneration) {
+    if (!["PENDING_SEND", "SUBMITTING"].includes(order.status)) return copyOrder(order);
+    const permitted = () => liveSubmissionPermitted({
+      armed: this.armed,
+      executionMode: "LIVE_MAINNET",
+      autoTrade: this.autoTrade,
+      manualCanary: order.manualCanary ?? false,
+      generation: this.emergencyGeneration,
+      expectedGeneration,
+      intentStatus: this.orders.get(clientOrderId)?.status ?? "MISSING",
+    });
+    if (!permitted()) {
       const cancelled = { ...order, status: "CANCEL" as const };
       this.orders.set(clientOrderId, cancelled);
       return copyOrder(cancelled);
     }
+    let authorized = true;
+    try {
+      await assertCurrentAdmission();
+    } catch {
+      authorized = false;
+    }
+    if (!authorized || !permitted()) {
+      const current = this.orders.get(clientOrderId) ?? order;
+      const cancelled = { ...current, status: "CANCEL" as const };
+      this.orders.set(clientOrderId, cancelled);
+      return copyOrder(cancelled);
+    }
+    if (order.status === "SUBMITTING") return copyOrder(order);
     const submitting = { ...order, status: "SUBMITTING" as const };
     this.orders.set(clientOrderId, submitting);
     return copyOrder(submitting);
@@ -321,6 +370,7 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
 export interface OrderStateMachineOptions {
   alert?: (message: string) => unknown;
   id?: () => string;
+  assertCurrentAdmission?: AssertCurrentLiveAdmission;
 }
 
 export class OrderStateMachine {
@@ -328,6 +378,7 @@ export class OrderStateMachine {
   private readonly gateway: LiveOrderGateway;
   private readonly alert: (message: string) => unknown;
   private readonly id: () => string;
+  private readonly assertCurrentAdmission?: AssertCurrentLiveAdmission;
 
   constructor(
     store: LiveOrderStore,
@@ -338,6 +389,7 @@ export class OrderStateMachine {
     this.gateway = gateway;
     this.alert = options.alert ?? (() => undefined);
     this.id = options.id ?? (() => crypto.randomUUID());
+    this.assertCurrentAdmission = options.assertCurrentAdmission;
   }
 
   async createOrder(order: LiveOrder): Promise<LiveOrder> {
@@ -348,15 +400,21 @@ export class OrderStateMachine {
   async submit(clientOrderId: string, expectedGeneration?: number): Promise<LiveOrder> {
     const order = await this.requireOrder(clientOrderId);
     if (order.status !== "PENDING_SEND") return order;
+    if (expectedGeneration !== undefined && !this.assertCurrentAdmission) {
+      return await this.store.transitionOrder(clientOrderId, ["PENDING_SEND"], { status: "CANCEL" }) ?? order;
+    }
     const submitting = expectedGeneration === undefined
       ? await this.store.transitionOrder(clientOrderId, ["PENDING_SEND"], { status: "SUBMITTING" })
-      : await this.store.admitOrder(clientOrderId, expectedGeneration);
+      : await this.store.admitOrder(clientOrderId, expectedGeneration, this.assertCurrentAdmission!);
     if (!submitting || submitting.status !== "SUBMITTING") return submitting ?? this.requireOrder(clientOrderId);
     const admissionState = await this.requireOrder(clientOrderId);
     if (admissionState.status !== "SUBMITTING") return admissionState;
+    const finalAdmission = expectedGeneration === undefined ? admissionState
+      : await this.store.admitOrder(clientOrderId, expectedGeneration, this.assertCurrentAdmission!);
+    if (finalAdmission.status !== "SUBMITTING") return finalAdmission;
     let acknowledgement: Partial<BinanceOpenOrder>;
     try {
-      acknowledgement = await this.gateway.placeOrder(this.requestFor(submitting)) as Partial<BinanceOpenOrder>;
+      acknowledgement = await this.gateway.placeOrder(this.requestFor(finalAdmission)) as Partial<BinanceOpenOrder>;
       if ((typeof acknowledgement.orderId !== "number" && typeof acknowledgement.orderId !== "string")
         || String(acknowledgement.orderId).length === 0) {
         throw new Error("Invalid order acknowledgement");

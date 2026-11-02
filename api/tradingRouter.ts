@@ -62,11 +62,11 @@ export const settingsInput = z.object({
 
 async function dashboard(): Promise<DashboardData> {
   if (!engine.markets.length) await engine.refreshMarkets();
-  const [settings, tradeRows, orderRows, eventRows, equityRows, execution, initialAccount] = await Promise.all([
-    getSettings(), getRecentTrades(), getRecentOrders(),
+  const [tradeRows, orderRows, eventRows, equityRows, execution, initialAccount] = await Promise.all([
+    getRecentTrades(), getRecentOrders(),
     getRecentEvents(), getEquityHistory(), executionCoordinator.dashboard(), getAccount(),
   ]);
-  const { account, positions } = execution;
+  const { account, positions, settings } = execution;
   const observability = engine.getDashboardObservability();
   const currentPortfolioRisk = portfolioRisk({
     equity: account.equity,

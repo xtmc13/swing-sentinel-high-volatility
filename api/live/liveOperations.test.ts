@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InMemoryReconciliationStore } from "./reconciliation";
 import type { LiveOrderStore } from "./orderStateMachine";
 import { readLiveOperations } from "./liveOperations";
@@ -36,7 +36,10 @@ describe("live dashboard operations", () => {
       message: "缺少止损",
       detectedAt: 1_800_000_000_100,
     });
-    const orders = { listOrders: async () => [order] };
+    const orders = {
+      listRecentOrders: async () => [order],
+      listActiveProtectionOrders: async () => [],
+    };
 
     await expect(readLiveOperations(orders, reconciliation)).resolves.toEqual({
       orders: [{
@@ -56,6 +59,7 @@ describe("live dashboard operations", () => {
         reduceOnly: false,
         createdAt: new Date(1_800_000_000_000).toISOString(),
       }],
+      protectionOrders: [],
       unsettledIntents: [{ id: "intent-1", symbol: "BTCUSDT", status: "SUBMITTING" }],
       reconciliationIssues: [{
         id: expect.any(String),
@@ -67,5 +71,23 @@ describe("live dashboard operations", () => {
         detectedAt: new Date(1_800_000_000_100).toISOString(),
       }],
     });
+  });
+
+  it("bounds recent/reconciliation reads and queries active protection independently", async () => {
+    const protection = { ...order, type: "STOP_MARKET" as const, status: "NEW" as const, reduceOnly: true };
+    const listRecentOrders = vi.fn(async () => []);
+    const listActiveProtectionOrders = vi.fn(async () => [protection]);
+    const reconciliation = new InMemoryReconciliationStore();
+    const listIssues = vi.spyOn(reconciliation, "listIssues");
+    const listUnsettledIntents = vi.spyOn(reconciliation, "listUnsettledIntents");
+
+    const result = await readLiveOperations({ listRecentOrders, listActiveProtectionOrders }, reconciliation);
+
+    expect(listRecentOrders).toHaveBeenCalledWith(60);
+    expect(listActiveProtectionOrders).toHaveBeenCalledTimes(1);
+    expect(listIssues).toHaveBeenCalledWith(100);
+    expect(listUnsettledIntents).toHaveBeenCalledWith(100);
+    expect(result.orders).toEqual([]);
+    expect(result.protectionOrders[0]).toMatchObject({ type: "STOP_MARKET", status: "NEW", reduceOnly: true });
   });
 });

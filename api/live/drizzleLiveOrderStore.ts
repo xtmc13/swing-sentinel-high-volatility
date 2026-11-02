@@ -1,7 +1,8 @@
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { liveFills, liveIntents, liveOrders, livePositions, tradingSettings } from "@db/schema";
 import type { Side } from "@contracts/trading";
-import { liveSubmissionPermitted, lockEmergencyGeneration, type LiveDatabase, type LiveTransaction } from "./livePersistence";
+import type { AssertCurrentLiveAdmission } from "./liveConfig";
+import { liveSubmissionPermitted, lockLiveControls, type LiveDatabase, type LiveTransaction } from "./livePersistence";
 import {
   addDecimals,
   compareDecimals,
@@ -93,6 +94,18 @@ async function readOrder(db: Reader, clientOrderId: string, lock = false): Promi
     return orderFromRows(row, fills);
 }
 
+async function ordersFromRows(db: Reader, rows: OrderRow[]): Promise<LiveOrder[]> {
+  if (rows.length === 0) return [];
+  const fills = await db.select().from(liveFills).where(inArray(liveFills.orderId, rows.map((row) => row.id)));
+  const byOrder = new Map<string, FillRow[]>();
+  for (const fill of fills) {
+    const current = byOrder.get(fill.orderId) ?? [];
+    current.push(fill);
+    byOrder.set(fill.orderId, current);
+  }
+  return rows.map((row) => orderFromRows(row, byOrder.get(row.id) ?? []));
+}
+
 async function readPosition(db: Reader, positionId: string, lock = false): Promise<LivePosition | null> {
     const query = db.select().from(livePositions).where(eq(livePositions.id, positionId)).limit(1);
     const rows = await (lock ? query.for("update") : query);
@@ -135,7 +148,22 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
 
   async listOrders(): Promise<LiveOrder[]> {
     const rows = await this.db.select().from(liveOrders);
-    return Promise.all(rows.map((row) => readOrder(this.db, row.clientOrderId) as Promise<LiveOrder>));
+    return ordersFromRows(this.db, rows);
+  }
+
+  async listRecentOrders(limit: number): Promise<LiveOrder[]> {
+    const rows = await this.db.select().from(liveOrders)
+      .orderBy(desc(liveOrders.createdAt), desc(liveOrders.id)).limit(limit);
+    return ordersFromRows(this.db, rows);
+  }
+
+  async listActiveProtectionOrders(): Promise<LiveOrder[]> {
+    const rows = await this.db.select().from(liveOrders).where(and(
+      eq(liveOrders.type, "STOP_MARKET"),
+      eq(liveOrders.reduceOnly, true),
+      inArray(liveOrders.status, ["NEW", "PARTIALLY_FILLED"]),
+    ));
+    return ordersFromRows(this.db, rows);
   }
 
   async transitionOrder(
@@ -197,27 +225,43 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
     }
   }
 
-  async admitOrder(clientOrderId: string, expectedGeneration: number): Promise<LiveOrder> {
+  async admitOrder(
+    clientOrderId: string,
+    expectedGeneration: number,
+    assertCurrentAdmission: AssertCurrentLiveAdmission,
+  ): Promise<LiveOrder> {
     return this.db.transaction(async (tx) => {
       const current = await readOrder(tx, clientOrderId, true);
       if (!current) throw new Error("Live order not found");
-      if (current.status !== "PENDING_SEND") return current;
-      const settings = await tx.select({ autoTrade: tradingSettings.autoTrade }).from(tradingSettings)
+      if (!["PENDING_SEND", "SUBMITTING"].includes(current.status)) return current;
+      const settings = await tx.select({ autoTrade: tradingSettings.autoTrade, executionMode: tradingSettings.executionMode }).from(tradingSettings)
         .where(eq(tradingSettings.id, 1)).for("update");
-      const generation = await lockEmergencyGeneration(tx);
+      const controls = await lockLiveControls(tx);
       const intents = await tx.select({ status: liveIntents.status, manualCanary: liveIntents.manualCanary }).from(liveIntents)
         .where(eq(liveIntents.id, current.intentId)).for("update");
-      const emergencyCancelled = intents[0]?.status === "CANCEL";
-      if (emergencyCancelled || !liveSubmissionPermitted({
+      const permitted = liveSubmissionPermitted({
+        armed: controls.armed,
+        executionMode: settings[0]?.executionMode ?? "MISSING",
         autoTrade: settings[0]?.autoTrade ?? false,
         manualCanary: intents[0]?.manualCanary ?? false,
-        generation,
+        generation: controls.generation,
         expectedGeneration,
         intentStatus: intents[0]?.status ?? "MISSING",
-      })) {
+      });
+      let authorized = permitted;
+      if (permitted) {
+        try {
+          await assertCurrentAdmission();
+        } catch {
+          authorized = false;
+        }
+      }
+      if (!authorized) {
         await tx.update(liveOrders).set({ status: "CANCEL" }).where(eq(liveOrders.id, current.id));
+        await tx.update(liveIntents).set({ status: "CANCEL" }).where(eq(liveIntents.id, current.intentId));
         return { ...current, status: "CANCEL" };
       }
+      if (current.status === "SUBMITTING") return current;
       await tx.update(liveOrders).set({ status: "SUBMITTING" }).where(eq(liveOrders.id, current.id));
       await tx.update(liveIntents).set({ status: "SUBMITTING" }).where(eq(liveIntents.id, current.intentId));
       return { ...current, status: "SUBMITTING" };

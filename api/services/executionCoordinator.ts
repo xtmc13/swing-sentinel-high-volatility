@@ -36,6 +36,15 @@ import {
 import { DrizzleLiveOrderStore } from "../live/drizzleLiveOrderStore";
 import { DrizzleReconciliationStore } from "../live/reconciliation";
 import { readLiveOperations, type LiveOperations } from "../live/liveOperations";
+import {
+  createLiveAdmissionGuard,
+  getLivePublicStatus,
+  liveTradingEnabled,
+  type AssertCurrentLiveAdmission,
+} from "../live/liveConfig";
+import { setLiveArmed } from "../live/livePersistence";
+
+export { liveTradingEnabled } from "../live/liveConfig";
 
 export type OpenExecutionResult =
   | { ok: true; positionId: string; reason: string }
@@ -70,6 +79,7 @@ export interface OutstandingExecutionRisk {
 }
 
 export interface ExecutionDashboard extends ExecutionSnapshot, LiveOperations {
+  settings: TradingSettings;
   status: ExecutionStatus;
 }
 
@@ -84,6 +94,7 @@ export interface ExecutionCoordinatorDependencies {
   getLiveOperations?: () => Promise<LiveOperations>;
   runLivePreflight?: () => Promise<LiveReadiness>;
   privateWs?: { health(): PrivateWsHealth };
+  reconciliation?: { health(): { configured: boolean; running: boolean; lastRunAt: number | null } };
   market?: { readonly dataSource: DataSource };
   env?: Record<string, string | undefined>;
   now?: () => number;
@@ -100,10 +111,6 @@ export const paperExecutionAdapter: ExecutionAdapter = {
   snapshot: getAccountSnapshotWithPositions,
 };
 
-export function liveTradingEnabled(env: Record<string, string | undefined>): boolean {
-  return env.LIVE_TRADING_ENABLED === "true";
-}
-
 async function defaultLiveControls(): Promise<LiveControls> {
   const db = getDb();
   const rows = await db.select().from(liveControls).where(eq(liveControls.id, 1)).limit(1);
@@ -113,9 +120,11 @@ async function defaultLiveControls(): Promise<LiveControls> {
   return { ...DEFAULT_LIVE_CONTROLS };
 }
 
-async function defaultSetLiveControls(controls: LiveControls): Promise<void> {
-  await getDb().insert(liveControls).values({ id: 1, ...controls })
-    .onDuplicateKeyUpdate({ set: { armed: controls.armed } });
+async function defaultSetLiveControls(
+  controls: LiveControls,
+  assertCurrentAdmission: AssertCurrentLiveAdmission,
+): Promise<void> {
+  await setLiveArmed(getDb(), controls.armed, assertCurrentAdmission);
 }
 
 async function defaultLiveOperations(): Promise<LiveOperations> {
@@ -138,7 +147,6 @@ export class ExecutionCoordinator {
   private readonly consumedMomentumSignals = new Set<string>();
   private readonly dependencies: ExecutionCoordinatorDependencies;
   private openSwitchTail: Promise<void> = Promise.resolve();
-  private lastPreflight: LiveReadiness = { ready: false, reasons: ["尚未执行主网预检"], checkedAt: null };
   private lastMomentumFrame: MomentumFeatureFrame | null = null;
 
   constructor(dependencies: ExecutionCoordinatorDependencies = {}) {
@@ -204,11 +212,28 @@ export class ExecutionCoordinator {
     return this.serializeOpenSwitch(() => this.openWhenSerialized(opportunity, executionHealthy, true));
   }
 
-  private async runPreflight(): Promise<LiveReadiness> {
-    this.lastPreflight = this.dependencies.runLivePreflight
-      ? await this.dependencies.runLivePreflight()
-      : { ready: false, reasons: ["主网预检未配置"], checkedAt: null };
-    return this.lastPreflight;
+  private async currentPreflight(): Promise<LiveReadiness> {
+    if (!this.dependencies.runLivePreflight) {
+      return { ready: false, reasons: ["主网预检未配置"], checkedAt: null };
+    }
+    try {
+      const result = await this.dependencies.runLivePreflight();
+      const checkedAt = result.checkedAt === null ? Number.NaN : Date.parse(result.checkedAt);
+      if (result.ready && (!Number.isFinite(checkedAt) || checkedAt > this.now() || this.now() - checkedAt > 10_000)) {
+        return { ready: false, reasons: [...result.reasons, "预检结果缺少有效新鲜时间"], checkedAt: result.checkedAt };
+      }
+      return result;
+    } catch {
+      return { ready: false, reasons: ["当前主网预检调用失败"], checkedAt: null };
+    }
+  }
+
+  private currentAdmissionGuard(): AssertCurrentLiveAdmission {
+    return createLiveAdmissionGuard(
+      this.dependencies.env ?? process.env,
+      () => this.currentPreflight(),
+      () => this.now(),
+    );
   }
 
   private async openWhenSerialized(
@@ -230,8 +255,11 @@ export class ExecutionCoordinator {
       if (!controls.armed) return { ok: false, reason: "主网执行未 armed" };
       if (!manualCanary && !settings.autoTrade) return { ok: false, reason: "自动交易已暂停" };
       if (!this.dependencies.live) return { ok: false, reason: "LIVE_MAINNET adapter 尚未配置" };
-      const preflight = await this.runPreflight();
+      const preflight = await this.currentPreflight();
       if (!preflight.ready) return { ok: false, reason: `主网预检未通过：${preflight.reasons.join("；") || "未知原因"}` };
+      const current = await this.status();
+      const blocking = current.reasons.filter((reason) => !(manualCanary && reason.startsWith("自动交易已暂停")));
+      if (blocking.length > 0) return { ok: false, reason: `当前主网门控未通过：${blocking.join("；")}` };
     }
 
     if (guardedMomentumSignal && opportunity.expiryTime <= this.now()) {
@@ -328,19 +356,12 @@ export class ExecutionCoordinator {
     outstanding: OutstandingExecutionRisk,
     operations: LiveOperations,
     positions: PositionView[],
+    preflight: LiveReadiness,
   ): ExecutionStatus {
     const env = this.dependencies.env ?? process.env;
     const environmentEnabled = liveTradingEnabled(env);
+    const credentialsConfigured = getLivePublicStatus(env).credentialsConfigured;
     const adapterConfigured = this.dependencies.live !== undefined;
-    const reasons: string[] = [];
-    if (settings.executionMode === "LIVE_MAINNET") {
-      if (this.marketSource === "TESTNET") reasons.push("TESTNET 行情禁止真实执行");
-      if (!environmentEnabled) reasons.push("LIVE_TRADING_ENABLED 未开启");
-      if (!controls.armed) reasons.push("主网执行未 armed");
-      if (!adapterConfigured) reasons.push("LIVE_MAINNET adapter 尚未配置");
-      if (!this.lastPreflight.ready) reasons.push(...this.lastPreflight.reasons);
-      if (!settings.autoTrade) reasons.push("自动交易已暂停（手动 canary 不受影响）");
-    }
     const frame = this.lastMomentumFrame;
     const frameFresh = frame !== null && frame.quality === "GOOD"
       && this.now() >= frame.received_time && this.now() - frame.received_time <= 5_000;
@@ -352,45 +373,93 @@ export class ExecutionCoordinator {
         : !frame ? "尚未收到动量特征帧"
           : frameFresh ? "动量特征帧新鲜" : "动量特征帧陈旧或质量不合格",
     };
+    const privateWs = this.dependencies.privateWs?.health() ?? {
+      configured: false,
+      running: false,
+      connected: false,
+      lastMessageAt: null,
+      reconnects: 0,
+    };
+    const privateWsFresh = privateWs.lastMessageAt !== null && this.now() >= privateWs.lastMessageAt
+      && this.now() - privateWs.lastMessageAt <= 10_000;
+    const privateWsHealthy = privateWs.configured && privateWs.running && privateWs.connected && privateWsFresh;
     const openIssues = operations.reconciliationIssues.filter((issue) => issue.status !== "RESOLVED");
     const severeIssues = openIssues.filter((issue) => issue.severity === "ERROR" || issue.severity === "CRITICAL");
     const latestIssue = operations.reconciliationIssues.reduce<number>(
       (latest, issue) => Math.max(latest, Date.parse(issue.detectedAt)),
       0,
     );
-    const terminal = new Set(["FILLED", "CANCEL", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"]);
+    const reconciliationState = this.dependencies.reconciliation?.health() ?? {
+      configured: false,
+      running: false,
+      lastRunAt: null,
+    };
+    const reconciliationFresh = reconciliationState.lastRunAt !== null && this.now() >= reconciliationState.lastRunAt
+      && this.now() - reconciliationState.lastRunAt <= 10_000;
+    const reconciliationHealthy = reconciliationState.configured && reconciliationState.running
+      && reconciliationFresh && severeIssues.length === 0;
     const missingProtections = settings.executionMode === "LIVE_MAINNET"
-      ? positions.filter((position) => !operations.orders.some((order) => order.intentId === position.id
-        && order.type === "STOP_MARKET" && !terminal.has(order.status)))
+      ? positions.filter((position) => !operations.protectionOrders.some((order) => order.intentId === position.id
+        && order.type === "STOP_MARKET" && order.reduceOnly && ["NEW", "PARTIALLY_FILLED"].includes(order.status)))
         .map((position) => `${position.symbol} 缺少有效止损保护`)
       : [];
+    const healthReasons: string[] = [];
+    if (!privateWsHealthy) healthReasons.push("私有 WS 未连接或消息不新鲜");
+    if (!reconciliationHealthy) healthReasons.push("对账未运行、已陈旧或存在严重问题");
+    if (settings.momentumEnabled && !frameFresh) healthReasons.push("动量检测无新鲜有效特征帧");
+    if (missingProtections.length > 0) healthReasons.push(...missingProtections);
+    const reasons: string[] = [];
+    if (settings.executionMode === "LIVE_MAINNET") {
+      if (this.marketSource === "TESTNET") reasons.push("TESTNET 行情禁止真实执行");
+      if (!environmentEnabled) reasons.push("LIVE_TRADING_ENABLED 未开启");
+      if (!credentialsConfigured) reasons.push("主网凭据未配置");
+      if (!controls.armed) reasons.push("主网执行未 armed");
+      if (!adapterConfigured) reasons.push("LIVE_MAINNET adapter 尚未配置");
+      if (!preflight.ready) reasons.push(...preflight.reasons);
+      reasons.push(...healthReasons);
+      if (!settings.autoTrade) reasons.push("自动交易已暂停（手动 canary 不受影响）");
+    }
+    const effectivePreflightReady = preflight.ready && healthReasons.length === 0;
     return {
       executionMode: settings.executionMode,
       armed: controls.armed,
       environmentEnabled,
-      credentialsConfigured: Boolean(env.BINANCE_API_KEY && env.BINANCE_API_SECRET),
+      credentialsConfigured,
       adapterConfigured,
       canSubmit: settings.executionMode === "LIVE_MAINNET" && reasons.length === 0,
       reasons,
-      preflight: this.lastPreflight,
+      preflight: {
+        ...preflight,
+        ready: effectivePreflightReady,
+        reasons: effectivePreflightReady ? preflight.reasons : [...new Set([...preflight.reasons, ...healthReasons])],
+      },
       momentum,
       outstanding,
       reconciliation: {
-        configured: true,
-        healthy: severeIssues.length === 0,
+        configured: reconciliationState.configured,
+        running: reconciliationState.running,
+        healthy: reconciliationHealthy,
         openIssues: openIssues.length,
         severeIssues: severeIssues.length,
+        lastRunAt: reconciliationState.lastRunAt === null ? null : new Date(reconciliationState.lastRunAt).toISOString(),
         lastDetectedAt: latestIssue > 0 ? new Date(latestIssue).toISOString() : null,
       },
-      privateWs: this.dependencies.privateWs?.health() ?? {
-        configured: false,
-        running: false,
-        connected: false,
-        lastMessageAt: null,
-        reconnects: 0,
-      },
+      privateWs,
       missingProtections,
     };
+  }
+
+  private statusPreflight(settings: TradingSettings, controls: LiveControls): Promise<LiveReadiness> {
+    const env = this.dependencies.env ?? process.env;
+    const basicGates = settings.executionMode === "LIVE_MAINNET" && controls.armed
+      && this.dependencies.live !== undefined && liveTradingEnabled(env)
+      && getLivePublicStatus(env).credentialsConfigured;
+    if (basicGates) return this.currentPreflight();
+    return Promise.resolve({
+      ready: false,
+      reasons: [settings.executionMode === "PAPER" ? "PAPER 模式无需主网预检" : "基础门控未满足，未执行主网预检"],
+      checkedAt: null,
+    });
   }
 
   async status(): Promise<ExecutionStatus> {
@@ -404,7 +473,8 @@ export class ExecutionCoordinator {
       this.dependencies.getOutstandingRisk?.() ?? defaultOutstandingRisk(positionPromise),
       positionPromise,
     ]);
-    return this.buildStatus(settings, controls, outstanding, operations, positions);
+    const preflight = await this.statusPreflight(settings, controls);
+    return this.buildStatus(settings, controls, outstanding, operations, positions, preflight);
   }
 
   async dashboard(): Promise<ExecutionDashboard> {
@@ -436,10 +506,12 @@ export class ExecutionCoordinator {
     const outstanding = this.dependencies.getOutstandingRisk
       ? await this.dependencies.getOutstandingRisk()
       : await defaultOutstandingRisk(Promise.resolve(snapshot.positions));
+    const preflight = await this.statusPreflight(settings, controls);
     return {
       ...snapshot,
       ...operations,
-      status: this.buildStatus(settings, controls, outstanding, operations, snapshot.positions),
+      settings,
+      status: this.buildStatus(settings, controls, outstanding, operations, snapshot.positions, preflight),
     };
   }
 
@@ -449,12 +521,15 @@ export class ExecutionCoordinator {
         const settings = await this.settings();
         if (settings.executionMode !== "LIVE_MAINNET") throw new Error("只有 LIVE_MAINNET 模式可以 armed");
         if (this.marketSource === "TESTNET") throw new Error("TESTNET 行情禁止 armed");
-        if (!liveTradingEnabled(this.dependencies.env ?? process.env)) throw new Error("LIVE_TRADING_ENABLED 未开启");
+        const env = this.dependencies.env ?? process.env;
+        if (!liveTradingEnabled(env)) throw new Error("LIVE_TRADING_ENABLED 未开启");
+        if (!getLivePublicStatus(env).credentialsConfigured) throw new Error("主网凭据未配置");
         if (!this.dependencies.live) throw new Error("LIVE_MAINNET adapter 尚未配置");
-        const preflight = await this.runPreflight();
+        const preflight = await this.currentPreflight();
         if (!preflight.ready) throw new Error(`主网预检未通过：${preflight.reasons.join("；") || "未知原因"}`);
       }
-      await (this.dependencies.setLiveControls ?? defaultSetLiveControls)({ armed });
+      if (this.dependencies.setLiveControls) await this.dependencies.setLiveControls({ armed });
+      else await defaultSetLiveControls({ armed }, this.currentAdmissionGuard());
       return this.status();
     });
   }

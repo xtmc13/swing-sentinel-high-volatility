@@ -15,8 +15,9 @@ const mocks = vi.hoisted(() => ({
   dashboard: vi.fn(async () => ({
     account: {},
     positions: [],
+    settings: { ...DEFAULT_SETTINGS },
     status: { executionMode: "PAPER", armed: false },
-    liveOrders: [],
+    orders: [],
     unsettledIntents: [],
     reconciliationIssues: [],
   })),
@@ -181,5 +182,22 @@ describe("统一执行管理入口", () => {
 
     await expect(caller().dashboard()).resolves.toMatchObject({ execution: { executionMode: "PAPER", armed: false } });
     expect(mocks.dashboard).toHaveBeenCalled();
+  });
+
+  it("dashboard 标签和风险参数使用 coordinator 同一次设置快照", async () => {
+    mocks.dashboard.mockResolvedValueOnce({
+      account: { equity: 100_000 },
+      positions: [],
+      settings: { ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" },
+      status: { executionMode: "LIVE_MAINNET", armed: false },
+      orders: [],
+      unsettledIntents: [],
+      reconciliationIssues: [],
+    });
+    mocks.getSettings.mockResolvedValueOnce({ ...DEFAULT_SETTINGS, executionMode: "PAPER" });
+
+    const result = await caller().dashboard();
+    expect(result.settings.executionMode).toBe("LIVE_MAINNET");
+    expect(result.execution.executionMode).toBe("LIVE_MAINNET");
   });
 });

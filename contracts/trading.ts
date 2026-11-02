@@ -36,9 +36,11 @@ export interface OutstandingExecutionStatus {
 
 export interface ReconciliationHealth {
   configured: boolean;
+  running: boolean;
   healthy: boolean;
   openIssues: number;
   severeIssues: number;
+  lastRunAt: string | null;
   lastDetectedAt: string | null;
 }
 

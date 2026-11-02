@@ -167,8 +167,10 @@ function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTra
     return { ok: true as const, version: input.expectedVersion + 1 };
   });
   const pauseAutoTrade = vi.fn(async () => undefined);
+  const assertCurrentAdmission = vi.fn(async () => undefined);
   const adapter = new MainnetLiveExecutionAdapter({
     store,
+    assertCurrentAdmission,
     gateway,
     userTradesPageLimit: 2,
     workerId: "worker-a",
@@ -206,7 +208,7 @@ function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTra
       };
     },
   });
-  return { store, gateway, created, claims, createIntent, claimIntent, pauseAutoTrade, adapter, finalMode: () => finalMode };
+  return { store, gateway, created, claims, createIntent, claimIntent, pauseAutoTrade, assertCurrentAdmission, adapter, finalMode: () => finalMode };
 }
 
 function useMomentumClaimDatabase(store: InMemoryLiveOrderStore, positionId: string) {
@@ -267,6 +269,57 @@ describe("mainnet live execution adapter", () => {
     expect(h.createIntent.mock.calls[0]?.[1].requireAutoTrade).toBe(false);
     expect((await h.store.listOrders())[0]).toMatchObject({ manualCanary: true, status: "NEW" });
     expect(h.gateway.placed).toHaveLength(1);
+  });
+
+  it("cross-worker disarm during current admission invalidates both workers before transport", async () => {
+    const h = setup();
+    const clientOrderId = "cross-worker-entry";
+    h.store.addOrder({
+      id: "order-cross-worker",
+      intentId: "intent-cross-worker",
+      clientOrderId,
+      exchangeOrderId: null,
+      symbol: "BTCUSDT",
+      side: "LONG",
+      type: "LIMIT",
+      status: "PENDING_SEND",
+      price: "100",
+      stopPrice: null,
+      originalQuantity: "2",
+      executedQuantity: "0",
+      averagePrice: "0",
+      commission: "0",
+      reduceOnly: false,
+      manualCanary: true,
+      createdAt: 1,
+    });
+
+    const workerA = await h.store.admitOrder(clientOrderId, 7, async () => { h.store.pauseExecution(); });
+    const workerB = await h.store.admitOrder(clientOrderId, 7, async () => undefined);
+
+    expect(workerA.status).toBe("CANCEL");
+    expect(workerB.status).toBe("CANCEL");
+    expect(h.gateway.placed).toHaveLength(0);
+  });
+
+  it("revalidates current admission immediately before transport", async () => {
+    const h = setup();
+    h.assertCurrentAdmission.mockImplementation(async () => {
+      if (h.assertCurrentAdmission.mock.calls.length === 2) h.store.pauseExecution();
+    });
+
+    await expect(h.adapter.open(opportunity)).resolves.toMatchObject({ ok: false });
+    expect(h.gateway.placed).toHaveLength(0);
+    expect((await h.store.listOrders())[0]?.status).toBe("CANCEL");
+  });
+
+  it("rejects transport when the current admission guard itself fails", async () => {
+    const h = setup();
+    h.assertCurrentAdmission.mockRejectedValue(new Error("preflight stale"));
+
+    await expect(h.adapter.open(opportunity)).resolves.toMatchObject({ ok: false });
+    expect(h.gateway.placed).toHaveLength(0);
+    expect((await h.store.listOrders())[0]?.status).toBe("CANCEL");
   });
 
   it("passes the transactionally selected HIGH mode into the final gate", async () => {
@@ -467,13 +520,26 @@ describe("mainnet live execution adapter", () => {
       momentumEnabled: true,
       strategyMode: "MOMENTUM",
     };
+    const momentumStore = new InMemoryMomentumStateStore();
     const coordinator = createExecutionCoordinator({
       live: h.adapter,
+      momentumStore,
       getSettings: async () => settings,
       getLiveControls: async () => ({ armed: true }),
-      runLivePreflight: async () => ({ ready: true, reasons: [], checkedAt: null }),
-      env: { LIVE_TRADING_ENABLED: "true" },
+      runLivePreflight: async () => ({ ready: true, reasons: [], checkedAt: new Date().toISOString() }),
+      getLiveOperations: async () => ({ orders: [], protectionOrders: [], unsettledIntents: [], reconciliationIssues: [] }),
+      getOutstandingRisk: async () => ({ openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
+      privateWs: { health: () => ({ configured: true, running: true, connected: true, lastMessageAt: Date.now(), reconnects: 0 }) },
+      reconciliation: { health: () => ({ configured: true, running: true, lastRunAt: Date.now() }) },
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key", BINANCE_MAINNET_API_SECRET: "fake-secret" },
       market: { dataSource: "MAINNET" },
+    });
+    const now = Date.now();
+    await coordinator.observeMomentumFrame({
+      symbol: "BTCUSDT", event_time: now - 1, received_time: now, sequence: 1, generation: 1,
+      quality: "GOOD", config_hash: "a".repeat(64), mark_price: 100, microprice: 100,
+      spread_bps: 1, depth_imbalance: 0.2, aggressive_buy_volume: 2, aggressive_sell_volume: 1,
+      short_return: 0.001, burst_z: 2, realized_volatility: 0.01,
     });
     await coordinator.open(opportunity);
     await h.adapter.handleFill(`${h.created[0].id}-entry`, {
@@ -729,6 +795,7 @@ describe("mainnet live execution adapter", () => {
       store: new InMemoryLiveOrderStore(),
       gateway: new AdapterGateway(),
       workerId: "worker-a",
+      assertCurrentAdmission: async () => undefined,
       prepareIntent: () => { throw new Error("not used"); },
       finalGate: () => { throw new Error("not used"); },
     });

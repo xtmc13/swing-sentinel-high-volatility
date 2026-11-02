@@ -241,7 +241,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
 
   const fundingCheckedAt = new Map<string, number>();
 
-  async function settlePositionFunding(row: PositionRow, snapshot: MarketSnapshot, settings: TradingSettings) {
+  async function settlePositionFunding(row: PositionRow, snapshot: MarketSnapshot, settings: TradingSettings, sourceGeneration: number) {
     if (!market.getFundingRates || !snapshot.quality.valid) return;
     const lastCheck = fundingCheckedAt.get(row.id) ?? 0;
     if (now() - lastCheck < 60_000) return;
@@ -253,7 +253,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       const settled = await db.transaction(async (tx) => {
         await tx.select().from(simulationAccounts).where(eq(simulationAccounts.id, 1)).limit(1).for("update");
         const current = (await tx.select().from(positions).where(eq(positions.id, row.id)).limit(1))[0];
-        if (!current || current.status !== "OPEN") return false;
+        if (!current || current.status !== "OPEN" || market.sourceGeneration !== sourceGeneration) return false;
         const existing = await tx.select().from(fundingSettlements).where(and(
           eq(fundingSettlements.positionId, row.id),
           eq(fundingSettlements.fundingTime, event.fundingTime),
@@ -517,19 +517,29 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
   async function manageOpenPositions() {
     const settings = await getSettings();
     const db = dbFor();
+    const sourceGeneration = market.sourceGeneration;
     const rows = await db.select().from(positions).where(eq(positions.status, "OPEN"));
     const snapshots = new Map(await Promise.all(rows.map(async (row) => [row.symbol, await market.getMarketSnapshot(row.symbol)] as const)));
+    if (market.sourceGeneration !== sourceGeneration) {
+      log.warn("market source changed during position snapshot; skipping management cycle");
+      return;
+    }
     for (const row of rows) {
       const snapshot = snapshots.get(row.symbol);
       if (!snapshot?.quality.valid) continue;
       try {
-        await settlePositionFunding(row, snapshot, settings);
+        await settlePositionFunding(row, snapshot, settings, sourceGeneration);
       } catch (error) {
         log.error("funding settlement failed", { symbol: row.symbol, error: String(error) });
       }
     }
     // Funding lookups above may take time. Recompute quote freshness immediately before
     // account valuation and stop/target decisions; never trust quality from fetch time.
+    // A source switch invalidates every quote collected in the previous generation.
+    if (market.sourceGeneration !== sourceGeneration) {
+      log.warn("market source changed during funding lookup; skipping position decisions");
+      return;
+    }
     const managementSnapshots = new Map([...snapshots].map(([symbol, snapshot]) => [
       symbol,
       revalidateSnapshot(snapshot, settings, now()),
@@ -558,8 +568,14 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
     if (!dailyBaseline) return;
     const dailyLocked = dailyBaseline.dailyLocked;
     for (const row of rows) {
-      const snapshot = managementSnapshots.get(row.symbol);
-      if (!snapshot?.quality.valid) continue;
+      if (market.sourceGeneration !== sourceGeneration) {
+        log.warn("market source changed during position management; stopping cycle");
+        return;
+      }
+      const capturedSnapshot = managementSnapshots.get(row.symbol);
+      if (!capturedSnapshot) continue;
+      const snapshot = revalidateSnapshot(capturedSnapshot, settings, now());
+      if (!snapshot.quality.valid) continue;
       const state = (await db.select().from(volatilityStates).where(eq(volatilityStates.symbol, row.symbol)).limit(1))[0];
       const mode: VolatilityMode = state?.mode === "HIGH" || state?.mode === "EXTREME" ? state.mode : "NORMAL";
       const managed = managePositionPrice({

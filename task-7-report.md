@@ -89,3 +89,21 @@
 - `npm run check`：exit 0；`npm run lint`：exit 0。
 - `git diff --check` 与 staged diff check：exit 0。
 - 本轮未修改 Rust；上一轮 Rust 35 passed / 1 ignored 的证据不变。数据库 integration 仍按授权边界 skipped，参数校准和不盈利保证的限制不变。
+
+
+## Review fix round 3
+
+代码/测试提交 SHA：`5d8d28e6cd9d53da5f354fde0bdf79c2c06c84c0`（`fix: make live close takeover idempotent`）。报告更新单独提交；未 push，未使用真实凭据、真实订单、preview DB/server 或真实交易调用。
+
+### RED / GREEN
+
+- 在途接管 RED：两个实际 live adapter 共享 fake store/gateway；首个 reduceOnly MARKET close 在 transport 中保持未完成，时间推进超过 5 秒 lease 后第二个 coordinator 接管。旧实现产生两个随机 close clientOrderId、两个持久化 close 和两次 exchange 请求。
+- GREEN：`OrderStateMachine.closePosition` 使用确定性的 `close-${positionId}`。已有 PENDING_SEND 订单可幂等恢复提交，SUBMITTING/其他已有状态直接复用；插入竞争后读取并校验持久化订单的 intent/symbol/reduceOnly 归属。接管测试最终只有一笔 MARKET exchange 请求和一行 close order。
+- 保留恢复：上一轮 crash 后无订单的过期 claim 重试、已有提交不重发，以及 orderStateMachine 全套测试均保持通过。Focused liveExecution + coordinator + orderStateMachine：58 passed。
+
+### Final verification
+
+- `npm test`：38 files passed，4 skipped；**370 passed，53 skipped，0 failed**。
+- `npm run check`：exit 0；`npm run lint`：exit 0。
+- `git diff --check` 与 staged diff check：exit 0。
+- 本轮无 schema/Rust 修改；真实 DB integration 继续按授权边界 skipped。

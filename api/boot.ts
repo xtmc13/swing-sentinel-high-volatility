@@ -8,6 +8,8 @@ import { env } from "./lib/env";
 import { log } from "./lib/logger";
 import { handleClientLog } from "./lib/clientlog";
 import { REQUEST_ID_HEADER, runWithRequestId } from "./lib/requestcontext";
+import { installProductionShutdown } from "./lib/processShutdown";
+import { stopProductionLiveServices } from "./live/productionSingleton";
 import { engine, startAutomation } from "./services/engine";
 import {
   isLoopbackRemoteAddress,
@@ -136,6 +138,7 @@ app.onError((err, c) => {
 export default app;
 
 if (env.isProduction) {
+  installProductionShutdown(process, stopProductionLiveServices, (code) => process.exit(code));
   const { serve } = await import("@hono/node-server");
   const { serveStaticFiles } = await import("./lib/vite");
   serveStaticFiles(app);

@@ -143,10 +143,18 @@ export const tradingRouter = createRouter({
       return await executionCoordinator.setArmed(input.armed);
     } catch (error) {
       if (error instanceof TRPCError) throw error;
-      throw new TRPCError({
-        code: "PRECONDITION_FAILED",
-        message: error instanceof Error ? error.message : "主网控制门控未通过",
-      });
+      const message = error instanceof Error ? error.message : "";
+      const knownGate = [
+        "LIVE_TRADING_ENABLED 未开启",
+        "主网凭据未配置",
+        "LIVE_MAINNET adapter 尚未配置",
+        "只有 LIVE_MAINNET 模式可以 armed",
+        "TESTNET 行情禁止 armed",
+        "主网预检未通过：",
+        "当前主网预检未通过或已陈旧：",
+      ].some((prefix) => message.startsWith(prefix));
+      if (knownGate) throw new TRPCError({ code: "PRECONDITION_FAILED", message });
+      throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "主网控制操作失败" });
     }
   }),
   candles: publicQuery.input(z.object({

@@ -95,6 +95,7 @@ export interface ExecutionCoordinatorDependencies {
   getOutstandingRisk?: () => Promise<OutstandingExecutionRisk>;
   getLiveOperations?: () => Promise<LiveOperations>;
   runLivePreflight?: (humanApproved?: boolean) => Promise<LiveReadiness>;
+  stopLive?: () => Promise<void>;
   privateWs?: { health(): PrivateWsHealth };
   reconciliation?: { health(): { configured: boolean; running: boolean; lastRunAt: number | null } };
   market?: { readonly dataSource: DataSource };
@@ -585,6 +586,7 @@ export class ExecutionCoordinator {
     const next = { ...settings, executionMode };
     if (this.dependencies.saveSettings) await this.dependencies.saveSettings(next);
     else await switchExecutionModeAtomic(executionMode);
+    if (executionMode === "PAPER") await this.dependencies.stopLive?.();
     return next;
   }
 }
@@ -597,6 +599,7 @@ export const executionCoordinator = createExecutionCoordinator({
   market: binance,
   getLiveAdapter: (humanApproved) => productionLiveRuntime.getLiveAdapter(humanApproved),
   runLivePreflight: (humanApproved) => productionLiveRuntime.runLivePreflight(humanApproved),
+  stopLive: () => productionLiveRuntime.stop(),
   privateWs: productionLiveRuntime.privateWs,
   reconciliation: productionLiveRuntime.reconciliation,
 });

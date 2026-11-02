@@ -32,16 +32,22 @@ const stoppedReconciliation = () => ({ configured: false, running: false, lastRu
 export function createProductionLiveRuntime(options: ProductionLiveRuntimeOptions) {
   let current: ProductionLiveServices | null = null;
   let starting: Promise<ProductionLiveServices> | null = null;
+  let stopping: Promise<void> | null = null;
+  let generation = 0;
 
   async function getLiveAdapter(humanApproved = false): Promise<ExecutionAdapter | null> {
+    if (stopping) await stopping;
+    const requestedGeneration = generation;
     const settings = await options.getSettings();
     if (settings.executionMode !== "LIVE_MAINNET") return null;
     if (!liveTradingEnabled(options.env) || !getLivePublicStatus(options.env).credentialsConfigured) return null;
     if (current) return current.adapter;
     const controls = await options.getLiveControls();
     if (!controls.armed && !humanApproved && !await options.hasOutstandingLiveRisk()) return null;
+    if (requestedGeneration !== generation) return getLiveAdapter(humanApproved);
     let pending = starting;
     if (!pending) {
+      const startGeneration = generation;
       pending = (async () => {
         const created = options.createServices();
         try {
@@ -50,7 +56,7 @@ export function createProductionLiveRuntime(options: ProductionLiveRuntimeOption
           try { await created.stop(); } catch { /* startup error remains the caller result */ }
           throw error;
         }
-        current = created;
+        if (startGeneration === generation) current = created;
         return created;
       })();
       starting = pending;
@@ -58,11 +64,13 @@ export function createProductionLiveRuntime(options: ProductionLiveRuntimeOption
         await pending;
       } catch (error) {
         if (starting === pending) starting = null;
-        current = null;
+        if (startGeneration === generation) current = null;
         throw error;
       }
     }
-    return (await pending).adapter;
+    const started = await pending;
+    if (requestedGeneration !== generation && stopping) await stopping;
+    return started.adapter;
   }
 
   return {
@@ -75,19 +83,30 @@ export function createProductionLiveRuntime(options: ProductionLiveRuntimeOption
     privateWs: { health: () => current?.privateWs.health() ?? disconnectedPrivateWs() },
     reconciliation: { health: () => current?.reconciliation.health() ?? stoppedReconciliation() },
     async stop(): Promise<void> {
+      if (stopping) return stopping;
+      generation += 1;
+      const stopGeneration = generation;
       const pending = starting;
       const services = current;
       current = null;
       starting = null;
-      if (pending) {
-        try {
-          const started = await pending;
-          current = null;
-          await started.stop();
-        } catch {
-          current = null;
-        }
-      } else if (services) await services.stop();
+      const operation = (async () => {
+        if (pending) {
+          try {
+            const started = await pending;
+            if (stopGeneration === generation) current = null;
+            await started.stop();
+          } catch {
+            if (stopGeneration === generation) current = null;
+          }
+        } else if (services) await services.stop();
+      })();
+      stopping = operation;
+      try {
+        await operation;
+      } finally {
+        if (stopping === operation) stopping = null;
+      }
     },
   };
 }

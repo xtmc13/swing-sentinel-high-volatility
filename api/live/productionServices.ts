@@ -44,6 +44,7 @@ export interface ProductionServicesOptions {
   socketFactory?: (url: string) => UserDataSocket;
   now?: () => number;
   reconciliationIntervalMs?: number;
+  pauseAutoTrade?: () => Promise<void>;
 }
 
 interface FreshPreflight {
@@ -116,6 +117,7 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     store: orders,
     gateway: client,
     workerId: options.workerId ?? `live-${process.pid}`,
+    pauseAutoTrade: options.pauseAutoTrade,
     assertCurrentAdmission: async () => {
       if (!admission.allowed) throw new Error("私有流或对账已冻结主网新开仓");
       await assertCurrentAdmission();
@@ -219,9 +221,13 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
   let running = false;
   let lastRunAt: number | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
+  let markFirstReconcile: (() => void) | null = null;
+  const firstReconcile = new Promise<void>((resolve) => { markFirstReconcile = resolve; });
   const reconcile = async () => {
     const result = await reconciliationService.reconcile();
     lastRunAt = now();
+    markFirstReconcile?.();
+    markFirstReconcile = null;
     return result;
   };
   const stream = new UserDataStream({
@@ -288,7 +294,13 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     reconciliation: { health: () => ({ configured: true, running, lastRunAt }) },
     async start() {
       if (running) return;
-      await stream.start();
+      await admission.suspend();
+      const streamStart = stream.start();
+      void streamStart.catch((error) => {
+        running = false;
+        log.error("private user-data stream stopped", { error: error instanceof Error ? error.message : String(error) });
+      });
+      await Promise.race([firstReconcile, streamStart]);
       running = true;
       if (lastRunAt === null) lastRunAt = now();
       const interval = options.reconciliationIntervalMs ?? 5_000;

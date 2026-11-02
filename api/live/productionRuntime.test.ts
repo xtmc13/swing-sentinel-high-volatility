@@ -169,4 +169,31 @@ describe("production live runtime gates", () => {
     expect(stops).toBe(1);
     expect(h.runtime.privateWs.health().configured).toBe(false);
   });
+
+  it("restart during shutdown waits for cleanup and retains the new lifecycle", async () => {
+    const first = services();
+    const second = services();
+    let releaseStop!: () => void;
+    let stopEntered = false;
+    first.stop = () => new Promise<void>((resolve) => {
+      stopEntered = true;
+      releaseStop = resolve;
+    });
+    let creates = 0;
+    const h = setup({ armed: true, createServices: () => ++creates === 1 ? first : second });
+
+    await h.runtime.getLiveAdapter(true);
+    const stopping = h.runtime.stop();
+    await vi.waitFor(() => expect(stopEntered).toBe(true));
+    const restarting = h.runtime.getLiveAdapter(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    expect(creates).toBe(1);
+
+    releaseStop();
+    await stopping;
+    await expect(restarting).resolves.toBe(second.adapter);
+    expect(h.runtime.privateWs.health().connected).toBe(true);
+    expect(creates).toBe(2);
+    await h.runtime.stop();
+  });
 });

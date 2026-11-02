@@ -1,7 +1,7 @@
-import { eq } from "drizzle-orm";
-import { liveControls } from "@db/schema";
+import { eq, notInArray } from "drizzle-orm";
+import { liveControls, liveIntents, liveOrders } from "@db/schema";
 import { getDb } from "../queries/connection";
-import { getOutstandingOrderCounts, getSettings } from "../queries/trading";
+import { getSettings, TERMINAL_EXECUTION_STATUSES } from "../queries/trading";
 import { DrizzleLiveOrderStore } from "./drizzleLiveOrderStore";
 import { createProductionLiveRuntime } from "./productionRuntime";
 import { createBinanceProductionLiveServices } from "./productionServices";
@@ -14,11 +14,14 @@ export const productionLiveRuntime = createProductionLiveRuntime({
     return { armed: rows[0]?.armed ?? false };
   },
   hasOutstandingLiveRisk: async () => {
-    const [counts, positions] = await Promise.all([
-      getOutstandingOrderCounts(),
-      new DrizzleLiveOrderStore(getDb()).listOpenPositions(),
+    const db = getDb();
+    const terminal = [...TERMINAL_EXECUTION_STATUSES];
+    const [positions, intents, orders] = await Promise.all([
+      new DrizzleLiveOrderStore(db).listOpenPositions(),
+      db.select({ status: liveIntents.status }).from(liveIntents).where(notInArray(liveIntents.status, terminal)),
+      db.select({ status: liveOrders.status }).from(liveOrders).where(notInArray(liveOrders.status, terminal)),
     ]);
-    return positions.length > 0 || counts.pendingIntents > 0 || counts.unfinishedOrders > 0;
+    return positions.length > 0 || intents.length > 0 || orders.length > 0;
   },
   createServices: () => createBinanceProductionLiveServices({ env: process.env, db: getDb() }),
 });

@@ -44,6 +44,7 @@ function setup(options: {
   live?: ExecutionAdapter;
   getLiveAdapter?: (humanApproved?: boolean) => Promise<ExecutionAdapter | null>;
   runLivePreflight?: (humanApproved?: boolean) => Promise<{ ready: boolean; reasons: string[]; checkedAt: string | null }>;
+  stopLive?: () => Promise<void>;
 } = {}) {
   let armed = options.armed ?? false;
   const settings = { ...DEFAULT_SETTINGS, executionMode: options.executionMode ?? "PAPER" };
@@ -52,11 +53,13 @@ function setup(options: {
     live: options.live,
     getLiveAdapter: options.getLiveAdapter,
     getSettings: async () => settings,
+    saveSettings: async (next) => { Object.assign(settings, next); },
     getLiveControls: async () => ({ armed }),
     setLiveControls: async (next) => { armed = next.armed; },
     getLiveOperations: async () => emptyOperations,
     getOutstandingRisk: async () => ({ openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
     runLivePreflight: options.runLivePreflight,
+    stopLive: options.stopLive,
     env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake", BINANCE_MAINNET_API_SECRET: "fake" },
   });
   return { coordinator, settings };
@@ -103,5 +106,16 @@ describe("lazy production live adapter", () => {
 
     await h.coordinator.setArmed(true);
     expect(approvals).toEqual([true, false]);
+  });
+
+  it("switching to PAPER stops initialized live services", async () => {
+    const stopLive = vi.fn(async () => undefined);
+    const h = setup({
+      executionMode: "LIVE_MAINNET", armed: true,
+      getLiveAdapter: async () => adapter("live"), stopLive,
+    });
+
+    await expect(h.coordinator.switchExecutionMode("PAPER")).resolves.toMatchObject({ executionMode: "PAPER" });
+    expect(stopLive).toHaveBeenCalledTimes(1);
   });
 });

@@ -183,6 +183,18 @@ describe("统一执行管理入口", () => {
       .rejects.toMatchObject({ code: "PRECONDITION_FAILED", message: "LIVE_TRADING_ENABLED 未开启" });
   });
 
+  it("未知内部错误使用通用消息且不回显配置内容", async () => {
+    const sensitive = "mysql://user:password@internal-db/private";
+    mocks.setArmed.mockRejectedValueOnce(new Error(sensitive));
+
+    const rejection = await caller().setLiveControls({
+      armed: true, confirmationPhrase: "ARM LIVE MAINNET", adminSecret: SECRET,
+    }).catch((error: unknown) => error);
+    expect(rejection).toMatchObject({ code: "INTERNAL_SERVER_ERROR", message: "主网控制操作失败" });
+    expect(JSON.stringify(rejection)).not.toContain("internal-db");
+    expect(JSON.stringify(rejection)).not.toContain("password");
+  });
+
   it("执行模式和 dashboard 都通过 coordinator，并保留 PAPER/LIVE 状态", async () => {
     await expect(caller().setExecutionMode({ executionMode: "LIVE_MAINNET" })).resolves.toMatchObject({ executionMode: "LIVE_MAINNET" });
     expect(mocks.switchExecutionMode).toHaveBeenCalledWith("LIVE_MAINNET");

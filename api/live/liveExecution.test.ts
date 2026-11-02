@@ -8,6 +8,7 @@ import type {
   CancelOrderRequest,
   LiveOrderGateway,
   PlaceOrderRequest,
+  UserTradesParams,
 } from "./binanceSigned";
 import type {
   ClaimLiveIntentInput,
@@ -57,11 +58,12 @@ class AdapterGateway implements LiveOrderGateway {
     };
   }
 
-  async queryOrder(): Promise<null> {
+  async queryOrder(): Promise<BinanceOpenOrder | null> {
     return null;
   }
 
-  async userTrades(): Promise<BinanceUserTrade[]> {
+  async userTrades(_params: UserTradesParams): Promise<BinanceUserTrade[]> {
+    void _params;
     return [];
   }
 
@@ -137,6 +139,7 @@ function setup() {
   const adapter = new MainnetLiveExecutionAdapter({
     store,
     gateway,
+    userTradesPageLimit: 2,
     workerId: "worker-a",
     createIntent,
     claimIntent,
@@ -210,6 +213,74 @@ describe("mainnet live execution adapter", () => {
     };
 
     await expect(h.adapter.open(opportunity)).resolves.toMatchObject({ ok: false });
+  });
+
+  it("recovers fills from every userTrades page before finishing UNKNOWN reconciliation", async () => {
+    const h = setup();
+    await h.store.insertOrder({
+      id: "recovery-order",
+      intentId: "recovery-intent",
+      clientOrderId: "recovery-client",
+      exchangeOrderId: "901",
+      symbol: "BTCUSDT",
+      side: "LONG",
+      type: "LIMIT",
+      status: "UNKNOWN",
+      price: "100",
+      stopPrice: null,
+      originalQuantity: "1.5",
+      executedQuantity: "0",
+      averagePrice: "0",
+      commission: "0",
+      reduceOnly: false,
+      createdAt: 1,
+    });
+    h.gateway.queryOrder = async () => ({
+      symbol: "BTCUSDT",
+      orderId: 901,
+      clientOrderId: "recovery-client",
+      price: "100",
+      origQty: "1.5",
+      executedQty: "1.5",
+      status: "FILLED",
+      side: "BUY",
+      type: "LIMIT",
+    });
+    const fromIds: Array<number | undefined> = [];
+    h.gateway.userTrades = async ({ fromId }) => {
+      fromIds.push(fromId);
+      const ids = fromId === undefined ? [1, 2] : fromId === 3 ? [3] : [];
+      return ids.map((id) => ({
+        symbol: "BTCUSDT",
+        id,
+        orderId: 901,
+        side: "BUY",
+        price: "100",
+        qty: "0.5",
+        realizedPnl: "0",
+        commission: "0.01",
+        commissionAsset: "USDT",
+        time: id,
+        buyer: true,
+        maker: false,
+      }));
+    };
+
+    const recovered = await h.adapter.recover("recovery-client", {
+      id: "recovery-intent",
+      symbol: "BTCUSDT",
+      side: "LONG",
+      stopPrice: "95",
+      liquidationPrice: "50",
+      leverage: "5",
+      maintenanceBracket: 1,
+      maintMarginRatio: "0.01",
+      cumMaintenance: "0",
+    });
+
+    expect(recovered.executedQuantity).toBe("1.5");
+    expect(recovered.commission).toBe("0.03");
+    expect(fromIds.slice(0, 2)).toEqual([undefined, 3]);
   });
 
   it("cross-worker emergency CANCEL wins over submit admission and prevents transport", async () => {

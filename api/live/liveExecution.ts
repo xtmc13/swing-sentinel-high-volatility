@@ -1,5 +1,6 @@
 import type { AccountSnapshot, Opportunity, PositionView } from "@contracts/trading";
 import type { BinanceAccountResponse, LiveOrderGateway } from "./binanceSigned";
+import { withFullUserTradePagination } from "./accounting";
 import { divideDecimals, multiplyDecimals, subtractDecimals, type DecimalString } from "./decimal";
 import {
   claimLiveIntent,
@@ -36,6 +37,7 @@ export type PrepareLiveIntent = (
 export interface MainnetLiveExecutionDependencies {
   store: LiveOrderStore;
   gateway: LiveOrderGateway & { account(): Promise<BinanceAccountResponse> };
+  userTradesPageLimit?: number;
   workerId: string;
   createIntent: (
     input: CreateLiveIntentInput,
@@ -76,10 +78,11 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   constructor(private readonly dependencies: MainnetLiveExecutionDependencies) {
     this.now = dependencies.now ?? Date.now;
     this.id = dependencies.id ?? (() => crypto.randomUUID());
-    this.machine = new OrderStateMachine(dependencies.store, dependencies.gateway, {
-      alert: dependencies.alert,
-      id: this.id,
-    });
+    this.machine = new OrderStateMachine(
+      dependencies.store,
+      withFullUserTradePagination(dependencies.gateway, dependencies.userTradesPageLimit),
+      { alert: dependencies.alert, id: this.id },
+    );
   }
 
   async open(opportunity: Opportunity, executionHealthy?: () => boolean): Promise<OpenExecutionResult> {

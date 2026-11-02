@@ -1,0 +1,349 @@
+import { describe, expect, it } from "vitest";
+import type { BinanceAccountResponse, BinanceOpenOrder, BinancePositionRisk } from "./binanceSigned";
+import {
+  InMemoryReconciliationStore,
+  ReconciliationService,
+} from "./reconciliation";
+import {
+  InMemoryLiveOrderStore,
+  type LiveOrder,
+  type LiveOrderStatus,
+  type LivePositionSeed,
+} from "./orderStateMachine";
+
+function order(status: LiveOrderStatus, suffix = "1"): LiveOrder {
+  return {
+    id: `order-${suffix}`,
+    intentId: `intent-${suffix}`,
+    clientOrderId: `client-${suffix}`,
+    exchangeOrderId: status === "PENDING_SEND" || status === "SUBMITTING" ? null : `90${suffix}`,
+    symbol: "BTCUSDT",
+    side: "LONG",
+    type: "LIMIT",
+    status,
+    price: "100",
+    stopPrice: null,
+    originalQuantity: "1",
+    executedQuantity: "0",
+    averagePrice: "0",
+    commission: "0",
+    reduceOnly: false,
+    createdAt: 1,
+  };
+}
+
+function remoteOrder(local: LiveOrder, suffix = "1"): BinanceOpenOrder {
+  return {
+    symbol: local.symbol,
+    orderId: Number(`90${suffix}`),
+    clientOrderId: local.clientOrderId,
+    price: local.price,
+    origQty: local.originalQuantity,
+    executedQty: local.executedQuantity,
+    status: local.status === "PARTIALLY_FILLED" ? "PARTIALLY_FILLED" : "NEW",
+    side: "BUY",
+    type: local.type,
+    reduceOnly: local.reduceOnly,
+  };
+}
+
+function account(walletBalance = "1000"): BinanceAccountResponse {
+  return {
+    assets: [{ asset: "USDT", walletBalance, availableBalance: "900", crossWalletBalance: walletBalance }],
+  };
+}
+
+function position(amount: string): BinancePositionRisk {
+  return {
+    symbol: "BTCUSDT",
+    positionAmt: amount,
+    entryPrice: "100",
+    markPrice: "101",
+    liquidationPrice: "80",
+    leverage: "2",
+    marginType: "isolated",
+  };
+}
+
+const seed: LivePositionSeed = {
+  id: "intent-1",
+  symbol: "BTCUSDT",
+  side: "LONG",
+  stopPrice: "95",
+  liquidationPrice: "80",
+  leverage: "2",
+  maintenanceBracket: 1,
+  maintMarginRatio: "0.01",
+  cumMaintenance: "0",
+};
+
+interface HarnessOptions {
+  statuses?: LiveOrderStatus[];
+  remoteOrders?: BinanceOpenOrder[];
+  positions?: BinancePositionRisk[];
+  account?: BinanceAccountResponse;
+  recoverError?: boolean;
+  restError?: boolean;
+  entriesAlreadyPaused?: boolean;
+  unsettledIntents?: Array<{ id: string; symbol: string; status: string }>;
+}
+
+async function harness(options: HarnessOptions = {}) {
+  const orders = new InMemoryLiveOrderStore();
+  const store = new InMemoryReconciliationStore(options.unsettledIntents);
+  const statuses = options.statuses ?? [];
+  const localOrders = statuses.map((status, index) => order(status, String(index + 1)));
+  for (const local of localOrders) orders.addOrder(local);
+  const calls: string[] = [];
+  const recovered: string[] = [];
+  const client = {
+    account: async () => {
+      calls.push("account");
+      if (options.restError) throw new Error("offline");
+      return options.account ?? account();
+    },
+    positionRisk: async () => options.positions ?? [],
+    openOrders: async () => options.remoteOrders ?? localOrders.filter((local) => local.status !== "PENDING_SEND"
+      && local.status !== "SUBMITTING" && local.status !== "UNKNOWN" && local.status !== "RECONCILING")
+      .map((local, index) => remoteOrder(local, String(index + 1))),
+  };
+  const service = new ReconciliationService({
+    client,
+    orders,
+    store,
+    recovery: {
+      recover: async (clientOrderId) => {
+        recovered.push(clientOrderId);
+        if (options.recoverError) throw new Error("UNKNOWN");
+        const latest = await orders.getOrder(clientOrderId);
+        if (!latest) throw new Error("missing");
+        return latest;
+      },
+    },
+    pauseNewEntries: async () => {
+      calls.push("pause");
+      return !options.entriesAlreadyPaused;
+    },
+    allowNewEntries: async () => { calls.push("allow"); },
+    now: () => 5_000,
+  });
+  return { service, orders, store, calls, recovered, localOrders };
+}
+
+describe("startup reconciliation", () => {
+  it("recovers every nonterminal order state only after pausing new entries", async () => {
+    const statuses: LiveOrderStatus[] = [
+      "PENDING_SEND",
+      "SUBMITTING",
+      "NEW",
+      "PARTIALLY_FILLED",
+      "UNKNOWN",
+      "RECONCILING",
+    ];
+    const remoteOrders = statuses.map((status, index) => remoteOrder(order(status, String(index + 1)), String(index + 1)));
+    const h = await harness({ statuses, remoteOrders });
+
+    const result = await h.service.reconcile();
+
+    expect(h.calls[0]).toBe("pause");
+    expect(h.calls.indexOf("pause")).toBeLessThan(h.calls.indexOf("account"));
+    expect(h.recovered).toHaveLength(6);
+    expect(h.calls.at(-1)).toBe("allow");
+    expect(result.ok).toBe(true);
+  });
+
+  it("keeps admission frozen when recovery cannot resolve UNKNOWN", async () => {
+    const h = await harness({ statuses: ["UNKNOWN"], recoverError: true });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect(h.calls).not.toContain("allow");
+    expect((await h.store.listIssues()).some((issue) => issue.category === "UNSETTLED_INTENT")).toBe(true);
+  });
+
+  it("stays frozen when the REST snapshot fails", async () => {
+    const h = await harness({ restError: true });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect(h.calls).not.toContain("allow");
+    expect((await h.store.listIssues())[0]?.category).toBe("REST_RECONCILIATION");
+  });
+
+  it("reports a persisted unsettled intent that has no order", async () => {
+    const h = await harness({
+      unsettledIntents: [{ id: "intent-without-order", symbol: "BTCUSDT", status: "SUBMITTING" }],
+    });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect(h.calls).not.toContain("allow");
+    expect((await h.store.listIssues())[0]).toMatchObject({
+      category: "UNSETTLED_INTENT",
+      symbol: "BTCUSDT",
+    });
+  });
+
+  it("does not resume an operator pause that predated reconciliation", async () => {
+    const h = await harness({ entriesAlreadyPaused: true });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(true);
+    expect(h.calls).not.toContain("allow");
+  });
+});
+
+describe("exchange and database comparison", () => {
+  it("reports an unknown manual order without taking it over", async () => {
+    const manual = remoteOrder(order("NEW", "9"), "9");
+    manual.clientOrderId = "manual-order";
+    const h = await harness({ remoteOrders: [manual] });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect(h.recovered).toEqual([]);
+    expect((await h.store.listIssues())[0]).toMatchObject({
+      category: "UNKNOWN_MANUAL_ORDER",
+      status: "OPEN",
+      severity: "CRITICAL",
+    });
+  });
+
+  it("reports quantity and executed-fill differences for a known working order", async () => {
+    const local = order("PARTIALLY_FILLED");
+    const remote = remoteOrder(local);
+    remote.origQty = "2";
+    remote.executedQty = "0.5";
+    const h = await harness({ statuses: ["PARTIALLY_FILLED"], remoteOrders: [remote] });
+    await h.orders.applyFill("order-1", {
+      exchangeTradeId: "1",
+      exchangeOrderId: "901",
+      symbol: "BTCUSDT",
+      side: "BUY",
+      price: "100",
+      quantity: "0.25",
+      commission: "0.01",
+      commissionAsset: "USDT",
+      realizedPnl: "0",
+      isMaker: false,
+      executedAt: 100,
+    }, seed);
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect(h.calls).not.toContain("allow");
+    expect((await h.store.listIssues()).find((issue) => issue.category === "ORDER_MISMATCH"))
+      .toMatchObject({ expectedValue: "0.25", actualValue: "0.5" });
+  });
+
+  it("records exact wallet balance differences against the last persisted snapshot", async () => {
+    const h = await harness({ account: account("1000.000000000000000000000000000002") });
+    await h.store.appendAccountSnapshot({
+      asset: "USDT",
+      walletBalance: "1000.000000000000000000000000000001",
+      availableBalance: "900",
+      crossWalletBalance: "1000.000000000000000000000000000001",
+      observedAt: 1_000,
+    });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).find((issue) => issue.category === "BALANCE_MISMATCH"))
+      .toMatchObject({
+        expectedValue: "1000.000000000000000000000000000001",
+        actualValue: "1000.000000000000000000000000000002",
+      });
+  });
+
+  it("reports a signed position mismatch", async () => {
+    const h = await harness({ positions: [position("-2")] });
+    h.orders.addOrder(order("FILLED"));
+    await h.orders.applyFill("order-1", {
+      exchangeTradeId: "1",
+      exchangeOrderId: "901",
+      symbol: "BTCUSDT",
+      side: "BUY",
+      price: "100",
+      quantity: "1",
+      commission: "0.1",
+      commissionAsset: "USDT",
+      realizedPnl: "0",
+      isMaker: false,
+      executedAt: 100,
+    }, seed);
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).find((issue) => issue.category === "POSITION_MISMATCH"))
+      .toMatchObject({ expectedValue: "1", actualValue: "-2" });
+  });
+
+  it("compares SHORT positions using their signed exchange quantity", async () => {
+    const h = await harness({ positions: [position("-2")] });
+    const shortOrder = { ...order("FILLED"), side: "SHORT" as const };
+    h.orders.addOrder(shortOrder);
+    await h.orders.applyFill("order-1", {
+      exchangeTradeId: "1",
+      exchangeOrderId: "901",
+      symbol: "BTCUSDT",
+      side: "SELL",
+      price: "100",
+      quantity: "1",
+      commission: "0.1",
+      commissionAsset: "USDT",
+      realizedPnl: "0",
+      isMaker: false,
+      executedAt: 100,
+    }, { ...seed, side: "SHORT" });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).find((issue) => issue.category === "POSITION_MISMATCH"))
+      .toMatchObject({ expectedValue: "-1", actualValue: "-2" });
+  });
+
+  it("only freezes and reports an unknown manual position", async () => {
+    const h = await harness({ positions: [position("3")] });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues())[0]).toMatchObject({
+      category: "UNKNOWN_MANUAL_POSITION",
+      expectedValue: "0",
+      actualValue: "3",
+    });
+  });
+
+  it("reports an open position without a covering native reduceOnly stop", async () => {
+    const h = await harness({ positions: [position("1")] });
+    h.orders.addOrder(order("FILLED"));
+    await h.orders.applyFill("order-1", {
+      exchangeTradeId: "1",
+      exchangeOrderId: "901",
+      symbol: "BTCUSDT",
+      side: "BUY",
+      price: "100",
+      quantity: "1",
+      commission: "0.1",
+      commissionAsset: "USDT",
+      realizedPnl: "0",
+      isMaker: false,
+      executedAt: 100,
+    }, seed);
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).some((issue) => issue.category === "UNPROTECTED_POSITION")).toBe(true);
+  });
+});

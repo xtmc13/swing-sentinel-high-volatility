@@ -109,6 +109,6 @@ export function analyzeClosedCandles(input: AnalyzeClosedCandlesInput): Opportun
     regime, entry, stop, target, stopDistancePct, rewardRisk: 2.2,
     leverage: settings.leverageMode === "FIXED" ? Math.min(settings.fixedLeverage, market.maxLeverage) : market.maxLeverage,
     marginPct: settings.marginPerTradePct, riskPct: settings.riskPerTradePct,
-    reasons, signalCloseTime, stateVersion: input.stateVersion, sourceGeneration: input.sourceGeneration ?? 0, atr15, createdAt: new Date(now).toISOString(),
+    reasons, signalCloseTime, stateVersion: input.stateVersion, sourceGeneration: input.sourceGeneration ?? 0, atr15,\n    momentumExhaustion: { score: exhaustion.score, resonanceCount: exhaustion.resonanceCount, resonant: exhaustion.resonant, protection: exhaustion.protection, structureBreak: exhaustion.structureBreak },\n    createdAt: new Date(now).toISOString(),
   };
 }

@@ -394,33 +394,52 @@ export class OrderStateMachine {
 
   private async invalidateReplacement(parent: LiveOrder): Promise<string | null> {
     let replacement = await this.store.getOrder(`replace-${parent.clientOrderId}`);
-    if (!replacement || replacement.status === "CANCEL") return null;
-    if (replacement.status === "FILLED") {
-      return this.reportInvalidationIssue(parent, replacement, "父单 CANCEL 后 replacement 已成交");
-    }
-    if (replacement.status === "PENDING_SEND") {
-      const cancelled = await this.store.transitionOrder(replacement.clientOrderId, ["PENDING_SEND"], { status: "CANCEL" });
-      if (cancelled?.status === "CANCEL") return null;
-      replacement = await this.requireOrder(replacement.clientOrderId);
-    }
-    if (!WORKING_STATUSES.has(replacement.status)) {
-      return replacement.status === "CANCEL" ? null
-        : this.reportInvalidationIssue(parent, replacement, `replacement 状态 ${replacement.status} 无法失效`);
-    }
-    const reconciling = await this.store.transitionOrder(replacement.clientOrderId, [replacement.status], {
-      status: "RECONCILING",
-    });
-    replacement = reconciling ?? await this.requireOrder(replacement.clientOrderId);
-    try {
-      await this.gateway.cancelOrder({ symbol: replacement.symbol, origClientOrderId: replacement.clientOrderId });
-      const actual = await this.reconcile(replacement);
-      if (actual.status === "CANCEL") return null;
-      return this.reportInvalidationIssue(parent, actual, `cancel 后实际状态为 ${actual.status}`);
-    } catch {
+    while (replacement) {
+      if (replacement.status === "CANCEL") return null;
+      if (replacement.status === "FILLED") {
+        return this.reportInvalidationIssue(parent, replacement, "父单 CANCEL 后 replacement 已成交");
+      }
+      if (replacement.status === "UNKNOWN") {
+        return this.reportInvalidationIssue(parent, replacement, "cancel 无法确认，相关 replacement 已冻结为 UNKNOWN");
+      }
+      if (replacement.status === "PENDING_SEND") {
+        const cancelled = await this.store.transitionOrder(replacement.clientOrderId, ["PENDING_SEND"], { status: "CANCEL" });
+        replacement = cancelled ?? await this.requireOrder(replacement.clientOrderId);
+        continue;
+      }
+      if (!WORKING_STATUSES.has(replacement.status)) {
+        return this.reportInvalidationIssue(parent, replacement, `replacement 状态 ${replacement.status} 无法失效`);
+      }
+      const reconciling = await this.store.transitionOrder(replacement.clientOrderId, [replacement.status], {
+        status: "RECONCILING",
+      });
+      replacement = reconciling ?? await this.requireOrder(replacement.clientOrderId);
+      if (!reconciling) continue;
+      try {
+        await this.gateway.cancelOrder({ symbol: replacement.symbol, origClientOrderId: replacement.clientOrderId });
+        replacement = await this.reconcile(replacement);
+      } catch {
+        replacement = await this.requireOrder(replacement.clientOrderId);
+      }
+      if (replacement.status === "CANCEL") return null;
+      if (replacement.status === "FILLED") {
+        return this.reportInvalidationIssue(parent, replacement, "父单 CANCEL 后 replacement 已成交");
+      }
+      if (replacement.status === "UNKNOWN") {
+        return this.reportInvalidationIssue(parent, replacement, "cancel 无法确认，相关 replacement 已冻结为 UNKNOWN");
+      }
       const latest = await this.requireOrder(replacement.clientOrderId);
+      if (latest.status === "CANCEL") return null;
+      if (latest.status === "FILLED") {
+        return this.reportInvalidationIssue(parent, latest, "父单 CANCEL 后 replacement 已成交");
+      }
+      if (latest.status === "UNKNOWN") {
+        return this.reportInvalidationIssue(parent, latest, "cancel 无法确认，相关 replacement 已冻结为 UNKNOWN");
+      }
       const unknown = await this.store.transitionOrder(latest.clientOrderId, [latest.status], { status: "UNKNOWN" });
-      return this.reportInvalidationIssue(parent, unknown ?? latest, "cancel 无法确认，相关 replacement 已冻结为 UNKNOWN");
+      replacement = unknown ?? await this.requireOrder(latest.clientOrderId);
     }
+    return null;
   }
 
   private async reportInvalidationIssue(parent: LiveOrder, replacement: LiveOrder, detail: string): Promise<string> {

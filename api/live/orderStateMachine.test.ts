@@ -337,6 +337,83 @@ describe("fill-driven live order state machine", () => {
     expect(alerts.join(" ")).toContain("未解决");
   });
 
+  it.each(["NEW", "PARTIALLY_FILLED"] as const)(
+    "freezes a replacement left %s after post-cancel reconciliation",
+    async (remoteStatus) => {
+      const { store, gateway, alerts, machine } = setup();
+      entry(store);
+      await machine.submit("entry-1");
+      await machine.handleFill("entry-1", fill(), seed);
+      const replacement = await machine.replaceOrder("entry-1", "101");
+      const query = gateway.queryOrder.bind(gateway);
+      gateway.queryOrder = async (request) => {
+        const actual = await query(request);
+        if (request.origClientOrderId === replacement.clientOrderId && actual?.status === "CANCELED") {
+          return { ...actual, status: remoteStatus };
+        }
+        return actual;
+      };
+
+      const result = await machine.handleFill("entry-1", fill({ exchangeTradeId: `late-${remoteStatus}` }), seed);
+      expect((await store.getOrder(replacement.clientOrderId))?.status).toBe("UNKNOWN");
+      expect(result.unresolved).toHaveLength(1);
+      expect(alerts.join(" ")).toContain("UNKNOWN");
+    },
+  );
+
+  it("retries cancel and recovery when freezing an invalidated replacement loses its state race", async () => {
+    const { store, gateway, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    await machine.handleFill("entry-1", fill(), seed);
+    const replacement = await machine.replaceOrder("entry-1", "101");
+    const transition = store.transitionOrder.bind(store);
+    gateway.failCancel = true;
+    let raced = false;
+    store.transitionOrder = async (clientOrderId, expectedStatuses, patch) => {
+      if (!raced && clientOrderId === replacement.clientOrderId && patch.status === "UNKNOWN") {
+        raced = true;
+        await transition(clientOrderId, ["RECONCILING"], { status: "NEW" });
+        gateway.failCancel = false;
+        return null;
+      }
+      return transition(clientOrderId, expectedStatuses, patch);
+    };
+
+    const result = await machine.handleFill("entry-1", fill({ exchangeTradeId: "late-freeze-race" }), seed);
+    expect(raced).toBe(true);
+    expect((await store.getOrder(replacement.clientOrderId))?.status).toBe("CANCEL");
+    expect(result.unresolved ?? []).toHaveLength(0);
+  });
+
+  it("does not overwrite a terminally filled replacement with the fallback freeze", async () => {
+    const { store, gateway, machine } = setup();
+    entry(store);
+    await machine.submit("entry-1");
+    await machine.handleFill("entry-1", fill(), seed);
+    const replacement = await machine.replaceOrder("entry-1", "101");
+    const getOrder = store.getOrder.bind(store);
+    const transition = store.transitionOrder.bind(store);
+    gateway.failCancel = true;
+    let reconcilingReads = 0;
+    store.getOrder = async (clientOrderId) => {
+      const latest = await getOrder(clientOrderId);
+      if (clientOrderId === replacement.clientOrderId && latest?.status === "RECONCILING") {
+        reconcilingReads += 1;
+        if (reconcilingReads === 2) {
+          await transition(clientOrderId, ["RECONCILING"], { status: "FILLED" });
+          return getOrder(clientOrderId);
+        }
+      }
+      return latest;
+    };
+
+    const result = await machine.handleFill("entry-1", fill({ exchangeTradeId: "late-terminal-race" }), seed);
+    expect(reconcilingReads).toBe(2);
+    expect((await store.getOrder(replacement.clientOrderId))?.status).toBe("FILLED");
+    expect(result.unresolved).toHaveLength(1);
+  });
+
   it("rejects replacement from UNKNOWN until explicit reconciliation", async () => {
     const { store, gateway, machine } = setup();
     entry(store);

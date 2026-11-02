@@ -83,3 +83,39 @@
 - 私有 WS 健康已可由实际 `UserDataStream.health()` 注入；singleton 未注入时显示未配置/未连接。动量健康使用本进程最近有效 frame，重启后收到新 frame 前会显示未就绪。
 - 未启动 preview server 或浏览器端到端会话；UI 通过 SSR 可访问性/文案测试、TypeScript、lint 和生产 build 验证。
 - live operations 当前从 store 读取后按时间截取 60 条展示；若长期订单量很大，可后续把分页/排序下推数据库。
+
+
+## Review fix round 1
+
+代码/测试提交 SHA：`117de47aaea51936824ba5eba88f213131aca5c2`（`fix: enforce current live admission gates`）。本报告更新单独提交；未 push，未使用真实凭据、真实订单、preview DB/server 或真实交易调用。
+
+### RED / GREEN
+
+- 首轮 review RED：8 个文件失败，9 个测试按预期失败，另有 `executionStatus` 套件因模块不存在而失败；53 个其他 focused 测试通过。失败覆盖 disarmed DB admission 仍进入 SUBMITTING、跨 worker disarm 后仍提交、armed/LIVE 策略缺失、dashboard 设置快照混用、MAINNET 凭据不被识别、当前健康门控被忽略、预检在私有 WS 不健康时仍显示通过，以及 live operations 没有有界/独立保护查询。
+- 当前授权 guard RED：`createLiveAdmissionGuard` 不存在；实现后逐次重读环境并重新运行预检，环境关闭或成功预检时间陈旧均拒绝，且没有缓存 ready。
+- 最终 transport RED：第二个 admission 检查时 disarm 仍错误返回开仓成功并调用 fake gateway；guard 自身抛错但本地状态不变也曾可能继续。实现第二次 locked/current admission 和拒绝即 CANCEL 后，两项均通过，fake gateway 调用为 0。
+- 修复成功测试夹具，使其显式提供 MAINNET 假凭据、新鲜私有 WS/对账、有效 frame 和 confirmed reduceOnly STOP_MARKET；不健康用例仍逐项保留失败条件，没有删除门控。
+- 最终 focused review：**9 files / 71 tests passed，0 failed**。
+
+### Fixes
+
+- `livePersistence.ts`：`lockLiveControls` 在同一事务中 `FOR UPDATE` 读取 armed 和 emergency generation。create/assert/admit 都要求当前 armed + LIVE_MAINNET + 合法 intent 状态 + generation，且必须调用 server-owned 当前环境/预检 guard；不接受客户端 ready 布尔值。
+- `setLiveArmed` / `disarmLiveExecution` / `pauseLiveExecution`：模式和控制行加锁；disarm/emergency 设置 armed=false、递增 generation，并将 PENDING_SEND/SUBMITTING intents/orders 置为 CANCEL。生产默认 armed 写入不再使用无事务 upsert。
+- `drizzleLiveOrderStore.ts` / `orderStateMachine.ts` / `liveExecution.ts`：所有 entry worker 共用当前 admission 签名；在首次 SUBMITTING 后、实际 transport 前再执行一次 admission。guard 缺失、抛错、disarm、模式或 generation 变化均失败关闭。跨 worker 共享 store 回归覆盖两个 worker 均无 transport。
+- `tradingRouter.ts` / `ExecutionCoordinator.dashboard()`：dashboard 设置来自 coordinator 同一快照，标签和组合风险不再使用独立读取的旧 PAPER/LIVE 设置。
+- 当前 readiness：每次 status/dashboard/open/arm 重新获取预检；成功结果必须有非未来且不超过 10 秒的 checkedAt。canSubmit 同时要求凭据、环境、armed、adapter、新鲜 preflight、私有 WS 运行/连接/消息新鲜、对账运行/新鲜/无严重问题、按需动量 frame、已确认保护和 autoTrade。手动 canary 仍只豁免 autoTrade。
+- 对账健康不再硬编码为正常；未配置、未运行、陈旧或严重问题均不健康。UI 在有任一当前 gate reason 时不能显示“预检通过”；PAPER 显示不适用。
+- `TerminalLayout.tsx` 使用 `executionEngineActive`：PAPER ACTIVE 看 autoTrade，LIVE ACTIVE 必须 canSubmit；暂停/启动按钮仍只操作 autoTrade，不混用健康状态。
+- 保护判断改用独立 `protectionOrders`，只接受 reduceOnly STOP_MARKET 的 NEW/PARTIALLY_FILLED；PENDING_SEND、SUBMITTING、UNKNOWN、RECONCILING、非 reduceOnly 均不确认保护。
+- `.env.example` 与 coordinator 统一使用 `BINANCE_MAINNET_API_KEY` / `BINANCE_MAINNET_API_SECRET`，凭据状态复用 `getLivePublicStatus`。
+- `liveOperations.ts` / stores：最近订单 SQL 下推 limit 60，dashboard 对账/意图各 limit 100；active protection 独立查询。订单 fills 改为按订单 ID 批量 `IN` 查询，消除展示路径 N+1，且最近 60 条截断不会隐藏活动止损。内部 reconciliation 的无 limit 全量读取保持不变。
+
+### Final verification
+
+- Focused review：9 files passed；**71 passed，0 failed**。
+- `npm test`：42 files passed，4 skipped；**401 passed，53 skipped，0 failed**。
+- `npm run check`：exit 0；`npm run lint`：exit 0。
+- `npm run build`：exit 0；Vite 2441 modules，Node boot bundle 完成。
+- `git diff --check` / staged diff check：exit 0。
+
+真实 DB integration 仍按任务边界 skipped；相关 fixture 已更新为 armed/generation 基线和 server-side guard，但需在授权专用数据库环境后续执行。disarm 会阻止新的 admission 和最终 transport 检查；已经实际进入交易所 transport 的请求不能靠界面状态撤回，仍由既有 UNKNOWN/reconciliation 流程确认结果。本节取代上一版 live operations 未下推限制。

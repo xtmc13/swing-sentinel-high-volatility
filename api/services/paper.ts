@@ -557,8 +557,11 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       // The rows and quotes were collected before this lock. Reconcile the open-position
       // identity set before mixing their unrealized PnL with the locked cash balance.
       const currentRows = await tx.select({ id: positions.id }).from(positions).where(eq(positions.status, "OPEN"));
-      const positionSetStable = sameOpenPositionSet(rows, currentRows);
-      const consistentValuationValid = valuationValid && positionSetStable;
+      if (!sameOpenPositionSet(rows, currentRows)) {
+        log.warn("open positions changed during management valuation; skipping cycle");
+        return null;
+      }
+      const consistentValuationValid = valuationValid;
       const equity = consistentValuationValid ? account.cash + unrealizedPnl : Number.NaN;
       const baseline = await rollUtcDayBaseline(account, equity, now(), (values) =>
         tx.update(simulationAccounts).set(values).where(eq(simulationAccounts.id, 1)));
@@ -569,7 +572,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         dailyLockDay = baseline.dayKey;
         await tx.update(simulationAccounts).set({ dailyLockDay }).where(eq(simulationAccounts.id, 1));
       }
-      return { dailyLocked: dailyLockDay === baseline.dayKey, positionSetStable };
+      return { dailyLocked: dailyLockDay === baseline.dayKey };
     });
     if (!dailyBaseline || market.sourceGeneration !== sourceGeneration) return;
     const dailyLocked = dailyBaseline.dailyLocked;

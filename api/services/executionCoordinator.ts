@@ -17,6 +17,7 @@ import {
 import { liveControls, livePositions, positions } from "@db/schema";
 import { getDb } from "../queries/connection";
 import { addEvent, getOutstandingOrderCounts, getSettings, switchExecutionModeAtomic } from "../queries/trading";
+import { log } from "../lib/logger";
 import {
   closePaperPosition,
   emergencyStop,
@@ -336,15 +337,19 @@ export class ExecutionCoordinator {
 
   async manage(): Promise<void> {
     const adapter = (await this.adapter(await this.settings()));
-    let managementError: unknown = null;
-    try {
-      await adapter.manage();
-    } catch (error) {
-      managementError = error;
+    const errors: unknown[] = [];
+    for (const stage of [
+      () => adapter.manage(),
+      () => this.manageMomentumExits(),
+      () => this.manageMomentumProtection(),
+    ]) {
+      try {
+        await stage();
+      } catch (error) {
+        errors.push(error);
+      }
     }
-    await this.manageMomentumExits();
-    await this.manageMomentumProtection();
-    if (managementError) throw managementError;
+    if (errors.length) throw new AggregateError(errors, "一个或多个持仓管理阶段失败");
   }
 
   private async submitMomentumExit(
@@ -404,10 +409,25 @@ export class ExecutionCoordinator {
     const adapter = await this.adapter(settings);
     const openPositions = await adapter.positions();
     const evaluate = this.dependencies.evaluateExhaustion ?? evaluateMomentumExhaustion;
-    const record = this.dependencies.recordEvent ?? addEvent;
-    for (const position of openPositions) {
-      if (position.strategyType !== "MOMENTUM" || position.exitPending) continue;
+    const writeEvent = this.dependencies.recordEvent ?? addEvent;
+    const record: typeof writeEvent = async (...args) => {
       try {
+        return await writeEvent(...args);
+      } catch (error) {
+        log.error("momentum protection event write failed", {
+          symbol: args[3],
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return undefined;
+      }
+    };
+    for (const position of openPositions) {
+      if (position.strategyType !== "MOMENTUM") continue;
+      try {
+        if (position.exitPending) {
+          await this.submitMomentumExit(settings, adapter, position, "恢复动量保护性退出");
+          continue;
+        }
         const now = this.now();
         const generation = market.sourceGeneration ?? 0;
         const [candles15m, candles1h, candles4h] = await Promise.all([

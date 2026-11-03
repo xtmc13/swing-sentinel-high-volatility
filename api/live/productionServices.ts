@@ -356,14 +356,23 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
   let running = false;
   let lastRunAt: number | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
+  let reconcileTail: Promise<void> = Promise.resolve();
   let markFirstReconcile: (() => void) | null = null;
   const firstReconcile = new Promise<void>((resolve) => { markFirstReconcile = resolve; });
   const reconcile = async () => {
-    const result = await reconciliationService.reconcile();
-    lastRunAt = now();
-    markFirstReconcile?.();
-    markFirstReconcile = null;
-    return result;
+    const previous = reconcileTail;
+    let release!: () => void;
+    reconcileTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      const result = await reconciliationService.reconcile();
+      lastRunAt = now();
+      markFirstReconcile?.();
+      markFirstReconcile = null;
+      return result;
+    } finally {
+      release();
+    }
   };
   const stream = new UserDataStream({
     client,

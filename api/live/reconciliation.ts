@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, like, ne, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, like, lte, ne, notInArray, sql } from "drizzle-orm";
 import { liveAccountSnapshots, liveIntents, reconciliationIssues } from "@db/schema";
 import type { LiveLedgerEntry } from "./accounting";
 import type {
@@ -69,7 +69,7 @@ export interface ReconciliationStore {
   appendAccountSnapshot(snapshot: LiveAccountSnapshot): Promise<boolean>;
   latestAccountSnapshots(): Promise<LiveAccountSnapshot[]>;
   resolveBalanceIssues(asset: string, resolvedAt: number): Promise<void>;
-  resolveTransportIssues(resolvedAt: number): Promise<void>;
+  resolveTransportIssues(resolvedAt: number, detectedBefore: number): Promise<void>;
 }
 
 export class InMemoryReconciliationStore implements ReconciliationStore {
@@ -138,9 +138,9 @@ export class InMemoryReconciliationStore implements ReconciliationStore {
     }
   }
 
-  async resolveTransportIssues(resolvedAt: number): Promise<void> {
+  async resolveTransportIssues(resolvedAt: number, detectedBefore: number): Promise<void> {
     for (const issue of this.issues) {
-      if (issue.category === "REST_RECONCILIATION" && issue.status !== "RESOLVED") {
+      if (issue.category === "REST_RECONCILIATION" && issue.status !== "RESOLVED" && issue.detectedAt <= detectedBefore) {
         issue.status = "RESOLVED";
         issue.resolvedAt = resolvedAt;
       }
@@ -254,11 +254,12 @@ export class DrizzleReconciliationStore implements ReconciliationStore {
       ));
   }
 
-  async resolveTransportIssues(resolvedAt: number): Promise<void> {
+  async resolveTransportIssues(resolvedAt: number, detectedBefore: number): Promise<void> {
     await this.db.update(reconciliationIssues).set({ status: "RESOLVED", resolvedAt: new Date(resolvedAt) })
       .where(and(
         eq(reconciliationIssues.category, "REST_RECONCILIATION"),
         ne(reconciliationIssues.status, "RESOLVED"),
+        lte(reconciliationIssues.detectedAt, new Date(detectedBefore)),
       ));
   }
 }
@@ -380,6 +381,7 @@ export class ReconciliationService {
   }
 
   async reconcile(): Promise<ReconciliationResult> {
+    const attemptStartedAt = this.now();
     const mayResume = await this.options.pauseNewEntries();
     const issues: ReconciliationIssue[] = [];
     try {
@@ -576,7 +578,7 @@ export class ReconciliationService {
 
     const ok = issues.length === 0;
     if (ok) {
-      await this.options.store.resolveTransportIssues(this.now());
+      await this.options.store.resolveTransportIssues(this.now(), attemptStartedAt);
       await mayResume?.resume();
     } else {
       await mayResume?.discard();

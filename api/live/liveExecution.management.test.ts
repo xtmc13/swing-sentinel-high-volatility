@@ -221,6 +221,64 @@ describe("signed LIVE account and position management", () => {
     expect(h.placed.filter((order) => order.type === "STOP_MARKET")).toHaveLength(0);
   });
 
+  it("two adapters sharing a store cannot finish a looser stop after a tighter one", async () => {
+    const h = harness("110.004");
+    await h.open();
+    h.protect();
+    const second = new MainnetLiveExecutionAdapter({
+      store: h.store,
+      gateway: h.gateway,
+      workerId: "worker-b",
+      now: () => NOW,
+      alert: (message) => h.alerts.push(message),
+      assertCurrentAdmission: async () => undefined,
+      createIntent: async () => { throw new Error("not used"); },
+      claimIntent: async () => { throw new Error("not used"); },
+      pauseAutoTrade: async () => undefined,
+      prepareIntent: () => { throw new Error("not used"); },
+      finalGate: () => { throw new Error("not used"); },
+    });
+    const cancel = h.gateway.cancelOrder;
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const cancelling = new Promise<void>((resolve) => { started = resolve; });
+    let paused = false;
+    h.gateway.cancelOrder = async (request) => {
+      if (!paused) {
+        paused = true;
+        started();
+        await gate;
+      }
+      return cancel(request);
+    };
+
+    const first = h.adapter.tightenStop(seed.id, 104, "first");
+    await cancelling;
+    const tighter = second.tightenStop(seed.id, 105, "second");
+    release();
+    await Promise.all([first, tighter]);
+
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ stopPrice: "105" });
+  });
+
+  it("an exit claim arriving during cancel prevents the stop replacement", async () => {
+    const h = harness("110.004");
+    await h.open();
+    h.protect();
+    const cancel = h.gateway.cancelOrder;
+    h.gateway.cancelOrder = async (request) => {
+      const result = await cancel(request);
+      await h.store.updatePosition(seed.id, { exitPending: true });
+      return result;
+    };
+
+    await expect(h.adapter.tightenStop(seed.id, 104, "衰竭收紧")).resolves.toMatchObject({ ok: true, changed: false });
+
+    expect(h.placed.filter((order) => order.type === "STOP_MARKET")).toHaveLength(0);
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ stopPrice: "95", exitPending: true });
+  });
+
   it("persists a trailing stop only after the exchange confirms its NEW replacement", async () => {
     const h = harness("110.004");
     await h.open();

@@ -78,6 +78,30 @@ export interface MainnetLiveExecutionDependencies {
 }
 
 let executionTail: Promise<void> = Promise.resolve();
+const protectionLocks = new WeakMap<LiveOrderStore, Map<string, Promise<void>>>();
+
+async function serializeProtectionOperation<T>(
+  store: LiveOrderStore,
+  positionId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  let locks = protectionLocks.get(store);
+  if (!locks) {
+    locks = new Map<string, Promise<void>>();
+    protectionLocks.set(store, locks);
+  }
+  const previous = locks.get(positionId) ?? Promise.resolve();
+  let release!: () => void;
+  const tail = new Promise<void>((resolve) => { release = resolve; });
+  locks.set(positionId, tail);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (locks.get(positionId) === tail) locks.delete(positionId);
+  }
+}
 
 async function serializeOpenAndEmergency<T>(operation: () => Promise<T>): Promise<T> {
   const previous = executionTail;
@@ -136,7 +160,6 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   private readonly now: () => number;
   private readonly id: () => string;
   private readonly replacementCounts = new Map<string, number>();
-  private readonly protectionTails = new Map<string, Promise<void>>();
   private readonly entryMetadata = new Map<string,
     Pick<LivePositionSeed, "signalId" | "strategyType" | "breakoutPrice">>();
   private readonly dependencies: MainnetLiveExecutionDependencies;
@@ -297,12 +320,18 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   }
 
   async close(positionId: string, reason = "人工平仓"): Promise<CloseExecutionResult> {
+    await this.dependencies.store.updatePosition(positionId, { exitPending: true });
     const order = await this.machine.closePosition(positionId);
     if (!order) {
       return { ok: false, reason: "真实持仓不存在或已关闭", unsettled: false, alreadyClosed: true, pnl: undefined };
     }
-    if (order.status === "UNKNOWN") {
-      return { ok: false, reason: "reduceOnly 平仓结果 UNKNOWN，必须先对账", unsettled: true, alreadyClosed: false };
+    if (order.status === "UNKNOWN" || order.status === "CANCEL") {
+      return {
+        ok: false,
+        reason: `reduceOnly 平仓结果 ${order.status}，必须对账或受控重试`,
+        unsettled: true,
+        alreadyClosed: false,
+      };
     }
     return { ok: true, reason: `${reason}：reduceOnly 已提交，等待实际成交`, pnl: Number.NaN, unsettled: true, alreadyClosed: false };
   }
@@ -345,17 +374,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   }
 
   private async serializeProtection<T>(positionId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.protectionTails.get(positionId) ?? Promise.resolve();
-    let release!: () => void;
-    const tail = new Promise<void>((resolve) => { release = resolve; });
-    this.protectionTails.set(positionId, tail);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.protectionTails.get(positionId) === tail) this.protectionTails.delete(positionId);
-    }
+    return serializeProtectionOperation(this.dependencies.store, positionId, operation);
   }
 
   async tightenStop(positionId: string, stopPrice: number, reason: string) {
@@ -378,13 +397,14 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
         return { ok: true as const, changed: false as const, reason: "止损相同、宽松或越过有效标记价" };
       }
       const updated = await this.updateTrailingProtection(position, normalized);
+      if (updated === null) return { ok: true as const, changed: false as const, reason: "持仓或保护单已变化，跳过旧收紧请求" };
       return updated
         ? { ok: true as const, changed: true as const, reason: `${reason}：STOP_MARKET 已确认` }
         : { ok: false as const, changed: false as const, reason: `${reason}：止损未一致确认，已尝试保护性退出` };
     });
   }
 
-  private async updateTrailingProtection(position: LivePosition, stopPrice: DecimalString): Promise<boolean> {
+  private async updateTrailingProtection(position: LivePosition, stopPrice: DecimalString): Promise<boolean | null> {
     try {
       let protection = (await this.dependencies.store.listActiveProtectionOrders())
         .find((order) => order.intentId === position.id);
@@ -392,7 +412,17 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       protection = (await this.dependencies.store.listActiveProtectionOrders())
         .find((order) => order.intentId === position.id);
       if (!protection || protection.status !== "NEW") throw new Error("现有 STOP_MARKET 未确认");
+      const latest = await this.dependencies.store.getPosition(position.id);
+      if (!latest || latest.status !== "OPEN" || latest.exitPending) return null;
+      const tighterThanPosition = latest.side === "LONG"
+        ? compareDecimals(stopPrice, latest.stopPrice) > 0
+        : compareDecimals(stopPrice, latest.stopPrice) < 0;
+      const tighterThanProtection = protection.stopPrice === null ? true : latest.side === "LONG"
+        ? compareDecimals(stopPrice, protection.stopPrice) > 0
+        : compareDecimals(stopPrice, protection.stopPrice) < 0;
+      if (!tighterThanPosition || !tighterThanProtection) return null;
       const replaced = await this.machine.replaceOrder(protection.clientOrderId, stopPrice);
+      if (replaced.status === "CANCEL" && (await this.dependencies.store.getPosition(position.id))?.exitPending) return null;
       if (replaced.status !== "NEW" || !replaced.stopPrice
         || compareDecimals(replaced.stopPrice, stopPrice) !== 0) {
         throw new Error(`STOP_MARKET replacement 未确认（${replaced.status}）`);

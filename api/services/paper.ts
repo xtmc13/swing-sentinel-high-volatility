@@ -598,8 +598,17 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         slippageBps: settings.slippageBps,
       });
       if (managed.stopPrice !== row.stopPrice || managed.maxFavorableR !== row.maxFavorableR) {
-        await db.update(positions).set({ stopPrice: managed.stopPrice, maxFavorableR: managed.maxFavorableR })
-          .where(and(eq(positions.id, row.id), eq(positions.status, "OPEN")));
+        await db.transaction(async (tx) => {
+          const current = (await tx.select().from(positions).where(eq(positions.id, row.id)).limit(1).for("update"))[0];
+          if (!current || current.status !== "OPEN") return;
+          const stopPrice = current.side === "LONG"
+            ? Math.max(current.stopPrice, managed.stopPrice)
+            : Math.min(current.stopPrice, managed.stopPrice);
+          await tx.update(positions).set({
+            stopPrice,
+            maxFavorableR: Math.max(current.maxFavorableR, managed.maxFavorableR),
+          }).where(and(eq(positions.id, current.id), eq(positions.status, "OPEN")));
+        });
       }
       if (managed.action === "CLOSE" && managed.reason) await closePaperPosition(row.id, managed.reason);
     }

@@ -172,8 +172,8 @@ export class DrizzleMomentumStateStore implements MomentumStateStore {
           eq(liveOrders.reduceOnly, true),
           eq(liveOrders.type, "MARKET"),
         ));
-        const claimExpired = row.exitPending && row.exitClaimId !== null && claimedAt !== undefined
-          && now - claimedAt >= leaseMs;
+        const claimExpired = row.exitPending && (row.exitClaimId === null
+          || (claimedAt !== undefined && now - claimedAt >= leaseMs));
         const resumableClose = existingClose.length > 0 && existingClose.every((order) => (
           order.symbol === row.symbol && (
             order.status === "CANCEL" || (

@@ -389,6 +389,29 @@ export interface OrderStateMachineOptions {
   assertCurrentAdmission?: AssertCurrentLiveAdmission;
 }
 
+export async function serializeLivePositionOperation<T>(
+  store: LiveOrderStore,
+  positionId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  let locks = POSITION_LOCKS.get(store);
+  if (!locks) {
+    locks = new Map<string, Promise<void>>();
+    POSITION_LOCKS.set(store, locks);
+  }
+  const previous = locks.get(positionId) ?? Promise.resolve();
+  let release!: () => void;
+  const tail = new Promise<void>((resolve) => { release = resolve; });
+  locks.set(positionId, tail);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (locks.get(positionId) === tail) locks.delete(positionId);
+  }
+}
+
 export class OrderStateMachine {
   private readonly store: LiveOrderStore;
   private readonly gateway: LiveOrderGateway;
@@ -447,22 +470,7 @@ export class OrderStateMachine {
   }
 
   private async serializePosition<T>(positionId: string, operation: () => Promise<T>): Promise<T> {
-    let locks = POSITION_LOCKS.get(this.store);
-    if (!locks) {
-      locks = new Map<string, Promise<void>>();
-      POSITION_LOCKS.set(this.store, locks);
-    }
-    const previous = locks.get(positionId) ?? Promise.resolve();
-    let release!: () => void;
-    const tail = new Promise<void>((resolve) => { release = resolve; });
-    locks.set(positionId, tail);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (locks.get(positionId) === tail) locks.delete(positionId);
-    }
+    return serializeLivePositionOperation(this.store, positionId, operation);
   }
 
   private async applyFillAndProtect(clientOrderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication> {
@@ -741,6 +749,7 @@ export class OrderStateMachine {
     const remaining = latestPosition?.quantity
       ?? changes.quantity
       ?? subtractDecimals(current.originalQuantity, current.executedQuantity);
+    if (latestPosition?.exitPending) return current;
     if (compareDecimals(remaining, "0") <= 0) return current;
     const replacement: LiveOrder = {
       ...current,

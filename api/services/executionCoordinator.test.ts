@@ -577,6 +577,53 @@ describe("ExecutionCoordinator", () => {
     expect(h.paper.open).toHaveBeenCalledTimes(1);
   });
 
+  it("普通管理和旧退出失败仍尝试其他持仓的衰竭保护", async () => {
+    const stagnant = {
+      ...position,
+      id: "stagnant",
+      strategyType: "MOMENTUM" as const,
+      breakoutPrice: 99,
+      entryPrice: 100,
+      openedAt: new Date(1_799_999_880_999).toISOString(),
+    };
+    const fresh = { ...position, id: "fresh", strategyType: "MOMENTUM" as const, breakoutPrice: 99 };
+    const paper = adapter({
+      positions: async () => [stagnant, fresh],
+      manage: vi.fn(async () => { throw new Error("ordinary manage failed"); }),
+      close: vi.fn(async () => { throw new Error("old exit failed"); }),
+    });
+    const h = setup({ paper, protection: "TIGHTEN" });
+
+    await expect(h.coordinator.manage()).rejects.toThrow(AggregateError);
+
+    expect(paper.tightenStop).toHaveBeenCalledWith("fresh", 100, expect.stringContaining("衰竭"));
+  });
+
+  it("事件数据库失败不得阻断真实收紧或后续持仓", async () => {
+    const protectedPosition = { ...position, strategyType: "MOMENTUM" as const, breakoutPrice: 99 };
+    const paper = adapter({ positions: async () => [protectedPosition] });
+    const h = setup({ paper, protection: "TIGHTEN" });
+    const failing = createExecutionCoordinator({
+      paper,
+      getSettings: async () => h.settings,
+      market: {
+        dataSource: "MAINNET",
+        sourceGeneration: 0,
+        getCandles: async () => Array.from({ length: 80 }, (_, index) => {
+          const time = 1_800_000_001_000 - (80 - index) * 900_000;
+          return { time: time / 1000, closeTime: time + 899_999, open: 100, high: 100.5, low: 99.5, close: 100, volume: 100 };
+        }),
+      },
+      evaluateExhaustion: () => ({ side: "LONG", score: 50, resonanceCount: 2, resonant: true, protection: "TIGHTEN", structureBreak: false, timeframes: [], reasons: [] }),
+      recordEvent: async () => { throw new Error("event store offline"); },
+      now: () => 1_800_000_001_000,
+    });
+
+    await failing.manageMomentumProtection();
+
+    expect(paper.tightenStop).toHaveBeenCalled();
+  });
+
   it("手动 canary 只绕过 autoTrade，预检失败仍拒绝提交", async () => {
     const h = setup({
       settings: { executionMode: "LIVE_MAINNET", autoTrade: false },

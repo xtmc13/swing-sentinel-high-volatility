@@ -230,6 +230,26 @@ describeDatabase("Task 4 真实数据库原子执行", () => {
     expect(row.stopPrice).toBe(99);
   });
 
+  it("普通 trailing 读旧值后也不能覆盖另一连接已收紧的止损", async () => {
+    await seedState("BTCUSDT");
+    const market = new FakeMarket();
+    const opener = service(independentDb(), market);
+    const opened = await opener.openPaperPosition(opportunity("BTCUSDT"));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+    const tighter = service(independentDb(), new FakeMarket());
+    market.price = 103;
+    market.snapshotHook = async () => {
+      await tighter.tightenPaperPositionStop(opened.positionId, 101, "竞争收紧");
+      market.snapshotHook = null;
+    };
+
+    await opener.manageOpenPositions();
+
+    const row = (await connection.getDb().select().from(schema.positions).where(eq(schema.positions.id, opened.positionId)))[0];
+    expect(row.stopPrice).toBe(101);
+  });
+
   it("跨独立连接重复平仓只有一笔 CLOSE、一笔 closedTrade 和一次账户结算", async () => {
     await seedState("BTCUSDT");
     const opener = service(independentDb(), new FakeMarket());

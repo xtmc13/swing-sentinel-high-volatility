@@ -817,6 +817,26 @@ describe("mainnet live execution adapter", () => {
     expect((await h.store.listOrders()).filter((order) => order.type === "MARKET" && order.reduceOnly)).toHaveLength(1);
   });
 
+  it("an exchange-cancelled close is not reported as a successful submission", async () => {
+    const h = setup();
+    await h.adapter.open(opportunity);
+    const positionId = h.created[0].id;
+    await h.adapter.handleFill(`${positionId}-entry`, {
+      exchangeTradeId: "cancel-close-fill", exchangeOrderId: "500", symbol: "BTCUSDT", side: "BUY",
+      price: "100", quantity: "2", commission: "0.1", commissionAsset: "USDT", realizedPnl: "0", isMaker: false, executedAt: 10,
+    }, seedFor(h.created[0]));
+    const placeOrder = h.gateway.placeOrder;
+    h.gateway.placeOrder = async (request) => {
+      if (request.type !== "MARKET") return placeOrder(request);
+      return {
+        symbol: request.symbol, orderId: 999, clientOrderId: request.newClientOrderId ?? "close", price: "0",
+        origQty: request.quantity, executedQty: "0", status: "CANCELED", side: request.side, type: request.type, reduceOnly: true,
+      };
+    };
+
+    await expect(h.adapter.close(positionId, "衰竭平仓")).resolves.toMatchObject({ ok: false, unsettled: true, alreadyClosed: false });
+  });
+
   it("cancelled unfilled LIVE close can claim and submit one controlled retry", async () => {
     const h = setup();
     await h.adapter.open(opportunity);
@@ -847,6 +867,39 @@ describe("mainnet live execution adapter", () => {
     expect(retry).toMatchObject({ ok: true, unsettled: true });
     expect(h.gateway.placed.filter((request) => request.type === "MARKET" && request.reduceOnly)).toHaveLength(2);
     expect((await h.store.listOrders()).filter((order) => order.type === "MARKET" && order.reduceOnly)).toHaveLength(2);
+  });
+
+  it("coordinator recovers a cancelled exhaustion exit even when signed valuation is unavailable", async () => {
+    const h = setup();
+    await h.adapter.open(opportunity);
+    const positionId = h.created[0].id;
+    await h.adapter.handleFill(`${positionId}-entry`, {
+      exchangeTradeId: "exhaustion-recovery-fill", exchangeOrderId: "500", symbol: "BTCUSDT", side: "BUY",
+      price: "100", quantity: "2", commission: "0.1", commissionAsset: "USDT", realizedPnl: "0", isMaker: false, executedAt: 10,
+    }, seedFor(h.created[0]));
+    const claimPosition = useMomentumClaimDatabase(h.store, positionId);
+    await h.adapter.close(positionId, "动能衰竭退出");
+    await h.store.transitionOrder(`close-${positionId}`, ["NEW"], { status: "CANCEL" });
+    await h.store.updatePosition(positionId, { exitPending: true });
+    claimPosition.exitPending = true;
+    claimPosition.exitClaimId = "expired-exhaustion-claim";
+    claimPosition.exitClaimedAt = new Date(1_800_000_000_000);
+    h.gateway.positionRisk = async () => { throw new Error("signed valuation offline"); };
+    const claims = new DrizzleMomentumStateStore();
+    const coordinator = createExecutionCoordinator({
+      live: h.adapter,
+      getSettings: async () => ({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" }),
+      momentumStore: claims,
+      now: () => 1_800_000_010_000,
+      market: { dataSource: "MAINNET", sourceGeneration: 0, getCandles: async () => [] },
+      evaluateExhaustion: () => ({ side: "LONG", score: 0, resonanceCount: 0, resonant: false, protection: "NONE", structureBreak: false, timeframes: [], reasons: [] }),
+      recordEvent: async () => undefined,
+    });
+
+    await coordinator.manageMomentumProtection();
+
+    expect(h.gateway.placed.filter((request) => request.type === "MARKET" && request.reduceOnly)).toHaveLength(2);
+    expect(await h.store.getOrder(`close-${positionId}-retry-1`)).toMatchObject({ status: "NEW" });
   });
 
   it("live emergency pauses auto trading and paper reset is disabled", async () => {

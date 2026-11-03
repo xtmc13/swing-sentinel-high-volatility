@@ -253,6 +253,20 @@ describe("startup reconciliation", () => {
     ]));
   });
 
+  it("does not resolve a newer transport failure from an older successful round", async () => {
+    const h = await harness();
+    await h.store.recordIssue({
+      category: "REST_RECONCILIATION", severity: "CRITICAL", symbol: null,
+      expectedValue: null, actualValue: null, message: "newer failure", detectedAt: 6_000,
+    });
+
+    await h.service.reconcile();
+
+    expect(await h.store.listIssues()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ message: "newer failure", status: "OPEN" }),
+    ]));
+  });
+
   it("reports a persisted unsettled intent that has no order", async () => {
     const h = await harness({
       unsettledIntents: [{ id: "intent-without-order", symbol: "BTCUSDT", status: "SUBMITTING" }],

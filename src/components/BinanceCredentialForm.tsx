@@ -46,9 +46,9 @@ export default function BinanceCredentialForm() {
       <KeyRound size={17} className="data-warning" aria-hidden="true" />
     </div>
     <div className="mt-3 flex items-center justify-between border border-[#1a2540] bg-[#080e19] px-3 py-2 text-[10px]">
-      <span className="text-[#8290aa]">币安主网凭据</span>
+      <span className="text-[#8290aa]">数据库密文（完整环境变量优先）</span>
       <span className={status.data?.configured ? "data-live" : "data-warning"}>
-        {status.isLoading ? "读取中" : status.data?.configured ? "已配置" : "未配置"}
+        {status.isLoading ? "读取中" : status.data?.configured ? "已存密文" : "未存密文"}
       </span>
     </div>
     <form className="mt-4 space-y-3" autoComplete="off" onSubmit={(event) => {

@@ -35,7 +35,6 @@ export function createCredentialRouter(
     }),
     save: publicQuery.input(binanceCredentialInput).mutation(async ({ input }) => {
       try {
-        await invalidate();
         const status = await store.save(input);
         await invalidate();
         return status;
@@ -45,7 +44,6 @@ export function createCredentialRouter(
     }),
     delete: publicQuery.mutation(async () => {
       try {
-        await invalidate();
         const status = await store.delete();
         await invalidate();
         return status;

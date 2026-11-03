@@ -167,23 +167,49 @@ describe("production live runtime gates", () => {
     expect(stops).toBe(2);
   });
 
-  it("shutdown during startup waits for and closes the partial lifecycle", async () => {
+  it("shutdown during startup waits for and closes the partial lifecycle before retrying", async () => {
     let release!: () => void;
     let stops = 0;
+    let creates = 0;
     const created = services();
+    const active = services();
     created.start = () => new Promise<void>((resolve) => { release = resolve; });
     created.stop = async () => { stops += 1; };
-    const h = setup({ armed: true, createServices: () => created });
+    const h = setup({ armed: true, createServices: () => ++creates === 1 ? created : active });
 
     const starting = h.runtime.getLiveAdapter(true);
     await vi.waitFor(() => expect(release).toBeDefined());
     const stopping = h.runtime.stop();
     release();
-    await starting;
+    await expect(starting).resolves.toBe(active.adapter);
     await stopping;
 
     expect(stops).toBe(1);
-    expect(h.runtime.privateWs.health().configured).toBe(false);
+    expect(h.runtime.privateWs.health().connected).toBe(true);
+    await h.runtime.stop();
+  });
+
+  it("retries when shutdown overlaps deferred startup instead of returning the stopped adapter", async () => {
+    let releaseStart!: () => void;
+    let stops = 0;
+    const stopped = services();
+    const active = services();
+    stopped.start = () => new Promise<void>((resolve) => { releaseStart = resolve; });
+    stopped.stop = async () => { stops += 1; };
+    let creates = 0;
+    const h = setup({ armed: true, createServices: () => ++creates === 1 ? stopped : active });
+
+    const starting = h.runtime.getLiveAdapter(true);
+    await vi.waitFor(() => expect(releaseStart).toBeDefined());
+    const stopping = h.runtime.stop();
+    releaseStart();
+
+    await expect(starting).resolves.toBe(active.adapter);
+    await stopping;
+    expect(stops).toBe(1);
+    expect(creates).toBe(2);
+    expect(h.runtime.privateWs.health().connected).toBe(true);
+    await h.runtime.stop();
   });
 
   it("restart during shutdown waits for cleanup and retains the new lifecycle", async () => {

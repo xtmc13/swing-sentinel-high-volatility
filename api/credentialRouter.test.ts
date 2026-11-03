@@ -47,7 +47,7 @@ describe("Binance credential API", () => {
     expect(store.delete).toHaveBeenCalledTimes(1);
   });
 
-  it("invalidates before and after writes so a concurrent request cannot retain old credentials", async () => {
+  it("invalidates only after successful writes so a concurrent old client is stopped", async () => {
     const { caller, store, invalidate } = setup();
     const saveOrder = () => (store.save as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     const deleteOrder = () => (store.delete as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
@@ -55,11 +55,23 @@ describe("Binance credential API", () => {
     await caller.save(credentials);
     await caller.delete();
 
-    expect(invalidate).toHaveBeenCalledTimes(4);
-    expect(invalidate.mock.invocationCallOrder[0]).toBeLessThan(saveOrder());
-    expect(invalidate.mock.invocationCallOrder[1]).toBeGreaterThan(saveOrder());
-    expect(invalidate.mock.invocationCallOrder[2]).toBeLessThan(deleteOrder());
-    expect(invalidate.mock.invocationCallOrder[3]).toBeGreaterThan(deleteOrder());
+    expect(invalidate).toHaveBeenCalledTimes(2);
+    expect(invalidate.mock.invocationCallOrder[0]).toBeGreaterThan(saveOrder());
+    expect(invalidate.mock.invocationCallOrder[1]).toBeGreaterThan(deleteOrder());
+  });
+
+  it("does not disrupt live services when encryption or persistence fails", async () => {
+    const saveFailure = setup({
+      save: async () => {
+        throw new Error("CREDENTIAL_ENCRYPTION_KEY must contain exactly 32 bytes as base64 or 64 hexadecimal characters");
+      },
+    });
+    await expect(saveFailure.caller.save(credentials)).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+    expect(saveFailure.invalidate).not.toHaveBeenCalled();
+
+    const deleteFailure = setup({ delete: async () => { throw new Error("database unavailable"); } });
+    await expect(deleteFailure.caller.delete()).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
+    expect(deleteFailure.invalidate).not.toHaveBeenCalled();
   });
 
   it.each([

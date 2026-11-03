@@ -66,21 +66,29 @@ describe("Binance MAINNET credential form", () => {
     expect(html).toContain('autoComplete="new-password"');
     expect(html).toContain("panel");
     expect(html).toContain("terminal-input");
-    expect(html).toContain("未配置");
+    expect(html).toContain("未存密文");
     expect(html).not.toContain(apiKey);
     expect(html).not.toContain(apiSecret);
     expect(html).not.toContain("AdminAccess");
     expect(html).not.toContain("解锁控制");
   });
 
-  it("shows configured status without key fragments or readback fields", () => {
+  it("shows stored status without key fragments or readback fields", () => {
     hooks.configured = true;
     const html = render();
 
-    expect(html).toContain("已配置");
+    expect(html).toContain("已存密文");
     expect(html).not.toContain("fingerprint");
     expect(html).not.toContain("API key 前缀");
     expect(html).not.toMatch(/value="[^"]+"/);
+  });
+
+  it("labels the status as database-only because a complete env pair takes precedence", () => {
+    hooks.configured = false;
+    const html = render();
+
+    expect(html).toContain("数据库密文（完整环境变量优先）");
+    expect(html).toContain("未存密文");
   });
 
   it("shows save feedback and confirms that live gates were not enabled", () => {

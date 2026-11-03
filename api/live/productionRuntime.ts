@@ -37,44 +37,52 @@ export function createProductionLiveRuntime(options: ProductionLiveRuntimeOption
   let generation = 0;
 
   async function getLiveAdapter(humanApproved = false): Promise<ExecutionAdapter | null> {
-    if (stopping) await stopping;
-    const requestedGeneration = generation;
-    const settings = await options.getSettings();
-    if (settings.executionMode !== "LIVE_MAINNET") return null;
-    if (!liveTradingEnabled(options.env)) return null;
-    const credentialsConfigured = options.credentialsConfigured
-      ? await options.credentialsConfigured() : getLivePublicStatus(options.env).credentialsConfigured;
-    if (!credentialsConfigured) return null;
-    if (current) return current.adapter;
-    const controls = await options.getLiveControls();
-    if (!controls.armed && !humanApproved && !await options.hasOutstandingLiveRisk()) return null;
-    if (requestedGeneration !== generation) return getLiveAdapter(humanApproved);
-    let pending = starting;
-    if (!pending) {
-      const startGeneration = generation;
-      pending = (async () => {
-        const created = await options.createServices();
+    while (true) {
+      if (stopping) await stopping;
+      const requestedGeneration = generation;
+      const settings = await options.getSettings();
+      if (settings.executionMode !== "LIVE_MAINNET") return null;
+      if (!liveTradingEnabled(options.env)) return null;
+      const credentialsConfigured = options.credentialsConfigured
+        ? await options.credentialsConfigured() : getLivePublicStatus(options.env).credentialsConfigured;
+      if (!credentialsConfigured) return null;
+      if (current) {
+        if (requestedGeneration === generation) return current.adapter;
+        continue;
+      }
+      const controls = await options.getLiveControls();
+      if (!controls.armed && !humanApproved && !await options.hasOutstandingLiveRisk()) return null;
+      if (requestedGeneration !== generation) continue;
+      let pending = starting;
+      if (!pending) {
+        const startGeneration = generation;
+        pending = (async () => {
+          const created = await options.createServices();
+          try {
+            await created.start();
+          } catch (error) {
+            try { await created.stop(); } catch { /* startup error remains the caller result */ }
+            throw error;
+          }
+          if (startGeneration === generation) current = created;
+          return created;
+        })();
+        starting = pending;
         try {
-          await created.start();
+          await pending;
         } catch (error) {
-          try { await created.stop(); } catch { /* startup error remains the caller result */ }
+          if (starting === pending) starting = null;
+          if (startGeneration === generation) current = null;
           throw error;
         }
-        if (startGeneration === generation) current = created;
-        return created;
-      })();
-      starting = pending;
-      try {
-        await pending;
-      } catch (error) {
-        if (starting === pending) starting = null;
-        if (startGeneration === generation) current = null;
-        throw error;
       }
+      const started = await pending;
+      if (requestedGeneration !== generation) {
+        if (stopping) await stopping;
+        continue;
+      }
+      return started.adapter;
     }
-    const started = await pending;
-    if (requestedGeneration !== generation && stopping) await stopping;
-    return started.adapter;
   }
 
   return {

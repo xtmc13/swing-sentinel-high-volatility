@@ -495,7 +495,7 @@ export class ReconciliationService {
             symbol: local.symbol,
             expectedValue: decimal(local.quantity),
             actualValue: "0",
-            message: `${local.symbol} 缺少覆盖实际持仓的交易所原生 reduceOnly STOP_MARKET`,
+            message: `${local.symbol} 缺少数量与止损价格一致的交易所原生 reduceOnly STOP_MARKET`,
           }));
         }
       }
@@ -566,7 +566,8 @@ export class ReconciliationService {
     const side = position.side === "LONG" ? "SELL" : "BUY";
     return orders.some((order) => order.symbol === position.symbol && order.reduceOnly === true
       && order.type === "STOP_MARKET" && order.side === side
-      && sameDecimal(order.origQty, position.quantity));
+      && sameDecimal(order.origQty, position.quantity)
+      && typeof order.stopPrice === "string" && sameDecimal(order.stopPrice, position.stopPrice));
   }
 
   private issue(issue: Omit<NewReconciliationIssue, "detectedAt">): Promise<ReconciliationIssue> {

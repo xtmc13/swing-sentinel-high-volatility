@@ -25,8 +25,10 @@ import {
 } from "./liveRisk";
 import {
   addDecimals,
+  ceilToStep,
   compareDecimals,
   decimal,
+  divideDecimals,
   multiplyDecimals,
   normalizeDirectionalPrice,
   subtractDecimals,
@@ -260,11 +262,35 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         existingExposure,
       });
       if (!risk.ok) return { approved: false, reason: risk.reason };
+      let quantity = risk.quantity;
+      let notional = risk.notional;
+      let reservedMargin = risk.initialMargin;
+      let reservedRisk = risk.estimatedRisk;
+      if (input.manualCanary) {
+        const byNotional = divideDecimals(cached.result.filters.minNotional, input.limitPrice, {
+          decimalPlaces: 30, roundingMode: "ROUND_UP",
+        });
+        quantity = ceilToStep(
+          compareDecimals(cached.result.filters.minQuantity, byNotional) >= 0
+            ? cached.result.filters.minQuantity : byNotional,
+          cached.result.filters.stepSize,
+        );
+        if (compareDecimals(quantity, risk.quantity) > 0) {
+          return { approved: false, reason: "canary 最小安全数量超过风险或保证金批准上限" };
+        }
+        notional = multiplyDecimals(quantity, input.limitPrice);
+        reservedMargin = divideDecimals(notional, String(settings.fixedLeverage), {
+          decimalPlaces: 30, roundingMode: "ROUND_DOWN",
+        });
+        reservedRisk = multiplyDecimals(quantity, divideDecimals(risk.estimatedRisk, risk.quantity, {
+          decimalPlaces: 30, roundingMode: "ROUND_UP",
+        }));
+      }
       const portfolio = validateLivePortfolioAdmission({
         symbol: opportunity.symbol,
         side: opportunity.side,
         walletBalance: equity,
-        candidateRisk: Number(risk.estimatedRisk),
+        candidateRisk: Number(reservedRisk),
         maxPositions: settings.maxPositions,
         dailyLossLimitPct: settings.dailyLossLimitPct,
         dailyLocked: cached.daily.dailyLocked,
@@ -282,10 +308,10 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       return {
         approved: true,
         signalId: opportunity.signalId,
-        quantity: risk.quantity,
-        notional: risk.notional,
-        reservedMargin: risk.initialMargin,
-        reservedRisk: risk.estimatedRisk,
+        quantity,
+        notional,
+        reservedMargin,
+        reservedRisk,
         validUntil: new Date(Math.min(opportunity.expiryTime, now() + 5_000)),
       };
     },

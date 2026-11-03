@@ -20,6 +20,7 @@ export interface CreateLiveIntentInput {
   id: string;
   signalId: string;
   strategyType?: StrategyType;
+  manualCanary?: boolean;
   breakoutPrice?: DecimalString;
   symbol: string;
   side: Side;

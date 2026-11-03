@@ -157,6 +157,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       id: this.id(),
       signalId: opportunity.signalId,
       strategyType: opportunity.strategyType,
+      manualCanary: options.manualCanary === true,
       breakoutPrice: opportunity.breakoutPrice === undefined ? undefined : String(opportunity.breakoutPrice),
       workerId: this.dependencies.workerId,
     };
@@ -325,11 +326,39 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       const stopPrice = normalizeDirectionalPrice(
         String(management.stopPrice), position.tickSize, position.side,
       );
-      await this.dependencies.store.updatePosition(position.id, { stopPrice });
-      const protection = (await this.dependencies.store.listActiveProtectionOrders())
+      await this.updateTrailingProtection(position, stopPrice);
+    }
+  }
+
+  private async updateTrailingProtection(position: LivePosition, stopPrice: DecimalString): Promise<void> {
+    try {
+      let protection = (await this.dependencies.store.listActiveProtectionOrders())
         .find((order) => order.intentId === position.id);
-      if (protection) await this.machine.replaceOrder(protection.clientOrderId, stopPrice);
-      else await this.machine.protectPosition(position.id);
+      if (!protection) await this.machine.protectPosition(position.id);
+      protection = (await this.dependencies.store.listActiveProtectionOrders())
+        .find((order) => order.intentId === position.id);
+      if (!protection || protection.status !== "NEW") throw new Error("现有 STOP_MARKET 未确认");
+      const replaced = await this.machine.replaceOrder(protection.clientOrderId, stopPrice);
+      if (replaced.status !== "NEW" || !replaced.stopPrice
+        || compareDecimals(replaced.stopPrice, stopPrice) !== 0) {
+        throw new Error(`STOP_MARKET replacement 未确认（${replaced.status}）`);
+      }
+      const persisted = await this.dependencies.store.updatePosition(position.id, { stopPrice });
+      if (!persisted) throw new Error("STOP_MARKET 已确认但持仓持久化失败");
+    } catch (error) {
+      this.dependencies.alert?.(
+        `${position.symbol} 移动止损未一致确认，保留原持久止损并尝试 reduceOnly 退出：${error instanceof Error ? error.message : String(error)}`,
+      );
+      try {
+        const exit = await this.machine.closePosition(position.id);
+        if (!exit || exit.status === "UNKNOWN") {
+          this.dependencies.alert?.(`${position.symbol} 移动止损失败后的 reduceOnly 退出仍未确认`);
+        }
+      } catch (exitError) {
+        this.dependencies.alert?.(
+          `${position.symbol} reduceOnly 退出提交失败：${exitError instanceof Error ? exitError.message : String(exitError)}`,
+        );
+      }
     }
   }
 

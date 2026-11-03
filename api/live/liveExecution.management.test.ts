@@ -14,6 +14,7 @@ const seed: LivePositionSeed = {
 function harness(mark = "100", openedAt = NOW - 60_000) {
   const store = new InMemoryLiveOrderStore();
   const placed: PlaceOrderRequest[] = [];
+  const alerts: string[] = [];
   let remoteMark = mark;
   const remote: BinancePositionRisk = {
     symbol: "BTCUSDT", positionAmt: "1", entryPrice: "100", markPrice: remoteMark,
@@ -59,6 +60,7 @@ function harness(mark = "100", openedAt = NOW - 60_000) {
         return current;
       },
     },
+    alert: (message) => alerts.push(message),
     assertCurrentAdmission: async () => undefined,
     createIntent: async () => { throw new Error("not used"); },
     claimIntent: async () => { throw new Error("not used"); },
@@ -67,8 +69,16 @@ function harness(mark = "100", openedAt = NOW - 60_000) {
     finalGate: () => { throw new Error("not used"); },
   });
   return {
-    adapter, store, placed, remote, gateway,
+    adapter, store, placed, remote, gateway, alerts,
     setMark: (value: string) => { remoteMark = value; },
+    protect: () => {
+      store.addOrder({
+        id: "protection-row", intentId: seed.id, clientOrderId: "protect-intent-live", exchangeOrderId: "2",
+        symbol: seed.symbol, side: seed.side, type: "STOP_MARKET", status: "NEW", price: "95",
+        stopPrice: "95", originalQuantity: "1", executedQuantity: "0", averagePrice: "0", commission: "0",
+        reduceOnly: true, createdAt: openedAt,
+      });
+    },
     open: async () => {
       store.addOrder({
         id: "entry-row", intentId: seed.id, clientOrderId: "entry-live", exchangeOrderId: "1",
@@ -130,13 +140,70 @@ describe("signed LIVE account and position management", () => {
     expect(snapshot.positions[0]?.markPrice).toBeNaN();
   });
 
-  it("persists a tick-normalized trailing stop and replaces native protection", async () => {
+  it("persists a trailing stop only after the exchange confirms its NEW replacement", async () => {
     const h = harness("110.004");
     await h.open();
+    h.protect();
+    const placeOrder = h.gateway.placeOrder;
+    let persistedAtTransport: string | undefined;
+    h.gateway.placeOrder = async (request) => {
+      if (request.type === "STOP_MARKET") {
+        persistedAtTransport = (await h.store.getPosition(seed.id))?.stopPrice;
+      }
+      return placeOrder(request);
+    };
 
     await h.adapter.manage();
 
+    expect(persistedAtTransport).toBe("95");
     expect(await h.store.getPosition(seed.id)).toMatchObject({ stopPrice: "104.5", markPrice: "110.004" });
     expect(h.placed.some((order) => order.type === "STOP_MARKET" && order.stopPrice === "104.5")).toBe(true);
+  });
+
+  it("cancel timeout leaves the persisted stop unchanged and escalates to reduceOnly exit", async () => {
+    const h = harness("110.004");
+    await h.open();
+    h.protect();
+    h.gateway.cancelOrder = async () => { throw new Error("cancel timeout"); };
+
+    await h.adapter.manage();
+
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ stopPrice: "95" });
+    expect(h.alerts.length).toBeGreaterThan(0);
+    expect(h.placed.at(-1)).toMatchObject({ type: "MARKET", reduceOnly: true, side: "SELL" });
+  });
+
+  it("replacement UNKNOWN cannot silently diverge from the persisted stop", async () => {
+    const h = harness("110.004");
+    await h.open();
+    h.protect();
+    const placeOrder = h.gateway.placeOrder;
+    h.gateway.placeOrder = async (request) => {
+      if (request.type === "STOP_MARKET") throw new Error("replacement timeout");
+      return placeOrder(request);
+    };
+
+    await h.adapter.manage();
+
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ stopPrice: "95" });
+    expect(h.alerts.length).toBeGreaterThan(0);
+    expect(h.placed.at(-1)).toMatchObject({ type: "MARKET", reduceOnly: true, side: "SELL" });
+  });
+
+  it("a DB failure after NEW protection triggers alert and reduceOnly exit", async () => {
+    const h = harness("110.004");
+    await h.open();
+    h.protect();
+    const updatePosition = h.store.updatePosition.bind(h.store);
+    h.store.updatePosition = async (id, patch) => {
+      if (patch.stopPrice !== undefined) throw new Error("database offline");
+      return updatePosition(id, patch);
+    };
+
+    await h.adapter.manage();
+
+    expect(h.placed.some((order) => order.type === "STOP_MARKET" && order.stopPrice === "104.5")).toBe(true);
+    expect(h.alerts.length).toBeGreaterThan(0);
+    expect(h.placed.at(-1)).toMatchObject({ type: "MARKET", reduceOnly: true, side: "SELL" });
   });
 });

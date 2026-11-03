@@ -39,6 +39,7 @@ function remoteOrder(local: LiveOrder, suffix = "1"): BinanceOpenOrder {
     orderId: Number(`90${suffix}`),
     clientOrderId: local.clientOrderId,
     price: local.price,
+    stopPrice: local.type === "STOP_MARKET" ? local.stopPrice ?? local.price : undefined,
     origQty: local.originalQuantity,
     executedQty: local.executedQuantity,
     status: local.status === "PARTIALLY_FILLED" ? "PARTIALLY_FILLED" : "NEW",
@@ -499,6 +500,27 @@ describe("exchange and database comparison", () => {
     expect((await h.store.listIssues()).some((issue) => issue.category === "UNPROTECTED_POSITION")).toBe(true);
   });
 
+  it("after restart rejects a native stop whose price differs from the persisted protection", async () => {
+    const protection = {
+      ...order("NEW", "2"), intentId: seed.id, clientOrderId: "protect-intent-1",
+      exchangeOrderId: "902", type: "STOP_MARKET" as const, reduceOnly: true, price: "95", stopPrice: "95",
+    };
+    const remoteProtection = { ...remoteOrder(protection, "2"), side: "SELL", stopPrice: "94" };
+    const h = await harness({ positions: [position("1")], remoteOrders: [remoteProtection] });
+    h.orders.addOrder(order("FILLED"));
+    h.orders.addOrder(protection);
+    await h.orders.applyFill("order-1", {
+      exchangeTradeId: "1", exchangeOrderId: "901", symbol: "BTCUSDT", side: "BUY", price: "100",
+      quantity: "1", commission: "0", commissionAsset: "USDT", realizedPnl: "0", isMaker: false, executedAt: 100,
+    }, seed);
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).some((issue) => issue.category === "UNPROTECTED_POSITION"
+      && issue.message.includes("价格"))).toBe(true);
+  });
+
   it("recovers a missed first fill from a terminal owned order using its persisted intent seed", async () => {
     const orders = new InMemoryLiveOrderStore();
     const store = new InMemoryReconciliationStore();
@@ -511,6 +533,7 @@ describe("exchange and database comparison", () => {
     const remoteProtection = remoteOrder(order("NEW", "2"), "2");
     Object.assign(remoteProtection, {
       clientOrderId: "protect-intent-1", orderId: 902, type: "STOP_MARKET", reduceOnly: true, side: "SELL",
+      stopPrice: "95",
     });
     const service = new ReconciliationService({
       client: {

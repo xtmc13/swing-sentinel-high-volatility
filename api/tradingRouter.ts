@@ -157,6 +157,58 @@ export const tradingRouter = createRouter({
       throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "主网控制操作失败" });
     }
   }),
+  manualCanary: adminQuery.input(z.object({
+    symbol: z.string().regex(/^[A-Z0-9]{5,20}$/),
+    side: z.enum(["LONG", "SHORT"]),
+    limitPrice: z.number().finite().positive(),
+    stopPrice: z.number().finite().positive(),
+    adminSecret: z.string().max(512),
+    confirmationPhrase: z.string().max(64),
+  })).mutation(async ({ input }) => {
+    if (!isFreshAdminSecret(input.adminSecret, env.appSecret)) {
+      throw new TRPCError({ code: "UNAUTHORIZED", message: "manual canary 需要重新输入正确的管理员令牌" });
+    }
+    if (input.confirmationPhrase !== "SUBMIT LIVE CANARY") {
+      throw new TRPCError({ code: "PRECONDITION_FAILED", message: "请输入确认短语 SUBMIT LIVE CANARY" });
+    }
+    const now = Date.now();
+    const id = crypto.randomUUID();
+    const direction = input.side === "LONG" ? 1 : -1;
+    const stopDistance = Math.abs(input.limitPrice - input.stopPrice);
+    try {
+      return await executionCoordinator.openManual({
+        id,
+        signalId: `manual-canary:${id}`,
+        strategyType: "SWING",
+        symbol: input.symbol,
+        side: input.side,
+        status: "READY",
+        score: 0,
+        regime: "MANUAL_CANARY",
+        entry: input.limitPrice,
+        stop: input.stopPrice,
+        target: input.limitPrice + direction * stopDistance * 2.2,
+        stopDistancePct: stopDistance / input.limitPrice * 100,
+        rewardRisk: 2.2,
+        leverage: 1,
+        marginPct: 0,
+        riskPct: 0,
+        reasons: ["管理员手动 canary；数量仍由实时风控批准"],
+        signalCloseTime: now,
+        signalTime: now,
+        expiryTime: now + 5_000,
+        triggerPrice: input.limitPrice,
+        limitPrice: input.limitPrice,
+        stateVersion: 0,
+        sourceGeneration: 0,
+        detectorVersion: "manual-admin",
+        configVersion: "manual-canary-v1",
+        createdAt: new Date(now).toISOString(),
+      });
+    } catch {
+      throw new TRPCError({ code: "PRECONDITION_FAILED", message: "手动 canary 未提交；请检查全部主网门控" });
+    }
+  }),
   candles: publicQuery.input(z.object({
     symbol: z.string().regex(/^[A-Z0-9]{5,20}$/),
     interval: z.enum(["5m", "15m", "1h", "4h"]),

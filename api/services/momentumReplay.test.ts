@@ -164,16 +164,19 @@ describe("timestamped momentum replay", () => {
   it("builds feature frames from timestamped trades and order books without using 5m candles", () => {
     const result = replayMomentum({
       events: [
+        { type: "mark", eventTime: NOW - 2_000, price: 99.98 },
         { type: "trade", eventTime: NOW - 1_000, price: 100, quantity: 2, isBuyerMaker: false },
         { type: "trade", eventTime: NOW - 1_000, price: 100, quantity: 1, isBuyerMaker: true },
+        { type: "mark", eventTime: NOW - 1_000, price: 100 },
         {
           type: "order_book", eventTime: NOW - 1_000, receivedTime: NOW - 990, sequence: 1, generation: 4,
-          markPrice: 100, bid: { price: 99.99, quantity: 3 }, ask: { price: 100.01, quantity: 1 },
+          bid: { price: 99.99, quantity: 3 }, ask: { price: 100.01, quantity: 1 },
         },
         { type: "trade", eventTime: NOW - 20, price: 100.02, quantity: 4, isBuyerMaker: false },
+        { type: "mark", eventTime: NOW - 20, price: 100.02 },
         {
           type: "order_book", eventTime: NOW - 20, receivedTime: NOW - 10, sequence: 2, generation: 4,
-          markPrice: 100.02, bid: { price: 100.01, quantity: 3 }, ask: { price: 100.03, quantity: 1 },
+          bid: { price: 100.01, quantity: 3 }, ask: { price: 100.03, quantity: 1 },
         },
       ],
       context: { ...context(), volatilityP80: 0 },

@@ -304,7 +304,10 @@ function momentumCandles(count: number, intervalMs: number): Candle[] {
   });
 }
 
-function momentumEngineHarness(autoTrade: boolean) {
+function momentumEngineHarness(
+  autoTrade: boolean,
+  riskData?: EngineRiskData | ((symbol: string) => EngineRiskData),
+) {
   const open = vi.fn(async (_opportunity: Opportunity, _executionHealthy?: () => boolean) => {
     void _opportunity;
     void _executionHealthy;
@@ -324,6 +327,7 @@ function momentumEngineHarness(autoTrade: boolean) {
   ];
   const h = harness({
     settings: { autoTrade, momentumEnabled: true, strategyMode: "MOMENTUM" },
+    riskData,
     states: { BTCUSDT: state("BTCUSDT") },
     dependencies: {
       executionCoordinator: coordinator as never,
@@ -344,9 +348,20 @@ function momentumEngineHarness(autoTrade: boolean) {
   return { h, open, observeMomentumFrame, receiveMomentumFrame };
 }
 
+async function seedMomentumVolatilityBaseline(engine: ReturnType<typeof createTradingEngine>) {
+  const frame = momentumCandidateForTest().frame;
+  await engine.receiveMomentumFrame({
+    ...frame, sequence: 1, event_time: START - 30, received_time: START - 20, realized_volatility: 0.01,
+  });
+  await engine.receiveMomentumFrame({
+    ...frame, sequence: 2, event_time: START - 20, received_time: START - 10, realized_volatility: 0.01,
+  });
+}
+
 describe("三态引擎编排", () => {
   it("内部动量候选经 engine 健康和状态门后只通过 coordinator 开仓", async () => {
     const { h, open, observeMomentumFrame } = momentumEngineHarness(true);
+    await seedMomentumVolatilityBaseline(h.engine);
 
     const result = await h.engine.receiveMomentumCandidate(momentumCandidateForTest());
 
@@ -356,8 +371,36 @@ describe("三态引擎编排", () => {
     expect(observeMomentumFrame).toHaveBeenCalledWith(momentumCandidateForTest().frame);
   });
 
+  it("P80 使用先前 Rust 同口径 realized-volatility 帧而不是 1M 收益率", async () => {
+    let riskCalls = 0;
+    const { h, open } = momentumEngineHarness(true, () => {
+      riskCalls += 1;
+      return riskCalls === 1 ? normalRiskData : {
+        ...normalRiskData,
+        tickReturnBaseline: [0.99, 0.99],
+      };
+    });
+    const base = momentumCandidateForTest();
+    await h.engine.receiveMomentumFrame({
+      ...base.frame, sequence: 1, event_time: START - 30, received_time: START - 20, realized_volatility: 0.01,
+    });
+    await h.engine.receiveMomentumFrame({
+      ...base.frame, sequence: 2, event_time: START - 20, received_time: START - 10, realized_volatility: 0.02,
+    });
+
+    const result = await h.engine.receiveMomentumCandidate({
+      ...base,
+      candidate_id: "BTCUSDT:4:3:LONG",
+      frame: { ...base.frame, sequence: 3, realized_volatility: 0.03 },
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
   it("候选接受不等于下单，autoTrade=false 时不进入执行适配器", async () => {
     const { h, open } = momentumEngineHarness(false);
+    await seedMomentumVolatilityBaseline(h.engine);
 
     const result = await h.engine.receiveMomentumCandidate(momentumCandidateForTest());
 

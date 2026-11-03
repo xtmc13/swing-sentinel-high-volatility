@@ -1,5 +1,6 @@
 import type { Side, VolatilityMode } from "@contracts/trading";
-import type { BinanceLeverageBracket } from "./binanceSigned";
+import { portfolioRisk } from "../services/risk";
+import type { BinanceLeverageBracket, BinancePositionRisk } from "./binanceSigned";
 import {
   addDecimals,
   compareDecimals,
@@ -187,4 +188,78 @@ export function calculateLivePositionRisk(input: LiveRiskInput): LiveRiskResult 
   } catch {
     return { ok: false, reason: "主网十进制风险输入无效" };
   }
+}
+
+export function estimateFlatLiquidationPrice(input: {
+  side: Side;
+  entryPrice: DecimalString;
+  leverage: number;
+  maintMarginRatio: DecimalString;
+}): DecimalString {
+  if (!Number.isInteger(input.leverage) || input.leverage < 1) throw new Error("Invalid fixed leverage");
+  const leverageFraction = divideDecimals("1", String(input.leverage), {
+    decimalPlaces: 30, roundingMode: "ROUND_DOWN",
+  });
+  const multiplier = input.side === "LONG"
+    ? addDecimals(subtractDecimals("1", leverageFraction), input.maintMarginRatio)
+    : subtractDecimals(addDecimals("1", leverageFraction), input.maintMarginRatio);
+  const price = multiplyDecimals(input.entryPrice, multiplier);
+  if (compareDecimals(price, "0") <= 0) throw new Error("Invalid estimated liquidation price");
+  return price;
+}
+
+export interface LivePortfolioAdmissionInput {
+  symbol: string;
+  side: Side;
+  walletBalance: DecimalString;
+  candidateRisk: number;
+  maxPositions: number;
+  dailyLossLimitPct: number;
+  dailyLocked: boolean;
+  todayPnlPct: number;
+  portfolioStopRiskPct: number;
+  correlatedDirectionRiskPct: number;
+  correlationThreshold: number;
+  takerFeeBps?: number;
+  slippageBps?: number;
+  positions: Array<{ remote: BinancePositionRisk; stopPrice: DecimalString }>;
+  pendingIntents?: Array<{ symbol: string }>;
+  correlations: Record<string, number | null>;
+}
+
+export function validateLivePortfolioAdmission(
+  input: LivePortfolioAdmissionInput,
+): { ok: boolean; reasons: string[] } {
+  const active = input.positions.filter(({ remote }) => compareDecimals(remote.positionAmt, "0") !== 0);
+  const reasons: string[] = [];
+  const pending = input.pendingIntents ?? [];
+  if (input.dailyLocked || input.todayPnlPct <= -input.dailyLossLimitPct) reasons.push("当日亏损熔断已触发");
+  if (active.length + pending.length >= input.maxPositions) reasons.push("持仓及待成交意图数量达到上限");
+  if (active.some(({ remote }) => remote.symbol === input.symbol)
+    || pending.some((intent) => intent.symbol === input.symbol)) reasons.push("同一合约已有真实持仓或待成交意图");
+  const positions = active.map(({ remote, stopPrice }) => ({
+    symbol: remote.symbol,
+    side: compareDecimals(remote.positionAmt, "0") < 0 ? "SHORT" as const : "LONG" as const,
+    qty: Math.abs(Number(remote.positionAmt)),
+    entryPrice: Number(remote.entryPrice),
+    markPrice: Number(remote.markPrice),
+    stopPrice: Number(stopPrice),
+  }));
+  const approved = portfolioRisk({
+    equity: Number(input.walletBalance),
+    positions,
+    candidate: {
+      symbol: input.symbol,
+      side: input.side,
+      risk: input.candidateRisk,
+      correlations: input.correlations,
+    },
+    takerFeeBps: input.takerFeeBps ?? 0,
+    slippageBps: input.slippageBps ?? 0,
+    portfolioStopRiskPct: input.portfolioStopRiskPct,
+    correlatedDirectionRiskPct: input.correlatedDirectionRiskPct,
+    correlationThreshold: input.correlationThreshold,
+  });
+  reasons.push(...approved.reasons);
+  return { ok: reasons.length === 0, reasons: [...new Set(reasons)] };
 }

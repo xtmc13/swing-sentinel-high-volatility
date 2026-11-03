@@ -1,6 +1,6 @@
-# 波段哨兵 · 币安永续模拟交易系统
+# 波段哨兵 · 币安永续模拟与受控主网执行系统
 
-多个高流动性加密货币 USDT 永续的短波段工程验证系统。当前交付为**公开行情＋数据库模拟交易**：不收集 API 密钥，不发送真实订单，也不承诺盈利能力或实盘就绪。
+多个高流动性加密货币 USDT 永续的波段／早期动量工程验证系统。默认交付状态仍是 **PAPER、动量关闭、主网关闭、armed=false**。代码包含服务器端签名账户读取、真实订单状态机、私有 WS、对账和受控手动 canary；只有另行配置权限受限凭据并通过全部门禁后才可能发送真实订单。本次未使用真实凭据、未发送真实订单，也不承诺盈利能力或实盘就绪。
 
 ## 核心闭环
 
@@ -34,14 +34,14 @@
 | 正常扫描／HIGH 风险检查 | 45／10 秒 |
 | 盘口／1M 陈旧阈值 | 5／90 秒 |
 
-这些是待回测校准的工程默认值，不是最优参数。“标的上限”是内置模拟杠杆，不代表用户币安账户的实际档位；项目不读取签名账户接口。
+这些是待回测校准的工程默认值，不是最优参数。PAPER 的“标的上限”是内置模拟杠杆；LIVE 禁止使用它，并读取签名账户、实际杠杆、持仓、维持保证金档位、强平价和 isolated margin。
 
 ## 页面
 
-- 交易总览：账户、K 线、机会队列、持仓、组合风险、三态迁移和 WebSocket 指标。
+- 交易总览：账户、K 线、机会队列、持仓、组合风险、三态迁移和 WebSocket 指标；LIVE 估值未知时显示不可用，不以零或旧标记价代替。
 - 流动性交易池：搜索、筛选、排序，以及每币状态、数据年龄和波动指标。
-- 订单与持仓：模拟成交、费用、平仓和复盘记录。
-- 风险与执行：三态与组合参数、暂停、紧急停止和模拟账户重置。
+- 订单与持仓：明确区分模拟与真实成交、费用、平仓和复盘记录。
+- 风险与执行：三态与组合参数、暂停、紧急停止、模拟账户重置，以及需独立管理员确认的手动真实 canary。
 - 回测与复盘：单标的（以单合约组合运行）或多标的同步组合回测、历史结果和权益曲线；旧格式结果仍可读取。
 - 信号验证：1–5 个合约、900–10000 根主时间轴的后台批量回测；按时间顺序 60%／20%／20% 划分训练、验证和样本外区间，保存每个 READY 的成交或拒绝、净 R、MFE、MAE 与成交偏差，并导出全部或测试集 CSV。
 
@@ -82,9 +82,9 @@ DATABASE_URL='mysql://user:password@host:port/database' APP_SECRET='replace-with
 
 默认始终是 `PAPER`、`momentumEnabled=false`、`LIVE_TRADING_ENABLED=false`、`armed=false`。生产 coordinator 只保存懒解析入口；只有数据库选择 `LIVE_MAINNET`、环境总开关和主网凭据同时存在，并由持久化 armed、当前 arming 人工授权或已有未结真实风险触发时，才创建签名客户端、订单 adapter、私有 WS、对账与恢复服务。PAPER 不解析这些服务，缺配置或启动失败均失败关闭且不会回退成 paper 账户。
 
-主网预检还要求 `BINANCE_MAINNET_ALLOWED_SYMBOLS` 显式白名单、固定 1–20 倍杠杆、one-way、关闭 multi-assets、isolated margin、真实档位/过滤值/强平数据、私有 WS 与新鲜对账。真实下单前会在数据库准入和 transport 前再次检查。凭据只从服务器环境读取，不进入 Rust、数据库、前端或日志。
+主网预检还要求 `BINANCE_MAINNET_ALLOWED_SYMBOLS` 显式白名单、固定 1–20 倍杠杆、one-way、关闭 multi-assets、isolated margin、真实档位/过滤值/强平数据、已连接私有 WS 与新鲜对账。最终风险使用签名 positionRisk 的持仓数量、标记价、margin、强平价和账户权益，执行日损、maxPositions、同 symbol、组合及相关性限制；flat symbol 仅使用保守估算缓冲。REST 与响应体有硬 deadline，预检网络不持有 DB 锁，transport 前以 DB 时间重查过期、armed 和 emergency generation。凭据只从服务器环境读取，不进入 Rust、数据库、前端或日志。
 
-本轮只完成 fake/replay 与无凭据生产验证。主网只读仍需用户提供权限受限凭据并另行确认；真实 canary 必须再次明确授权、限制一个白名单合约和最小安全数量。小范围自动交易还要求 canary 与观察期通过。完成这些工程验证不代表已经启用实盘或能够盈利。
+本轮只完成 fake/replay、独立测试库与无真实凭据验证。主网只读仍需用户提供权限受限凭据并另行确认；真实 canary 由 `trading.manualCanary` 和风险页表单触发，必须重新输入管理员令牌及 `SUBMIT LIVE CANARY`，不会开启自动交易，并仍受白名单和完整风控约束。小范围自动交易还要求真实 canary 与观察期通过。完成这些工程验证不代表已经启用实盘或能够盈利。
 
 Docker 采用多阶段构建，不复制 `.env` 进镜像：
 
@@ -95,14 +95,14 @@ docker run --rm --env-file .env -p 3000:3000 swing-sentinel
 
 ## 数据库集成测试
 
-为测试单独创建数据库和仅拥有该库权限的用户。设置 `TEST_DATABASE_URL` 后，Vitest 会串行执行文件，避免共享测试库的设置和账户行互相污染：
+为测试单独创建数据库和仅拥有该库权限的用户，不得使用 preview 或生产库。通用套件使用 `swing_sentinel_final_fix1_test`，并先执行 0000–0013 迁移；设置 `TEST_DATABASE_URL` 后 Vitest 串行执行文件：
 
 ```bash
-DATABASE_URL='mysql://task_user:task_password@127.0.0.1:3306/task_test_db' npm run db:migrate
-TEST_DATABASE_URL='mysql://task_user:task_password@127.0.0.1:3306/task_test_db' npm test
+DATABASE_URL='mysql://task_user:task_password@127.0.0.1:3306/swing_sentinel_final_fix1_test' npm run db:migrate
+TEST_DATABASE_URL='mysql://task_user:task_password@127.0.0.1:3306/swing_sentinel_final_fix1_test' npm test
 ```
 
-数据库安全门禁目前接受 `swing_sentinel_task1_test`、`swing_sentinel_task4_test`、`swing_sentinel_task8_test` 或 `swing_sentinel_final_fix1_test`；其他库名会被拒绝。未设置 `TEST_DATABASE_URL` 时，真实数据库套件跳过，其余单元测试仍运行。
+LIVE 持久化组有独立安全门禁，必须分别使用 `TASK3_TEST_DATABASE_URL` 指向 `swing_sentinel_task3_test`、`TASK4_TEST_DATABASE_URL` 指向 `swing_sentinel_task4_test`，不要用同名变量绕过隔离。通用门禁还接受 `swing_sentinel_task1_test` 和 `swing_sentinel_task8_test`；其他库名会被拒绝。未设置对应变量时相关真实数据库套件跳过，其余单元测试仍运行。测试完成后删除这些专用测试库和测试用户。
 
 ## 回测口径与限制
 
@@ -120,8 +120,8 @@ cargo test
 cargo run --release
 ```
 
-健康检查为 `GET /health`，批量分析为 `POST /v1/analyze/batch`。**Rust 未接入 TypeScript 信号、风控或订单链路，也未完成 TS/Rust 一致性验收。** 不应把它当作正式交易核心。
+健康检查为 `GET /health`，批量分析为 `POST /v1/analyze/batch`。Rust 还消费主网公共 aggTrade/bookTicker/depth/markPrice，通过回环内部入口向 TypeScript 发送特征帧和候选；TS 负责接受、风控与订单。Rust 不接收凭据、账户数据或订单权限。Replay 使用独立 trade/mark/book 事件，默认三个 mark 历史和两次候选确认与 Rust 对齐，P80 使用同口径历史特征帧。真实公共网络、多日浸泡和实盘表现仍需独立验收。
 
 ## 验收边界
 
-类型、单元／数据库集成、lint、构建、Rust 测试和本次短时主网验收记录见 `.superpowers/sdd/2026-10-27-high-volatility/task-8-report.md`。短时有界冒烟不等于连续多日浸泡；本仓库未宣称完成多日浸泡、真实账户订单、交易所对账或实盘验收。
+本轮全分支修复的命令、RED/GREEN 回归和独立数据库结果见 `final-fix-report.md`。短时有界测试不等于连续多日浸泡；本仓库未宣称已完成真实凭据只读、真实账户订单、真实交易所对账或实盘验收。

@@ -3,6 +3,11 @@ export function formatNumber(value: number, digits = 2) {
   return value.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
+export function formatSignedNumber(value: number, valid = true, digits = 2) {
+  if (!valid || !Number.isFinite(value)) return "—";
+  return `${value > 0 ? "+" : ""}${formatNumber(value, digits)}`;
+}
+
 export function formatPrice(value: number) {
   if (!Number.isFinite(value) || value <= 0) return "—";
   const digits = value >= 1000 ? 2 : value >= 10 ? 3 : value >= 0.1 ? 5 : 7;

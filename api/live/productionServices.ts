@@ -2,6 +2,8 @@ import { eq } from "drizzle-orm";
 import { liveIntents, livePositions, tradingSettings } from "@db/schema";
 import type { Opportunity } from "@contracts/trading";
 import { getSettings as readSettings, settingsFromRow } from "../queries/trading";
+import { binance } from "../services/binance";
+import { alignedCorrelation } from "../services/risk";
 import { log } from "../lib/logger";
 import { BinanceSignedClient } from "./binanceSigned";
 import { createLiveAdapter, createLiveAdmissionGuard, type ServerEnvironment } from "./liveConfig";
@@ -9,14 +11,28 @@ import { DrizzleLiveOrderStore } from "./drizzleLiveOrderStore";
 import { createMainnetLiveExecutionAdapter } from "./liveExecution";
 import {
   getLiveIntentReservations,
+  getPendingLiveIntentSymbols,
   loadLiveIntentMetadata,
   type LiveDatabase,
   type LiveFinalGateResult,
   type LiveTransaction,
 } from "./livePersistence";
 import { runLivePreflight, type LivePreflightResult } from "./livePreflight";
-import { calculateLivePositionRisk } from "./liveRisk";
-import { addDecimals, compareDecimals, decimal, multiplyDecimals } from "./decimal";
+import {
+  calculateLivePositionRisk,
+  estimateFlatLiquidationPrice,
+  validateLivePortfolioAdmission,
+} from "./liveRisk";
+import {
+  addDecimals,
+  compareDecimals,
+  decimal,
+  multiplyDecimals,
+  normalizeDirectionalPrice,
+  subtractDecimals,
+  type DecimalString,
+} from "./decimal";
+import { DrizzleLiveDailyRisk, type LiveDailyRisk } from "./liveDailyRisk";
 import {
   DrizzleReconciliationStore,
   LiveEntryAdmission,
@@ -41,6 +57,8 @@ export interface ProductionServicesOptions {
   orderStore?: LiveOrderStore;
   reconciliationStore?: ReconciliationStore;
   accountingStore?: LiveAccountingStore;
+  dailyRisk?: LiveDailyRisk;
+  market?: Pick<typeof binance, "getCandles">;
   socketFactory?: (url: string) => UserDataSocket;
   now?: () => number;
   reconciliationIntervalMs?: number;
@@ -51,11 +69,30 @@ interface FreshPreflight {
   checkedAt: number;
   account: Awaited<ReturnType<BinanceSignedClient["account"]>>;
   result: Extract<LivePreflightResult, { ok: true }>;
+  daily: { dailyLocked: boolean; todayPnlPct: number };
+  correlations: Record<string, number | null>;
 }
 
 function allowedSymbols(env: ServerEnvironment): string[] {
   return [...new Set((env.BINANCE_MAINNET_ALLOWED_SYMBOLS ?? "")
     .split(",").map((symbol) => symbol.trim().toUpperCase()).filter(Boolean))];
+}
+
+function admissionLiquidationPrice(
+  result: Extract<LivePreflightResult, { ok: true }>,
+  side: Opportunity["side"],
+  entryPrice: DecimalString,
+  fixedLeverage: number,
+): DecimalString {
+  if (compareDecimals(result.positionRisk.positionAmt, "0") !== 0
+    || compareDecimals(result.positionRisk.liquidationPrice, "0") > 0) {
+    return result.positionRisk.liquidationPrice;
+  }
+  const maintMarginRatio = result.brackets.map((bracket) => bracket.maintMarginRatio)
+    .reduce((highest, value) => compareDecimals(value, highest) > 0 ? value : highest);
+  return estimateFlatLiquidationPrice({
+    side, entryPrice, leverage: fixedLeverage, maintMarginRatio,
+  });
 }
 
 function defaultSocket(url: string): UserDataSocket {
@@ -82,6 +119,7 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
   const orders = options.orderStore ?? new DrizzleLiveOrderStore(options.db);
   const reconciliationStore = options.reconciliationStore ?? new DrizzleReconciliationStore(options.db);
   const accountingStore = options.accountingStore ?? new DrizzleAccountingStore(options.db);
+  const dailyRisk = options.dailyRisk ?? new DrizzleLiveDailyRisk(options.db);
   const admission = new LiveEntryAdmission(true);
   const fresh = new Map<string, FreshPreflight>();
 
@@ -103,6 +141,7 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       symbol: intent.symbol,
       side: intent.side === "SHORT" ? "SHORT" : "LONG",
       stopPrice: intent.stopPrice,
+      tickSize: intent.tickSize,
       liquidationPrice: intent.liquidationPrice,
       leverage: String(intent.leverage),
       maintenanceBracket: bracket.bracket,
@@ -116,6 +155,9 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     db: options.db,
     store: orders,
     gateway: client,
+    accounting: accountingStore,
+    dailyRisk,
+    getSettings,
     workerId: options.workerId ?? `live-${process.pid}`,
     pauseAutoTrade: options.pauseAutoTrade,
     assertCurrentAdmission: async () => {
@@ -129,15 +171,21 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         throw new Error("缺少新鲜的主网签名预检");
       }
       const actualLeverage = Number(cached.result.positionRisk.leverage);
+      const limitPrice = normalizeDirectionalPrice(
+        decimal(String(opportunity.limitPrice)), cached.result.filters.tickSize, opportunity.side,
+      );
+      const stopPrice = normalizeDirectionalPrice(
+        decimal(String(opportunity.stop)), cached.result.filters.tickSize, opportunity.side,
+      );
       return {
         signalId: opportunity.signalId,
         symbol: opportunity.symbol,
         side: opportunity.side,
         quantity: "0",
-        limitPrice: decimal(String(opportunity.limitPrice)),
+        limitPrice,
         tickSize: cached.result.filters.tickSize,
-        stopPrice: decimal(String(opportunity.stop)),
-        liquidationPrice: cached.result.positionRisk.liquidationPrice,
+        stopPrice,
+        liquidationPrice: admissionLiquidationPrice(cached.result, opportunity.side, limitPrice, actualLeverage),
         leverage: Number.isInteger(actualLeverage) ? actualLeverage : 0,
         notional: "0",
         reservedMargin: "0",
@@ -146,7 +194,7 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         leaseDurationMs: 5_000,
       };
     },
-    finalGate: async (opportunity: Opportunity, _input, tx: LiveTransaction, context): Promise<LiveFinalGateResult> => {
+    finalGate: async (opportunity: Opportunity, input, tx: LiveTransaction, context): Promise<LiveFinalGateResult> => {
       const cached = fresh.get(opportunity.symbol);
       if (!cached || cached.checkedAt > now() || now() - cached.checkedAt > 10_000
         || opportunity.expiryTime <= now()) {
@@ -157,21 +205,42 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       const settings = settingsFromRow(settingsRow);
       const asset = cached.account.assets.find((candidate) => candidate.asset === "USDT");
       if (!asset) return { approved: false, reason: "缺少真实 USDT 余额" };
-      const [positions, pendingIntents] = await Promise.all([
+      const [positions, intentStops, pendingIntents, pendingSymbols] = await Promise.all([
         tx.select().from(livePositions).where(eq(livePositions.status, "OPEN")),
+        tx.select({ id: liveIntents.id, stopPrice: liveIntents.stopPrice }).from(liveIntents),
         getLiveIntentReservations(tx),
+        getPendingLiveIntentSymbols(tx),
       ]);
-      const existingPositionMargin = positions.length
-        ? addDecimals(...positions.map((position) => position.isolatedWallet)) : "0";
-      const existingExposure = positions.length
-        ? addDecimals(...positions.map((position) => multiplyDecimals(position.quantity, position.entryPrice))) : "0";
+      const activeRemote = cached.result.positions.filter((position) => compareDecimals(position.positionAmt, "0") !== 0);
+      let existingPositionMargin: DecimalString = "0";
+      let existingExposure: DecimalString = "0";
+      let unrealizedPnl: DecimalString = "0";
+      const portfolioPositions: Array<{ remote: (typeof activeRemote)[number]; stopPrice: DecimalString }> = [];
+      for (const remote of activeRemote) {
+        const local = positions.find((position) => position.symbol === remote.symbol);
+        const intentStop = intentStops.find((intent) => intent.id === local?.id);
+        if (!local || !intentStop || remote.isolatedWallet === undefined) {
+          return { approved: false, reason: `${remote.symbol} 缺少已管理持仓、持久止损或签名 isolated margin` };
+        }
+        const signedQuantity = compareDecimals(remote.positionAmt, "0") < 0
+          ? subtractDecimals("0", remote.positionAmt) : remote.positionAmt;
+        existingPositionMargin = addDecimals(existingPositionMargin, remote.isolatedWallet);
+        existingExposure = addDecimals(existingExposure, multiplyDecimals(signedQuantity, remote.markPrice));
+        unrealizedPnl = addDecimals(unrealizedPnl, multiplyDecimals(
+          remote.positionAmt, subtractDecimals(remote.markPrice, remote.entryPrice),
+        ));
+        portfolioPositions.push({ remote, stopPrice: intentStop.stopPrice });
+      }
+      const equity = addDecimals(asset.walletBalance, unrealizedPnl);
       const risk = calculateLivePositionRisk({
         side: opportunity.side,
-        walletBalance: asset.walletBalance,
+        walletBalance: equity,
         availableBalance: asset.availableBalance,
-        entryPrice: decimal(String(opportunity.limitPrice)),
-        stopPrice: decimal(String(opportunity.stop)),
-        liquidationPrice: cached.result.positionRisk.liquidationPrice,
+        entryPrice: input.limitPrice,
+        stopPrice: input.stopPrice,
+        liquidationPrice: admissionLiquidationPrice(
+          cached.result, opportunity.side, input.limitPrice, settings.fixedLeverage,
+        ),
         actualLeverage: cached.result.positionRisk.leverage,
         leverageMode: settings.leverageMode,
         fixedLeverage: settings.fixedLeverage,
@@ -191,6 +260,25 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         existingExposure,
       });
       if (!risk.ok) return { approved: false, reason: risk.reason };
+      const portfolio = validateLivePortfolioAdmission({
+        symbol: opportunity.symbol,
+        side: opportunity.side,
+        walletBalance: equity,
+        candidateRisk: Number(risk.estimatedRisk),
+        maxPositions: settings.maxPositions,
+        dailyLossLimitPct: settings.dailyLossLimitPct,
+        dailyLocked: cached.daily.dailyLocked,
+        todayPnlPct: cached.daily.todayPnlPct,
+        portfolioStopRiskPct: settings.portfolioStopRiskPct,
+        correlatedDirectionRiskPct: settings.correlatedDirectionRiskPct,
+        correlationThreshold: settings.correlationThreshold,
+        takerFeeBps: settings.takerFeeBps,
+        slippageBps: settings.slippageBps,
+        positions: portfolioPositions,
+        pendingIntents: pendingSymbols.map((symbol) => ({ symbol })),
+        correlations: cached.correlations,
+      });
+      if (!portfolio.ok) return { approved: false, reason: portfolio.reasons.join("；") };
       return {
         approved: true,
         signalId: opportunity.signalId,
@@ -215,6 +303,8 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     store: reconciliationStore,
     recovery: adapter.machine,
     accounting,
+    seedFor: currentSeed,
+    ledger: accountingStore,
     pauseNewEntries: () => admission.pauseForReconciliation(),
     now,
   });
@@ -250,8 +340,9 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     }
     try {
       const settings = await getSettings();
-      const [account, issues, ownedOrders, managedPositions] = await Promise.all([
+      const [account, accountSnapshot, issues, ownedOrders, managedPositions] = await Promise.all([
         client.account(),
+        adapter.account(),
         reconciliationStore.listIssues(),
         orders.listOrders(),
         orders.listOpenPositions(),
@@ -267,13 +358,45 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         managedPositionSymbols: managedPositions.map((position) => position.symbol),
       })));
       const reasons = results.flatMap((result) => result.ok ? [] : result.reasons);
+      const market = options.market ?? binance;
+      const entries = await Promise.all(results.map(async (result, index) => {
+        const symbol = symbols[index];
+        if (!result.ok) return null;
+        const active = result.positions.filter((position) => compareDecimals(position.positionAmt, "0") !== 0
+          && position.symbol !== symbol);
+        const correlations: Record<string, number | null> = {};
+        if (active.length > 0) {
+          const candidateCandles = await market.getCandles(symbol, "15m", settings.correlationWindow + 2);
+          await Promise.all(active.map(async (position) => {
+            const otherCandles = await market.getCandles(position.symbol, "15m", settings.correlationWindow + 2);
+            correlations[position.symbol] = alignedCorrelation(
+              candidateCandles, otherCandles, checkedAt, settings.correlationWindow,
+            );
+          }));
+        }
+        return {
+          symbol,
+          value: {
+            checkedAt,
+            account,
+            result,
+            daily: {
+              dailyLocked: accountSnapshot.dailyLocked,
+              todayPnlPct: accountSnapshot.todayPnlPct,
+            },
+            correlations,
+          },
+        };
+      }));
       results.forEach((result, index) => {
-        if (result.ok) fresh.set(symbols[index], { checkedAt, account, result });
+        const entry = entries[index];
+        if (result.ok && entry) fresh.set(entry.symbol, entry.value);
         else fresh.delete(symbols[index]);
       });
       const ws = stream.health();
-      const wsFresh = ws.lastMessageAt !== null && ws.lastMessageAt <= now() && now() - ws.lastMessageAt <= 10_000;
-      if (!ws.running || !ws.connected || !wsFresh) reasons.push("私有 WS 未连接或消息不新鲜");
+      if (!ws.running || !ws.connected || (ws.lastMessageAt !== null && ws.lastMessageAt > now())) {
+        reasons.push("私有 WS 未连接或心跳时间无效");
+      }
       if (!running || lastRunAt === null || lastRunAt > now() || now() - lastRunAt > 10_000) {
         reasons.push("REST 对账未运行或已陈旧");
       }

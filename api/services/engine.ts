@@ -149,6 +149,7 @@ export class TradingEngine {
   private tickPreviousCloses = new Map<string, number>();
   private lastOneMinuteAt = new Map<string, number>();
   private spreadSamples = new Map<string, { bookTime: number; values: number[] }>();
+  private momentumVolatilitySamples = new Map<string, { eventTime: number; value: number }[]>();
 
   constructor(dependencies: Partial<TradingEngineDependencies> = {}) {
     const now = dependencies.now ?? Date.now;
@@ -215,6 +216,7 @@ export class TradingEngine {
       this.tickPreviousCloses.clear();
       this.lastOneMinuteAt.clear();
       this.spreadSamples.clear();
+      this.momentumVolatilitySamples.clear();
       this.discardOpportunities();
       this.monitorKey = "";
       this.lastRiskCheck = 0;
@@ -368,7 +370,23 @@ export class TradingEngine {
       && this.symbolQuality(item.symbol).valid;
   }
 
+  private recordMomentumVolatility(frame: MomentumFeatureFrame): void {
+    const value = frame.realized_volatility;
+    if (frame.quality !== "GOOD" || value === null || !Number.isFinite(value) || value < 0) return;
+    const samples = [...(this.momentumVolatilitySamples.get(frame.symbol) ?? []), {
+      eventTime: frame.event_time, value,
+    }].filter((sample) => sample.eventTime >= frame.event_time - 120_000).slice(-2_000);
+    this.momentumVolatilitySamples.set(frame.symbol, samples);
+  }
+
+  private momentumVolatilityP80(symbol: string): number {
+    const values = (this.momentumVolatilitySamples.get(symbol) ?? []).map((sample) => sample.value)
+      .sort((left, right) => left - right);
+    return values.length >= 2 ? values[Math.ceil(values.length * 0.8) - 1] : Number.NaN;
+  }
+
   async receiveMomentumFrame(frame: MomentumFeatureFrame): Promise<void> {
+    this.recordMomentumVolatility(frame);
     await this.executionCoordinator.receiveMomentumFrame(frame);
   }
 
@@ -380,6 +398,8 @@ export class TradingEngine {
     const parsed = momentumCandidateSchema.safeParse(input);
     if (!parsed.success) return { ok: false, reason: "动量候选格式无效" };
     const candidate = parsed.data;
+    const volatilityP80 = this.momentumVolatilityP80(candidate.symbol);
+    this.recordMomentumVolatility(candidate.frame);
     await this.executionCoordinator.observeMomentumFrame(candidate.frame);
 
     let market = this.markets.find((item) => item.symbol === candidate.symbol);
@@ -394,19 +414,13 @@ export class TradingEngine {
     if (!state || sourceGeneration !== this.marketGeneration) {
       return { ok: false, reason: "动量风险状态不可用或数据源已切换" };
     }
-    const [candles4h, candles1h, candles15m, candles1m, risk] = await Promise.all([
+    const [candles4h, candles1h, candles15m, candles1m] = await Promise.all([
       this.deps.market.getCandles(candidate.symbol, "4h", 220),
       this.deps.market.getCandles(candidate.symbol, "1h", 220),
       this.deps.market.getCandles(candidate.symbol, "15m", 220),
       this.deps.market.getCandles(candidate.symbol, "1m", 122),
-      this.deps.riskData(candidate.symbol, settings),
     ]);
     if (sourceGeneration !== this.marketGeneration) return { ok: false, reason: "动量数据源代际陈旧" };
-    const volatilityBaseline = risk.tickReturnBaseline
-      .filter((value) => Number.isFinite(value)).map(Math.abs).sort((left, right) => left - right);
-    const volatilityP80 = volatilityBaseline.length >= 2
-      ? volatilityBaseline[Math.ceil(volatilityBaseline.length * 0.8) - 1]
-      : Number.NaN;
     const evaluation = evaluateMomentumCandidate({
       candidate,
       context: {

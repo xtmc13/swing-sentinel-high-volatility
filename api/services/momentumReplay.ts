@@ -19,19 +19,26 @@ export interface ReplayTrade {
   isBuyerMaker: boolean;
 }
 
+export interface ReplayMark {
+  type: "mark";
+  eventTime: number;
+  price: number;
+}
+
 export interface ReplayOrderBook {
   type: "order_book";
   eventTime: number;
   receivedTime: number;
   sequence: number;
   generation: number;
-  markPrice: number;
+  markPrice?: number;
   bid: { price: number; quantity: number };
   ask: { price: number; quantity: number };
 }
 
 export type MomentumReplayEvent =
   | ReplayTrade
+  | ReplayMark
   | ReplayOrderBook
   | { type: "feature_frame"; frame: MomentumFeatureFrame };
 
@@ -77,14 +84,17 @@ class ReplayFeatureEngine {
     this.trades.push({ ...trade });
   }
 
-  build(book: ReplayOrderBook): MomentumFeatureFrame {
+  pushMark(mark: ReplayMark) {
     if (this.marks.length >= 2_000) this.overflow = true;
-    else this.marks.push({ eventTime: book.eventTime, price: book.markPrice });
+    else this.marks.push({ eventTime: mark.eventTime, price: mark.price });
+  }
+
+  build(book: ReplayOrderBook): MomentumFeatureFrame {
     const cutoff = book.eventTime - this.config.rollingWindowMs;
     this.trades = this.trades.filter((trade) => trade.eventTime >= cutoff);
     this.marks = this.marks.filter((mark) => mark.eventTime >= cutoff);
-    const validBook = [book.bid.price, book.bid.quantity, book.ask.price, book.ask.quantity, book.markPrice]
-      .every(Number.isFinite) && book.bid.price > 0 && book.ask.price > 0 && book.markPrice > 0
+    const validBook = [book.bid.price, book.bid.quantity, book.ask.price, book.ask.quantity]
+      .every(Number.isFinite) && book.bid.price > 0 && book.ask.price > 0
       && book.bid.quantity > 0 && book.ask.quantity > 0;
     const quantitySum = book.bid.quantity + book.ask.quantity;
     const mid = (book.bid.price + book.ask.price) / 2;
@@ -131,7 +141,7 @@ class ReplayFeatureEngine {
       : stale ? "STALE"
         : !validBook ? "ONE_SIDED"
           : book.bid.price >= book.ask.price ? "CROSSED"
-            : marks.length < 2 || shortReturn === null || volatility === null ? "INSUFFICIENT_HISTORY" : "GOOD";
+            : marks.length < 3 || shortReturn === null || volatility === null ? "INSUFFICIENT_HISTORY" : "GOOD";
     return {
       symbol: "",
       event_time: book.eventTime,
@@ -140,7 +150,7 @@ class ReplayFeatureEngine {
       generation: book.generation,
       quality,
       config_hash: this.configHash,
-      mark_price: Number.isFinite(book.markPrice) && book.markPrice > 0 ? book.markPrice : null,
+      mark_price: marks.at(-1)?.price ?? null,
       microprice,
       spread_bps: spread,
       depth_imbalance: imbalance,
@@ -207,11 +217,19 @@ function eventTime(event: MomentumReplayEvent) {
 
 function validFiniteEvent(event: MomentumReplayEvent) {
   if (event.type === "feature_frame") return momentumFeatureFrameSchema.safeParse(event.frame).success;
-  const values = event.type === "trade"
-    ? [event.eventTime, event.price, event.quantity]
-    : [event.eventTime, event.receivedTime, event.markPrice, event.bid.price, event.bid.quantity, event.ask.price, event.ask.quantity];
-  return values.every(Number.isFinite) && event.eventTime >= 0
-    && (event.type === "trade" ? event.price > 0 && event.quantity > 0 : event.sequence > 0 && event.generation > 0);
+  if (event.type === "trade") {
+    return [event.eventTime, event.price, event.quantity].every(Number.isFinite)
+      && event.eventTime >= 0 && event.price > 0 && event.quantity > 0;
+  }
+  if (event.type === "mark") {
+    return [event.eventTime, event.price].every(Number.isFinite) && event.eventTime >= 0 && event.price > 0;
+  }
+  return [event.eventTime, event.receivedTime, event.bid.price, event.bid.quantity, event.ask.price, event.ask.quantity]
+    .every(Number.isFinite) && event.eventTime >= 0 && event.sequence > 0 && event.generation > 0;
+}
+
+function eventKindRank(event: MomentumReplayEvent): number {
+  return event.type === "feature_frame" ? 2 : event.type === "order_book" ? 1 : 0;
 }
 
 export function replayMomentum(input: MomentumReplayInput): MomentumReplayResult {
@@ -225,7 +243,7 @@ export function replayMomentum(input: MomentumReplayInput): MomentumReplayResult
   const rejected: { time: number; reason: string }[] = [];
   const ordered = input.events.map((event, index) => ({ event, index }))
     .sort((left, right) => eventTime(left.event) - eventTime(right.event)
-      || Number(left.event.type === "feature_frame") - Number(right.event.type === "feature_frame")
+      || eventKindRank(left.event) - eventKindRank(right.event)
       || left.index - right.index);
   for (const { event } of ordered) {
     if (!validFiniteEvent(event)) {
@@ -241,6 +259,10 @@ export function replayMomentum(input: MomentumReplayInput): MomentumReplayResult
     }
     if (event.type === "trade") {
       features.pushTrade(event);
+      continue;
+    }
+    if (event.type === "mark") {
+      features.pushMark(event);
       continue;
     }
     const frame = event.type === "order_book"

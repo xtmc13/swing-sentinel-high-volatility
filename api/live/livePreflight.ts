@@ -47,6 +47,7 @@ export type LivePreflightResult =
       filters: LiveContractFilters;
       brackets: BinanceLeverageBracket["brackets"];
       positionRisk: BinancePositionRisk;
+      positions: BinancePositionRisk[];
     };
 
 function filterValue(
@@ -138,5 +139,6 @@ export async function runLivePreflight(input: LivePreflightInput): Promise<LiveP
     },
     brackets,
     positionRisk,
+    positions,
   };
 }

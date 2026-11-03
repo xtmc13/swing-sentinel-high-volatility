@@ -8,6 +8,7 @@ import {
   floorToStep,
   isMultipleOfStep,
   multiplyDecimals,
+  normalizeDirectionalPrice,
   subtractDecimals,
 } from "./decimal";
 
@@ -58,6 +59,11 @@ describe("exact decimal accounting", () => {
 
   it("floors huge values to steps without quotient precision loss", () => {
     expect(floorToStep("1e100", "3")).toBe("9".repeat(100));
+  });
+
+  it("rounds LONG entry/protection down and SHORT entry/protection up to tick", () => {
+    expect(normalizeDirectionalPrice("100.0049", "0.01", "LONG")).toBe("100");
+    expect(normalizeDirectionalPrice("100.0001", "0.01", "SHORT")).toBe("100.01");
   });
 
   it("rejects non-decimal grammar", () => {

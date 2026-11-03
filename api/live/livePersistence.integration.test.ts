@@ -6,14 +6,17 @@ import mysql from "mysql2/promise";
 import { fileURLToPath } from "node:url";
 import * as schema from "@db/schema";
 import { calculateLivePositionRisk } from "./liveRisk";
+import { DrizzleLiveDailyRisk } from "./liveDailyRisk";
 import { decimal } from "./decimal";
 import { getOutstandingOrderCounts } from "../queries/trading";
 import {
   assertLiveSubmission,
   claimLiveIntent,
   createLiveIntent,
+  disarmLiveExecution,
   getLiveIntentReservations,
   pauseLiveExecution,
+  setLiveArmed,
   type CreateLiveIntentInput,
   type LiveDatabase,
 } from "./livePersistence";
@@ -101,6 +104,7 @@ beforeEach(async () => {
   await db.delete(schema.livePositions);
   await db.delete(schema.liveAccountSnapshots);
   await db.delete(schema.liveLedgerEntries);
+  await db.delete(schema.liveDailyRisk);
   await db.delete(schema.reconciliationIssues);
   await db.delete(schema.liveControls);
   await db.insert(schema.liveControls).values({ id: 1, armed: true, emergencyGeneration: 0 });
@@ -563,5 +567,48 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
     expect((await db.select().from(schema.liveControls))[0]?.emergencyGeneration).toBe(1);
     expect((await db.select().from(schema.liveIntents))[0]?.status).toBe("CANCEL");
     expect((await db.select().from(schema.tradingSettings))[0]?.autoTrade).toBe(false);
+  });
+
+  it("arming 网络预检不持有 controls 锁，并发 disarm 获胜且不被旧 arming 覆盖", async () => {
+    if (!db) throw new Error("database required");
+    let markPreflight!: () => void;
+    let releasePreflight!: () => void;
+    const entered = new Promise<void>((resolve) => { markPreflight = resolve; });
+    const gate = new Promise<void>((resolve) => { releasePreflight = resolve; });
+    const arming = setLiveArmed(independentDb(), true, async () => {
+      markPreflight();
+      await gate;
+    });
+    await entered;
+    try {
+      const disarmed = await Promise.race([
+        disarmLiveExecution(independentDb()).then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
+      ]);
+      expect(disarmed).toBe(true);
+    } finally {
+      releasePreflight();
+      await arming.catch(() => undefined);
+    }
+    expect((await db.select().from(schema.liveControls))[0]).toMatchObject({ armed: false });
+  });
+
+  it("LIVE 日初权益与日损锁在独立连接重启后保持", async () => {
+    if (!db) throw new Error("database required");
+    const first = new DrizzleLiveDailyRisk(independentDb());
+    await expect(first.evaluate("2027-01-15", 1000, 2)).resolves.toEqual({
+      dayStartEquity: 1000, dailyLocked: false,
+    });
+    await expect(first.evaluate("2027-01-15", 979, 2)).resolves.toEqual({
+      dayStartEquity: 1000, dailyLocked: true,
+    });
+
+    const restarted = new DrizzleLiveDailyRisk(independentDb());
+    await expect(restarted.evaluate("2027-01-15", 990, 2)).resolves.toEqual({
+      dayStartEquity: 1000, dailyLocked: true,
+    });
+    expect(await db.select().from(schema.liveDailyRisk)).toMatchObject([{
+      dayKey: "2027-01-15", dayStartEquity: "1000.000000000000000000000000000000", dailyLocked: true,
+    }]);
   });
 });

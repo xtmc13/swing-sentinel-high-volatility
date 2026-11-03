@@ -166,3 +166,11 @@ export function isMultipleOfStep(value: DecimalString, step: DecimalString): boo
   const [units, increment] = aligned(parse(value), stepValue(step));
   return units % increment === 0n;
 }
+
+export function normalizeDirectionalPrice(
+  value: DecimalString,
+  tickSize: DecimalString,
+  side: "LONG" | "SHORT",
+): DecimalString {
+  return side === "LONG" ? floorToStep(value, tickSize) : ceilToStep(value, tickSize);
+}

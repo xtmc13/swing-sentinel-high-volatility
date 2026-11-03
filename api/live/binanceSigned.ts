@@ -19,6 +19,7 @@ export interface BinanceSignedClientOptions {
   sleep?: (milliseconds: number) => Promise<void>;
   recvWindow?: number;
   maxRateLimitRetries?: number;
+  requestTimeoutMs?: number;
 }
 
 export class BinanceSignedError extends Error {
@@ -186,6 +187,7 @@ export class BinanceSignedClient {
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly recvWindow: number;
   private readonly maxRateLimitRetries: number;
+  private readonly requestTimeoutMs: number;
   private offsetMs: number | null = null;
   private timeSync: Promise<void> | null = null;
 
@@ -199,6 +201,10 @@ export class BinanceSignedClient {
     if (!Number.isSafeInteger(maxRateLimitRetries) || maxRateLimitRetries < 0 || maxRateLimitRetries > 10) {
       throw new Error("maxRateLimitRetries must be a safe integer between 0 and 10");
     }
+    const requestTimeoutMs = options.requestTimeoutMs ?? 5_000;
+    if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1 || requestTimeoutMs > 30_000) {
+      throw new Error("requestTimeoutMs must be a safe integer between 1 and 30000");
+    }
     this.apiKey = options.apiKey;
     this.apiSecret = options.apiSecret;
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
@@ -206,6 +212,7 @@ export class BinanceSignedClient {
     this.sleep = options.sleep ?? ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
     this.recvWindow = recvWindow;
     this.maxRateLimitRetries = maxRateLimitRetries;
+    this.requestTimeoutMs = requestTimeoutMs;
   }
 
   get serverTimeOffsetMs(): number | null {
@@ -342,18 +349,14 @@ export class BinanceSignedClient {
         query.append("signature", createHmac("sha256", this.apiSecret).update(query.toString()).digest("hex"));
       }
       const suffix = query.size ? `?${query.toString()}` : "";
-      let response: Response;
-      try {
-        response = await this.fetchImpl(`${BINANCE_MAINNET_REST_URL}${path}${suffix}`, {
-          method,
-          headers: withApiKey ? { "X-MBX-APIKEY": this.apiKey } : undefined,
-        });
-      } catch {
-        throw new BinanceSignedError("Binance network request failed");
-      }
+      const { response, body } = await this.requestWithDeadline(`${BINANCE_MAINNET_REST_URL}${path}${suffix}`, {
+        method,
+        headers: withApiKey ? { "X-MBX-APIKEY": this.apiKey } : undefined,
+      });
 
       if (!response.ok) {
-        const code = await this.errorCode(response);
+        const code = typeof body === "object" && body !== null && "code" in body
+          && typeof body.code === "number" ? body.code : undefined;
         if (response.status === 429 && attempt < retries) {
           await this.sleep(this.rateLimitDelay(response, attempt));
           continue;
@@ -363,21 +366,41 @@ export class BinanceSignedClient {
           code,
         });
       }
-
-      try {
-        return await response.json() as T;
-      } catch {
-        throw new BinanceSignedError("Binance returned an invalid JSON response", { status: response.status });
-      }
+      return body as T;
     }
   }
 
-  private async errorCode(response: Response): Promise<number | undefined> {
+  private async requestWithDeadline(input: string, init: RequestInit): Promise<{ response: Response; body: unknown }> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new BinanceSignedError("Binance request timed out"));
+      }, this.requestTimeoutMs);
+    });
+    const operation = (async () => {
+      let response: Response;
+      try {
+        response = await this.fetchImpl(input, { ...init, signal: controller.signal });
+      } catch {
+        throw new BinanceSignedError("Binance network request failed");
+      }
+      try {
+        return { response, body: await response.json() as unknown };
+      } catch (error) {
+        if (!response.ok) return { response, body: undefined };
+        throw error;
+      }
+    })();
     try {
-      const body = await response.json() as { code?: unknown };
-      return typeof body.code === "number" ? body.code : undefined;
-    } catch {
-      return undefined;
+      return await Promise.race([operation, timeout]);
+    } catch (error) {
+      if (error instanceof BinanceSignedError) throw error;
+      const response = await operation.catch(() => null);
+      throw new BinanceSignedError("Binance returned an invalid JSON response", { status: response?.response.status });
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 

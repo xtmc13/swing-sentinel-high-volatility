@@ -150,6 +150,25 @@ describeDatabase("Task 4 dedicated durable order store", () => {
     expect((await db.select().from(schema.liveIntents))[0]?.status).toBe("FILLED");
   });
 
+  it("persists signed mark updates and trailing stops without changing the original risk stop", async () => {
+    if (!db) throw new Error("database required");
+    const store = new DrizzleLiveOrderStore(db);
+    await store.insertOrder(order);
+    await store.applyFill(order.id, fill(), seed);
+
+    await store.updatePosition(seed.id, {
+      markPrice: "103", liquidationPrice: "49", isolatedWallet: "20.4", stopPrice: "98.5",
+    });
+
+    const restarted = new DrizzleLiveOrderStore(db);
+    expect(await restarted.getPosition(seed.id)).toMatchObject({
+      markPrice: "103", liquidationPrice: "49", isolatedWallet: "20.4",
+      stopPrice: "98.5", initialStopPrice: "99",
+    });
+    expect((await db.select().from(schema.liveIntents))[0]?.stopPrice)
+      .toBe("98.500000000000000000000000000000");
+  });
+
   it("cross-worker emergency CANCEL cannot be overwritten by submit admission", async () => {
     if (!db) throw new Error("database required");
     const store = new DrizzleLiveOrderStore(db);

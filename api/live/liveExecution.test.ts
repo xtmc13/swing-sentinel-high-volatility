@@ -5,6 +5,7 @@ import { getDb } from "../queries/connection";
 import type {
   BinanceAccountResponse,
   BinanceOpenOrder,
+  BinancePositionRisk,
   BinanceUserTrade,
   CancelOrderRequest,
   LiveOrderGateway,
@@ -73,6 +74,10 @@ class AdapterGateway implements LiveOrderGateway {
 
   async account(): Promise<BinanceAccountResponse> {
     return { assets: [{ asset: "USDT", walletBalance: "10000", availableBalance: "9000" }] };
+  }
+
+  async positionRisk(): Promise<BinancePositionRisk[]> {
+    throw new Error("positionRisk fixture is not connected");
   }
 }
 
@@ -208,6 +213,16 @@ function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTra
       };
     },
   });
+  gateway.positionRisk = async () => (await store.listOpenPositions()).map((position) => ({
+    symbol: position.symbol,
+    positionAmt: position.side === "SHORT" ? `-${position.quantity}` : position.quantity,
+    entryPrice: position.entryPrice,
+    markPrice: position.markPrice,
+    liquidationPrice: position.liquidationPrice,
+    leverage: position.leverage,
+    marginType: "isolated",
+    isolatedWallet: position.isolatedWallet === "0" ? "40" : position.isolatedWallet,
+  }));
   return { store, gateway, created, claims, createIntent, claimIntent, pauseAutoTrade, assertCurrentAdmission, adapter, finalMode: () => finalMode };
 }
 

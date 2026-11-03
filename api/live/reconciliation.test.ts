@@ -498,4 +498,78 @@ describe("exchange and database comparison", () => {
     expect(result.ok).toBe(false);
     expect((await h.store.listIssues()).some((issue) => issue.category === "UNPROTECTED_POSITION")).toBe(true);
   });
+
+  it("recovers a missed first fill from a terminal owned order using its persisted intent seed", async () => {
+    const orders = new InMemoryLiveOrderStore();
+    const store = new InMemoryReconciliationStore();
+    const terminal = order("FILLED");
+    orders.addOrder(terminal);
+    orders.addOrder({
+      ...order("NEW", "2"), intentId: terminal.intentId, clientOrderId: "protect-intent-1",
+      exchangeOrderId: "902", type: "STOP_MARKET", reduceOnly: true, price: "95", stopPrice: "95",
+    });
+    const remoteProtection = remoteOrder(order("NEW", "2"), "2");
+    Object.assign(remoteProtection, {
+      clientOrderId: "protect-intent-1", orderId: 902, type: "STOP_MARKET", reduceOnly: true, side: "SELL",
+    });
+    const service = new ReconciliationService({
+      client: {
+        account: async () => account(), positionRisk: async () => [position("1")], openOrders: async () => [remoteProtection],
+      },
+      orders,
+      store,
+      seedFor: async () => seed,
+      recovery: {
+        recover: async (clientOrderId, recoverySeed) => {
+          if (clientOrderId === terminal.clientOrderId) {
+            if (!recoverySeed) throw new Error("Position seed is required for recovered fills");
+            await orders.applyFill(terminal.id, {
+              exchangeTradeId: "missed-first-fill", exchangeOrderId: "901", symbol: "BTCUSDT", side: "BUY",
+              price: "100", quantity: "1", commission: "0", commissionAsset: "USDT", realizedPnl: "0",
+              isMaker: false, executedAt: 100,
+            }, recoverySeed);
+          }
+          return (await orders.getOrder(clientOrderId))!;
+        },
+      },
+      accounting: { synchronize: async () => undefined },
+      pauseNewEntries: async () => null,
+    });
+
+    const result = await service.reconcile();
+
+    expect(result.ok).toBe(true);
+    expect(await orders.getPosition(terminal.intentId)).toMatchObject({ quantity: "1", entryPrice: "100" });
+  });
+
+  it("treats ledger-explained wallet changes as expected and resolves a recovered balance issue", async () => {
+    const orders = new InMemoryLiveOrderStore();
+    const store = new InMemoryReconciliationStore();
+    await store.appendAccountSnapshot({
+      asset: "USDT", walletBalance: "1000", availableBalance: "1000", crossWalletBalance: "1000", observedAt: 1_000,
+    });
+    const existing = await store.recordIssue({
+      category: "BALANCE_MISMATCH", severity: "ERROR", symbol: null,
+      expectedValue: "1000", actualValue: "999", message: "USDT wallet balance 与上次持久化快照不一致", detectedAt: 1_100,
+    });
+    const service = new ReconciliationService({
+      client: { account: async () => account("999"), positionRisk: async () => [], openOrders: async () => [] },
+      orders,
+      store,
+      ledger: { listLedgerEntries: async () => [{
+        id: "ledger-1", exchangeTransactionId: "income-1", symbol: "BTCUSDT", asset: "USDT",
+        entryType: "REALIZED_PNL", amount: "-1", occurredAt: 2_000,
+      }] },
+      recovery: { recover: async () => { throw new Error("unexpected"); } },
+      accounting: { synchronize: async () => undefined },
+      pauseNewEntries: async () => null,
+      now: () => 3_000,
+    });
+
+    const result = await service.reconcile();
+
+    expect(result.ok).toBe(true);
+    expect((await store.listIssues()).find((issue) => issue.id === existing.id)?.status).toBe("RESOLVED");
+    expect((await store.listIssues()).some((issue) => issue.category === "BALANCE_MISMATCH" && issue.status === "OPEN")).toBe(false);
+  });
 });

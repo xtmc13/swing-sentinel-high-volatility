@@ -58,6 +58,8 @@ export interface LivePositionSeed {
   symbol: string;
   side: Side;
   stopPrice: DecimalString;
+  initialStopPrice?: DecimalString | null;
+  tickSize?: DecimalString | null;
   liquidationPrice: DecimalString;
   leverage: DecimalString;
   maintenanceBracket: number;
@@ -97,6 +99,9 @@ export interface FillApplication {
   unresolved?: string[];
 }
 
+export type LivePositionUpdate = Partial<Pick<LivePosition,
+  "markPrice" | "liquidationPrice" | "isolatedWallet" | "stopPrice">>;
+
 export interface LiveOrderStore {
   insertOrder(order: LiveOrder): Promise<void>;
   getOrder(clientOrderId: string): Promise<LiveOrder | null>;
@@ -121,6 +126,7 @@ export interface LiveOrderStore {
   ): Promise<LiveOrder>;
   applyFill(orderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication>;
   getPosition(positionId: string): Promise<LivePosition | null>;
+  updatePosition(positionId: string, patch: LivePositionUpdate): Promise<LivePosition | null>;
   listOpenPositions(): Promise<LivePosition[]>;
 }
 
@@ -193,6 +199,7 @@ export function applyNewFill(
 
   const position = currentPosition ?? {
     ...seed,
+    initialStopPrice: seed.initialStopPrice ?? seed.stopPrice,
     status: "OPEN" as const,
     initialQuantity: "0",
     quantity: "0",
@@ -363,6 +370,14 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
     return copyPosition(this.positions.get(positionId) ?? null);
   }
 
+  async updatePosition(positionId: string, patch: LivePositionUpdate): Promise<LivePosition | null> {
+    const current = this.positions.get(positionId);
+    if (!current) return null;
+    const updated = { ...current, ...patch };
+    this.positions.set(positionId, updated);
+    return copyPosition(updated);
+  }
+
   async listOpenPositions(): Promise<LivePosition[]> {
     return [...this.positions.values()].filter((position) => position.status === "OPEN").map((position) => ({ ...position }));
   }
@@ -529,6 +544,12 @@ export class OrderStateMachine {
   async recover(clientOrderId: string, recoverySeed?: LivePositionSeed): Promise<LiveOrder> {
     const order = await this.requireOrder(clientOrderId);
     return this.serializePosition(order.intentId, () => this.reconcile(order, recoverySeed));
+  }
+
+  async protectPosition(positionId: string): Promise<void> {
+    const position = await this.store.getPosition(positionId);
+    if (!position || position.status !== "OPEN") return;
+    return this.serializePosition(positionId, () => this.ensureProtection(position));
   }
 
   private async reconcile(order: LiveOrder, recoverySeed?: LivePositionSeed): Promise<LiveOrder> {
@@ -718,6 +739,7 @@ export class OrderStateMachine {
       exchangeOrderId: null,
       status: "PENDING_SEND",
       price: changes.price ?? current.price,
+      stopPrice: current.type === "STOP_MARKET" ? changes.price ?? current.stopPrice : current.stopPrice,
       originalQuantity: remaining,
       executedQuantity: "0",
       averagePrice: "0",

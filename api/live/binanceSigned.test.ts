@@ -358,6 +358,30 @@ describe("Binance signed mainnet client", () => {
     expect(requestUrl(fetchMock, 2).pathname).toBe("/fapi/v1/order");
   });
 
+  it("times out a hung signed transport even when fetch ignores abort signals", async () => {
+    const client = new BinanceSignedClient({
+      ...credentials,
+      requestTimeoutMs: 5,
+      fetch: (async () => new Promise<Response>(() => undefined)) as typeof fetch,
+      now: () => NOW,
+    });
+
+    await expect(client.placeOrder({ symbol: "BTCUSDT", side: "BUY", type: "MARKET", quantity: "1" }))
+      .rejects.toMatchObject({ message: "Binance request timed out" });
+  });
+
+  it("applies the same hard deadline to response body parsing and listenKey calls", async () => {
+    const hungBody = { ok: true, status: 200, headers: new Headers(), json: () => new Promise(() => undefined) } as unknown as Response;
+    const client = new BinanceSignedClient({
+      ...credentials,
+      requestTimeoutMs: 5,
+      fetch: (async () => hungBody) as typeof fetch,
+      now: () => NOW,
+    });
+
+    await expect(client.createListenKey()).rejects.toMatchObject({ message: "Binance request timed out" });
+  });
+
   it("keeps the gateway fake-transport friendly", () => {
     const gateway: LiveOrderGateway = {
       placeOrder: async (request) => ({ quantity: request.quantity }),

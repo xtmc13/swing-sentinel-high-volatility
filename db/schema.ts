@@ -239,6 +239,7 @@ export const liveIntents = mysqlTable("live_intents", {
   quantity: money("quantity"),
   limitPrice: money("limit_price"),
   stopPrice: money("stop_price"),
+  tickSize: decimal("tick_size", { precision: 65, scale: 30 }),
   liquidationPrice: money("liquidation_price"),
   leverage: int("leverage").notNull(),
   notional: money("notional"),
@@ -318,6 +319,7 @@ export const livePositions = mysqlTable("live_positions", {
   initialQuantity: money("initial_quantity"),
   quantity: money("quantity"),
   entryPrice: money("entry_price"),
+  initialStopPrice: decimal("initial_stop_price", { precision: 65, scale: 30 }),
   markPrice: money("mark_price"),
   liquidationPrice: money("liquidation_price"),
   isolatedWallet: money("isolated_wallet"),
@@ -343,6 +345,14 @@ export const liveAccountSnapshots = mysqlTable("live_account_snapshots", {
 }, (table) => ({
   assetObservedIdx: index("live_account_asset_observed_idx").on(table.asset, table.observedAt),
 }));
+
+export const liveDailyRisk = mysqlTable("live_daily_risk", {
+  dayKey: varchar("day_key", { length: 10 }).primaryKey(),
+  dayStartEquity: money("day_start_equity"),
+  dailyLocked: boolean("daily_locked").notNull().default(false),
+  createdAt: timestamp("created_at", { fsp: 3 }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { fsp: 3 }).notNull().defaultNow().onUpdateNow(),
+});
 
 export const liveLedgerEntries = mysqlTable("live_ledger_entries", {
   id: varchar("id", { length: 36 }).primaryKey(),

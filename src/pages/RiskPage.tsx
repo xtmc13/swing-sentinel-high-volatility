@@ -22,6 +22,10 @@ function RiskPageContent() {
   const [form, setForm] = useState<TradingSettings>(data.settings);
   const [adminSecret, setAdminSecret] = useState("");
   const [confirmationPhrase, setConfirmationPhrase] = useState("");
+  const [canary, setCanary] = useState({
+    symbol: "BTCUSDT", side: "LONG" as "LONG" | "SHORT", limitPrice: "", stopPrice: "",
+    adminSecret: "", confirmationPhrase: "",
+  });
   const save = trpc.trading.saveSettings.useMutation({
     onSuccess: async () => { toast.success("风险与执行参数已保存，下一轮扫描生效"); refresh(); },
     onError: (error) => toast.error(error.message),
@@ -35,6 +39,15 @@ function RiskPageContent() {
       toast.success(result.armed ? "主网已 armed；每次提交仍重新执行全部门控" : "主网已 disarm");
       setAdminSecret("");
       setConfirmationPhrase("");
+      refresh();
+    },
+    onError: (error) => toast.error(error.message),
+  });
+  const manualCanary = trpc.trading.manualCanary.useMutation({
+    onSuccess: async (result) => {
+      if (result.ok) toast.success(`真实 canary 已提交；等待成交回报：${result.reason}`);
+      else toast.error(`canary 未提交：${result.reason}`);
+      setCanary((current) => ({ ...current, adminSecret: "", confirmationPhrase: "" }));
       refresh();
     },
     onError: (error) => toast.error(error.message),
@@ -167,6 +180,32 @@ function RiskPageContent() {
               </form>
             )}
           </section>
+          {data.settings.executionMode === "LIVE_MAINNET" && <section className="panel p-4" aria-labelledby="manual-canary-title">
+            <h2 id="manual-canary-title" className="terminal-label">CONTROLLED REAL CANARY</h2>
+            <p className="reading mt-3 text-[10px] leading-5 text-[#d8c68e]">这会提交一笔真实 IOC 限价单。数量由签名账户与全部风控计算；不会开启自动交易，也不保证成交。</p>
+            <form className="mt-3 space-y-3" onSubmit={(event) => {
+              event.preventDefault();
+              manualCanary.mutate({
+                symbol: canary.symbol,
+                side: canary.side,
+                limitPrice: Number(canary.limitPrice),
+                stopPrice: Number(canary.stopPrice),
+                adminSecret: canary.adminSecret,
+                confirmationPhrase: canary.confirmationPhrase,
+              });
+            }}>
+              <label className="block"><span className="terminal-label">白名单合约</span><input className="terminal-input mt-2 !text-[11px]" required pattern="[A-Z0-9]{5,20}" value={canary.symbol} onChange={(event) => setCanary({ ...canary, symbol: event.target.value.toUpperCase() })} /></label>
+              <label className="block"><span className="terminal-label">方向</span><select className="terminal-input mt-2" value={canary.side} onChange={(event) => setCanary({ ...canary, side: event.target.value as "LONG" | "SHORT" })}><option value="LONG">LONG</option><option value="SHORT">SHORT</option></select></label>
+              <label className="block"><span className="terminal-label">IOC 限价</span><input className="terminal-input mt-2 !text-[11px]" type="number" required min="0" step="any" value={canary.limitPrice} onChange={(event) => setCanary({ ...canary, limitPrice: event.target.value })} /></label>
+              <label className="block"><span className="terminal-label">原始止损</span><input className="terminal-input mt-2 !text-[11px]" type="number" required min="0" step="any" value={canary.stopPrice} onChange={(event) => setCanary({ ...canary, stopPrice: event.target.value })} /></label>
+              <label className="block"><span className="terminal-label">重新输入管理员令牌</span><input className="terminal-input mt-2 !text-[11px]" type="password" autoComplete="off" required minLength={32} value={canary.adminSecret} onChange={(event) => setCanary({ ...canary, adminSecret: event.target.value })} /></label>
+              <label className="block"><span className="terminal-label">确认短语</span><input className="terminal-input mt-2 !text-[11px]" required value={canary.confirmationPhrase} onChange={(event) => setCanary({ ...canary, confirmationPhrase: event.target.value })} placeholder="SUBMIT LIVE CANARY" /></label>
+              <button type="submit" className="btn-danger w-full" disabled={manualCanary.isPending || !data.execution.armed
+                || !(Number(canary.limitPrice) > 0) || !(Number(canary.stopPrice) > 0)
+                || (canary.side === "LONG" ? Number(canary.stopPrice) >= Number(canary.limitPrice) : Number(canary.stopPrice) <= Number(canary.limitPrice))
+                || canary.adminSecret.length < 32 || canary.confirmationPhrase !== "SUBMIT LIVE CANARY"}>{manualCanary.isPending ? "正在执行完整门控" : "提交真实 canary IOC"}</button>
+            </form>
+          </section>}
           <section className="panel border-[#66343c] p-4">
             <div className="flex items-center gap-2 text-[#f87171]"><OctagonAlert size={16} aria-hidden="true" /><h2 className="terminal-label !text-[#f87171]">EMERGENCY CONTROL</h2></div>
             <p className="reading mt-3 text-[11px] leading-5 text-[#a8b5c8]">紧急停止会关闭自动开仓，并按当前{data.settings.executionMode === "LIVE_MAINNET" ? "真实主网" : "模拟"}市价退出所有持仓。未结算结果会明确显示为失败。</p>

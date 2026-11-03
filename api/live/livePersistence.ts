@@ -103,7 +103,7 @@ function validLease(workerId: string, leaseDurationMs: number): boolean {
   return workerId.trim().length > 0 && Number.isSafeInteger(leaseDurationMs) && leaseDurationMs > 0;
 }
 
-async function databaseNow(db: Pick<LiveDatabase, "execute">): Promise<Date> {
+export async function databaseNow(db: Pick<LiveDatabase, "execute">): Promise<Date> {
   const result = await db.execute(sql`
     SELECT CAST(UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS UNSIGNED) AS db_now_ms
   `);
@@ -179,6 +179,8 @@ export async function createLiveIntent(
   }
 
   try {
+    if (!options.assertCurrentAdmission) return { ok: false, reason: "缺少当前环境/预检授权" };
+    await options.assertCurrentAdmission();
     return await db.transaction(async (tx): Promise<CreateLiveIntentResult> => {
       const settingsLock = await tx.select({
         id: tradingSettings.id,
@@ -195,8 +197,6 @@ export async function createLiveIntent(
       }
       const controls = await lockLiveControls(tx);
       if (!controls.armed) return { ok: false, reason: "主网执行未 armed" };
-      if (!options.assertCurrentAdmission) return { ok: false, reason: "缺少当前环境/预检授权" };
-      await options.assertCurrentAdmission();
       const stateLock = await tx.select({ mode: volatilityStates.mode }).from(volatilityStates)
         .where(eq(volatilityStates.symbol, input.symbol)).for("update");
       const mode = stateLock[0]?.mode === "HIGH" || stateLock[0]?.mode === "EXTREME"
@@ -225,6 +225,7 @@ export async function createLiveIntent(
         quantity: approval.quantity,
         limitPrice: input.limitPrice,
         stopPrice: input.stopPrice,
+        tickSize: input.tickSize,
         liquidationPrice: input.liquidationPrice,
         leverage: input.leverage,
         notional: approval.notional,
@@ -303,12 +304,18 @@ export async function assertLiveSubmission(
   if (!Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration < 0) {
     throw new Error("Invalid emergency generation");
   }
+  if (!input.assertCurrentAdmission) throw new Error("缺少当前环境/预检授权");
+  await input.assertCurrentAdmission();
   await db.transaction(async (tx) => {
     const settings = await tx.select({ autoTrade: tradingSettings.autoTrade, executionMode: tradingSettings.executionMode }).from(tradingSettings)
       .where(eq(tradingSettings.id, 1)).for("update");
     const controls = await lockLiveControls(tx);
-    const intent = await tx.select({ status: liveIntents.status, manualCanary: liveIntents.manualCanary }).from(liveIntents)
-      .where(eq(liveIntents.id, input.intentId)).for("update");
+    const intent = await tx.select({
+      status: liveIntents.status,
+      manualCanary: liveIntents.manualCanary,
+      expiresAt: liveIntents.expiresAt,
+    }).from(liveIntents).where(eq(liveIntents.id, input.intentId)).for("update");
+    const now = await databaseNow(tx);
     if (!liveSubmissionPermitted({
       armed: controls.armed,
       executionMode: settings[0]?.executionMode ?? "MISSING",
@@ -317,11 +324,9 @@ export async function assertLiveSubmission(
       generation: controls.generation,
       expectedGeneration: input.expectedGeneration,
       intentStatus: intent[0]?.status ?? "MISSING",
-    })) {
-      throw new Error("Live submission changed after emergency or pause");
+    }) || !intent[0] || intent[0].expiresAt.getTime() <= now.getTime()) {
+      throw new Error("Live submission changed after emergency or pause, or intent expiry");
     }
-    if (!input.assertCurrentAdmission) throw new Error("缺少当前环境/预检授权");
-    await input.assertCurrentAdmission();
   });
 }
 
@@ -352,13 +357,20 @@ export async function setLiveArmed(
   assertCurrentAdmission?: AssertCurrentLiveAdmission,
 ): Promise<void> {
   if (!armed) return disarmLiveExecution(db);
+  const generation = await db.transaction(async (tx) => {
+    const settings = await tx.select({ executionMode: tradingSettings.executionMode }).from(tradingSettings)
+      .where(eq(tradingSettings.id, 1)).for("update");
+    if (settings[0]?.executionMode !== "LIVE_MAINNET") throw new Error("只有 LIVE_MAINNET 模式可以 armed");
+    return (await lockLiveControls(tx)).generation;
+  });
+  if (!assertCurrentAdmission) throw new Error("缺少当前环境/预检授权");
+  await assertCurrentAdmission();
   await db.transaction(async (tx) => {
     const settings = await tx.select({ executionMode: tradingSettings.executionMode }).from(tradingSettings)
       .where(eq(tradingSettings.id, 1)).for("update");
     if (settings[0]?.executionMode !== "LIVE_MAINNET") throw new Error("只有 LIVE_MAINNET 模式可以 armed");
-    await lockLiveControls(tx);
-    if (!assertCurrentAdmission) throw new Error("缺少当前环境/预检授权");
-    await assertCurrentAdmission();
+    const controls = await lockLiveControls(tx);
+    if (controls.generation !== generation) throw new Error("Live arming changed after disarm or emergency");
     await tx.update(liveControls).set({ armed: true }).where(eq(liveControls.id, 1));
   });
 }
@@ -369,17 +381,26 @@ export function pauseLiveExecution(db: LiveDatabase): Promise<void> {
 
 const TERMINAL_INTENT_STATUSES = new Set(["FILLED", "CANCEL", "CANCELLED", "CANCELED", "REJECTED", "EXPIRED"]);
 
-export async function getLiveIntentReservations(db: LiveDatabase): Promise<LiveIntentReservation> {
-  const rows = await db.select({
-    margin: liveIntents.reservedMargin,
-    risk: liveIntents.reservedRisk,
-  }).from(liveIntents).where(and(
+function pendingIntentPredicate() {
+  return and(
     notInArray(liveIntents.status, [...TERMINAL_INTENT_STATUSES]),
     or(
       ne(liveIntents.status, "PENDING_SEND"),
       gt(liveIntents.expiresAt, sql`CURRENT_TIMESTAMP(3)`),
     ),
-  ));
+  );
+}
+
+export async function getPendingLiveIntentSymbols(db: LiveDatabase): Promise<string[]> {
+  const rows = await db.select({ symbol: liveIntents.symbol }).from(liveIntents).where(pendingIntentPredicate());
+  return rows.map((row) => row.symbol);
+}
+
+export async function getLiveIntentReservations(db: LiveDatabase): Promise<LiveIntentReservation> {
+  const rows = await db.select({
+    margin: liveIntents.reservedMargin,
+    risk: liveIntents.reservedRisk,
+  }).from(liveIntents).where(pendingIntentPredicate());
   return {
     margin: addDecimals(...rows.map((row) => row.margin)),
     risk: addDecimals(...rows.map((row) => row.risk)),

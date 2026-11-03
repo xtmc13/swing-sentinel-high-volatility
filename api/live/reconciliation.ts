@@ -1,11 +1,12 @@
-import { asc, desc, eq, ne, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, like, ne, notInArray, sql } from "drizzle-orm";
 import { liveAccountSnapshots, liveIntents, reconciliationIssues } from "@db/schema";
+import type { LiveLedgerEntry } from "./accounting";
 import type {
   BinanceAccountResponse,
   BinanceOpenOrder,
   BinancePositionRisk,
 } from "./binanceSigned";
-import { compareDecimals, decimal, type DecimalString } from "./decimal";
+import { addDecimals, compareDecimals, decimal, subtractDecimals, type DecimalString } from "./decimal";
 import type { LiveDatabase } from "./livePersistence";
 import type {
   LiveOrder,
@@ -67,6 +68,7 @@ export interface ReconciliationStore {
   listUnsettledIntents(limit?: number): Promise<UnsettledLiveIntent[]>;
   appendAccountSnapshot(snapshot: LiveAccountSnapshot): Promise<boolean>;
   latestAccountSnapshots(): Promise<LiveAccountSnapshot[]>;
+  resolveBalanceIssues(asset: string, resolvedAt: number): Promise<void>;
 }
 
 export class InMemoryReconciliationStore implements ReconciliationStore {
@@ -123,6 +125,16 @@ export class InMemoryReconciliationStore implements ReconciliationStore {
   async latestAccountSnapshots(): Promise<LiveAccountSnapshot[]> {
     return [...this.snapshots.values()].sort((left, right) => left.asset.localeCompare(right.asset))
       .map((snapshot) => ({ ...snapshot }));
+  }
+
+  async resolveBalanceIssues(asset: string, resolvedAt: number): Promise<void> {
+    for (const issue of this.issues) {
+      if (issue.category === "BALANCE_MISMATCH" && issue.status !== "RESOLVED"
+        && issue.message.startsWith(`${asset} `)) {
+        issue.status = "RESOLVED";
+        issue.resolvedAt = resolvedAt;
+      }
+    }
   }
 }
 
@@ -222,6 +234,15 @@ export class DrizzleReconciliationStore implements ReconciliationStore {
     }
     return [...latest.values()];
   }
+
+  async resolveBalanceIssues(asset: string, resolvedAt: number): Promise<void> {
+    await this.db.update(reconciliationIssues).set({ status: "RESOLVED", resolvedAt: new Date(resolvedAt) })
+      .where(and(
+        eq(reconciliationIssues.category, "BALANCE_MISMATCH"),
+        ne(reconciliationIssues.status, "RESOLVED"),
+        like(reconciliationIssues.message, `${asset} %`),
+      ));
+  }
 }
 
 export interface ReconciliationClient {
@@ -313,6 +334,8 @@ interface ReconciliationServiceOptions {
   store: ReconciliationStore;
   recovery: OrderRecovery;
   accounting: { synchronize(): Promise<void> };
+  seedFor?: (order: LiveOrder) => Promise<LivePositionSeed>;
+  ledger?: { listLedgerEntries(): Promise<LiveLedgerEntry[]> };
   pauseNewEntries: () => Promise<EntryResume | null>;
   now?: () => number;
 }
@@ -345,10 +368,10 @@ export class ReconciliationService {
       const initialOrders = await this.options.orders.listOrders();
       const positions = await this.options.orders.listOpenPositions();
       for (const order of initialOrders) {
-        if (TERMINAL_ORDER_STATUSES.has(order.status)) continue;
         try {
-          const recovered = await this.options.recovery.recover(order.clientOrderId,
-            positions.find((position) => position.id === order.intentId));
+          const existingPosition = positions.find((position) => position.id === order.intentId);
+          const recoverySeed = existingPosition ?? await this.options.seedFor?.(order);
+          const recovered = await this.options.recovery.recover(order.clientOrderId, recoverySeed);
           if (UNRESOLVED_RECOVERY_STATUSES.has(recovered.status)) throw new Error("Recovery remains unresolved");
         } catch {
           issues.push(await this.issue({
@@ -478,17 +501,31 @@ export class ReconciliationService {
       }
 
       const previousByAsset = new Map(previousSnapshots.map((snapshot) => [snapshot.asset, snapshot]));
+      const ledgerEntries = await this.options.ledger?.listLedgerEntries() ?? [];
       for (const asset of account.assets) {
         const previous = previousByAsset.get(asset.asset);
         const crossWalletBalance = asset.crossWalletBalance ?? asset.walletBalance;
+        const observedAt = this.now();
         if (previous) {
-          const difference = !sameDecimal(previous.walletBalance, asset.walletBalance)
-            ? ([previous.walletBalance, asset.walletBalance, "wallet"] as const)
-            : !sameDecimal(previous.availableBalance, asset.availableBalance)
-              ? ([previous.availableBalance, asset.availableBalance, "available"] as const)
-              : !sameDecimal(previous.crossWalletBalance, crossWalletBalance)
-                ? ([previous.crossWalletBalance, crossWalletBalance, "cross wallet"] as const)
-                : null;
+          const expectedWallet = ledgerEntries
+            .filter((entry) => entry.asset === asset.asset
+              && entry.occurredAt > previous.observedAt && entry.occurredAt <= observedAt)
+            .reduce((total, entry) => {
+              const signedAmount = entry.entryType === "COMMISSION" && compareDecimals(entry.amount, "0") > 0
+                ? `-${decimal(entry.amount)}` : entry.amount;
+              return addDecimals(total, signedAmount);
+            }, previous.walletBalance as DecimalString);
+          const walletExplained = sameDecimal(expectedWallet, asset.walletBalance);
+          const ledgerDelta = subtractDecimals(expectedWallet, previous.walletBalance);
+          const expectedCrossWallet = addDecimals(previous.crossWalletBalance, ledgerDelta);
+          if (walletExplained && sameDecimal(expectedCrossWallet, crossWalletBalance)) {
+            await this.options.store.resolveBalanceIssues(asset.asset, observedAt);
+          }
+          const difference = !walletExplained
+            ? ([expectedWallet, asset.walletBalance, "wallet"] as const)
+            : !sameDecimal(expectedCrossWallet, crossWalletBalance)
+              ? ([expectedCrossWallet, crossWalletBalance, "cross wallet"] as const)
+              : null;
           if (difference) {
             issues.push(await this.issue({
               category: "BALANCE_MISMATCH",
@@ -496,7 +533,7 @@ export class ReconciliationService {
               symbol: null,
               expectedValue: decimal(difference[0]),
               actualValue: decimal(difference[1]),
-              message: `${asset.asset} ${difference[2]} balance 与上次持久化快照不一致`,
+              message: `${asset.asset} ${difference[2]} balance 与上次持久化快照及账本预期不一致`,
             }));
           }
         }
@@ -505,7 +542,7 @@ export class ReconciliationService {
           walletBalance: decimal(asset.walletBalance),
           availableBalance: decimal(asset.availableBalance),
           crossWalletBalance: decimal(crossWalletBalance),
-          observedAt: this.now(),
+          observedAt,
         });
       }
     } catch {

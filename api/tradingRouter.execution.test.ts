@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   })),
   switchExecutionMode: vi.fn(async (executionMode: "PAPER" | "LIVE_MAINNET") => ({ ...DEFAULT_SETTINGS, executionMode })),
   setArmed: vi.fn(async (armed: boolean) => ({ executionMode: "LIVE_MAINNET", armed })),
+  openManual: vi.fn(async () => ({ ok: true as const, positionId: crypto.randomUUID(), reason: "等待真实成交" })),
 }));
 
 vi.mock("./services/executionCoordinator", () => ({
@@ -32,6 +33,7 @@ vi.mock("./services/executionCoordinator", () => ({
     dashboard: mocks.dashboard,
     switchExecutionMode: mocks.switchExecutionMode,
     setArmed: mocks.setArmed,
+    openManual: mocks.openManual,
   },
 }));
 
@@ -174,6 +176,23 @@ describe("统一执行管理入口", () => {
     expect(mocks.setArmed).toHaveBeenLastCalledWith(true);
     await expect(caller().setLiveControls({ armed: false })).resolves.toMatchObject({ armed: false });
     expect(mocks.setArmed).toHaveBeenLastCalledWith(false);
+  });
+
+  it("manual canary 需要独立确认，只调用 openManual 且不开启自动交易", async () => {
+    mocks.saveSettings.mockClear();
+    mocks.openManual.mockClear();
+    const input = {
+      symbol: "BTCUSDT", side: "LONG" as const, limitPrice: 100.004, stopPrice: 99,
+      adminSecret: SECRET, confirmationPhrase: "SUBMIT LIVE CANARY",
+    };
+    await expect(caller().manualCanary({ ...input, adminSecret: "wrong" })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    expect(mocks.openManual).not.toHaveBeenCalled();
+
+    await expect(caller().manualCanary(input)).resolves.toMatchObject({ ok: true });
+    expect(mocks.openManual).toHaveBeenCalledWith(expect.objectContaining({
+      symbol: "BTCUSDT", side: "LONG", strategyType: "SWING", limitPrice: 100.004, stop: 99,
+    }));
+    expect(mocks.saveSettings).not.toHaveBeenCalled();
   });
 
   it("缺失主网门控作为 PRECONDITION_FAILED 拒绝，而不是内部 500", async () => {

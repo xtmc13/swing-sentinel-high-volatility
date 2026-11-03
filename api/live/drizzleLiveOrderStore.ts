@@ -2,7 +2,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { liveFills, liveIntents, liveOrders, livePositions, tradingSettings } from "@db/schema";
 import type { Side } from "@contracts/trading";
 import type { AssertCurrentLiveAdmission } from "./liveConfig";
-import { liveSubmissionPermitted, lockLiveControls, type LiveDatabase, type LiveTransaction } from "./livePersistence";
+import { databaseNow, liveSubmissionPermitted, lockLiveControls, type LiveDatabase, type LiveTransaction } from "./livePersistence";
 import {
   addDecimals,
   compareDecimals,
@@ -74,6 +74,7 @@ function positionFromRow(row: PositionRow, stopPrice: string): LivePosition {
     initialQuantity: decimal(row.initialQuantity),
     quantity: decimal(row.quantity),
     entryPrice: decimal(row.entryPrice),
+    initialStopPrice: row.initialStopPrice == null ? null : decimal(row.initialStopPrice),
     markPrice: decimal(row.markPrice),
     stopPrice: decimal(stopPrice),
     liquidationPrice: decimal(row.liquidationPrice),
@@ -234,6 +235,12 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
     expectedGeneration: number,
     assertCurrentAdmission: AssertCurrentLiveAdmission,
   ): Promise<LiveOrder> {
+    let preflightAuthorized = true;
+    try {
+      await assertCurrentAdmission();
+    } catch {
+      preflightAuthorized = false;
+    }
     return this.db.transaction(async (tx) => {
       const current = await readOrder(tx, clientOrderId, true);
       if (!current) throw new Error("Live order not found");
@@ -241,8 +248,11 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       const settings = await tx.select({ autoTrade: tradingSettings.autoTrade, executionMode: tradingSettings.executionMode }).from(tradingSettings)
         .where(eq(tradingSettings.id, 1)).for("update");
       const controls = await lockLiveControls(tx);
-      const intents = await tx.select({ status: liveIntents.status, manualCanary: liveIntents.manualCanary }).from(liveIntents)
-        .where(eq(liveIntents.id, current.intentId)).for("update");
+      const intents = await tx.select({
+        status: liveIntents.status,
+        manualCanary: liveIntents.manualCanary,
+        expiresAt: liveIntents.expiresAt,
+      }).from(liveIntents).where(eq(liveIntents.id, current.intentId)).for("update");
       const permitted = liveSubmissionPermitted({
         armed: controls.armed,
         executionMode: settings[0]?.executionMode ?? "MISSING",
@@ -252,14 +262,9 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
         expectedGeneration,
         intentStatus: intents[0]?.status ?? "MISSING",
       });
-      let authorized = permitted;
-      if (permitted) {
-        try {
-          await assertCurrentAdmission();
-        } catch {
-          authorized = false;
-        }
-      }
+      const now = permitted ? await databaseNow(tx) : null;
+      const authorized = preflightAuthorized && permitted && now !== null
+        && intents[0]?.expiresAt !== undefined && intents[0].expiresAt.getTime() > now.getTime();
       if (!authorized) {
         await tx.update(liveOrders).set({ status: "CANCEL" }).where(eq(liveOrders.id, current.id));
         await tx.update(liveIntents).set({ status: "CANCEL" }).where(eq(liveIntents.id, current.intentId));
@@ -324,6 +329,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
         initialQuantity: next.position.initialQuantity,
         quantity: next.position.quantity,
         entryPrice: next.position.entryPrice,
+        initialStopPrice: next.position.initialStopPrice ?? next.position.stopPrice,
         markPrice: next.position.markPrice,
         liquidationPrice: next.position.liquidationPrice,
         isolatedWallet: next.position.isolatedWallet,
@@ -356,6 +362,25 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
 
   getPosition(positionId: string): Promise<LivePosition | null> {
     return readPosition(this.db, positionId);
+  }
+
+  async updatePosition(
+    positionId: string,
+    patch: Partial<Pick<LivePosition, "markPrice" | "liquidationPrice" | "isolatedWallet" | "stopPrice">>,
+  ): Promise<LivePosition | null> {
+    return this.db.transaction(async (tx) => {
+      const current = await readPosition(tx, positionId, true);
+      if (!current) return null;
+      await tx.update(livePositions).set({
+        markPrice: patch.markPrice ?? current.markPrice,
+        liquidationPrice: patch.liquidationPrice ?? current.liquidationPrice,
+        isolatedWallet: patch.isolatedWallet ?? current.isolatedWallet,
+      }).where(eq(livePositions.id, positionId));
+      if (patch.stopPrice !== undefined) {
+        await tx.update(liveIntents).set({ stopPrice: patch.stopPrice }).where(eq(liveIntents.id, positionId));
+      }
+      return readPosition(tx, positionId);
+    });
   }
 
   async listOpenPositions(): Promise<LivePosition[]> {

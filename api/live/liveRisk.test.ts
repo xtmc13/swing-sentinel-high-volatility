@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { calculateLivePositionRisk, type LiveRiskInput } from "./liveRisk";
+import type { BinancePositionRisk } from "./binanceSigned";
+import {
+  calculateLivePositionRisk,
+  estimateFlatLiquidationPrice,
+  validateLivePortfolioAdmission,
+  type LiveRiskInput,
+} from "./liveRisk";
 
 function input(overrides: Partial<LiveRiskInput> = {}): LiveRiskInput {
   return {
@@ -171,5 +177,46 @@ describe("主网精确风险与预留", () => {
       stopPrice: "101",
       liquidationPrice: "100.5",
     }))).toMatchObject({ ok: false });
+  });
+
+  it("derives a conservative maintenance-margin liquidation buffer for a flat symbol", () => {
+    const longLiquidation = estimateFlatLiquidationPrice({
+      side: "LONG", entryPrice: "100", leverage: 5, maintMarginRatio: "0.01",
+    });
+    const shortLiquidation = estimateFlatLiquidationPrice({
+      side: "SHORT", entryPrice: "100", leverage: 5, maintMarginRatio: "0.01",
+    });
+
+    expect(longLiquidation).toBe("81");
+    expect(shortLiquidation).toBe("119");
+    expect(calculateLivePositionRisk(input({ liquidationPrice: longLiquidation }))).toMatchObject({ ok: true });
+  });
+
+  it("enforces daily, maxPositions, same-symbol, portfolio and correlation limits from signed positions", () => {
+    const remote: BinancePositionRisk = {
+      symbol: "ETHUSDT", positionAmt: "2", entryPrice: "100", markPrice: "110", liquidationPrice: "50",
+      leverage: "5", marginType: "isolated", isolatedWallet: "40",
+    };
+    const base = {
+      symbol: "BTCUSDT", side: "LONG" as const, walletBalance: "10000", candidateRisk: 10,
+      maxPositions: 2, dailyLossLimitPct: 2, dailyLocked: false, todayPnlPct: 0,
+      portfolioStopRiskPct: 1, correlatedDirectionRiskPct: 0.5, correlationThreshold: 0.8,
+      positions: [{ remote, stopPrice: "90" }], correlations: { ETHUSDT: 0.9 },
+    };
+
+    expect(validateLivePortfolioAdmission(base)).toMatchObject({ ok: true });
+    expect(validateLivePortfolioAdmission({ ...base, dailyLocked: true })).toMatchObject({ ok: false });
+    expect(validateLivePortfolioAdmission({ ...base, todayPnlPct: -2 })).toMatchObject({ ok: false });
+    expect(validateLivePortfolioAdmission({ ...base, maxPositions: 1 })).toMatchObject({ ok: false });
+    expect(validateLivePortfolioAdmission({ ...base, symbol: "ETHUSDT" })).toMatchObject({ ok: false });
+    expect(validateLivePortfolioAdmission({ ...base, candidateRisk: 90 })).toMatchObject({ ok: false });
+    expect(validateLivePortfolioAdmission({ ...base, correlatedDirectionRiskPct: 0.1 })).toMatchObject({ ok: false });
+    expect(validateLivePortfolioAdmission({ ...base, correlations: {} })).toMatchObject({ ok: false });
+    expect(validateLivePortfolioAdmission({
+      ...base, pendingIntents: [{ symbol: "SOLUSDT" }],
+    })).toMatchObject({ ok: false });
+    expect(validateLivePortfolioAdmission({
+      ...base, pendingIntents: [{ symbol: "BTCUSDT" }],
+    })).toMatchObject({ ok: false });
   });
 });

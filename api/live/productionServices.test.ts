@@ -60,7 +60,7 @@ function fakeClient(now: () => number) {
 }
 
 describe("production service composition with fake exchange", () => {
-  it("starts reconciliation/private WS, requires a fresh event for readiness, and stops cleanly", async () => {
+  it("starts reconciliation/private WS, accepts an idle healthy connection, and stops cleanly", async () => {
     let now = 1_800_000_000_000;
     const socket = new FakeSocket();
     const { client, placeOrder } = fakeClient(() => now);
@@ -77,6 +77,7 @@ describe("production service composition with fake exchange", () => {
       orderStore: new InMemoryLiveOrderStore(),
       reconciliationStore: new InMemoryReconciliationStore(),
       accountingStore: new InMemoryAccountingStore(),
+      dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) },
       socketFactory: () => socket,
       now: () => now,
       reconciliationIntervalMs: 60_000,
@@ -84,7 +85,7 @@ describe("production service composition with fake exchange", () => {
 
     await services.start();
     expect(services.reconciliation.health()).toMatchObject({ configured: true, running: true, lastRunAt: now });
-    expect((await services.preflight()).ready).toBe(false);
+    expect((await services.preflight()).ready).toBe(true);
 
     now += 1;
     socket.emit(JSON.stringify({ e: "ACCOUNT_UPDATE", E: now, a: { B: [{ a: "USDT" }] } }));
@@ -95,6 +96,38 @@ describe("production service composition with fake exchange", () => {
     expect(socket.closed).toBe(true);
     expect(services.reconciliation.health().running).toBe(false);
     expect(placeOrder).not.toHaveBeenCalled();
+  });
+
+  it("keeps an idle but connected private WS eligible while heartbeat and REST reconciliation stay healthy", async () => {
+    vi.useFakeTimers();
+    try {
+      let now = 1_800_000_000_000;
+      const socket = new FakeSocket();
+      const { client } = fakeClient(() => now);
+      const services = createBinanceProductionLiveServices({
+        env: {
+          LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key",
+          BINANCE_MAINNET_API_SECRET: "fake-secret", BINANCE_MAINNET_ALLOWED_SYMBOLS: "BTCUSDT",
+        },
+        db: {} as LiveDatabase,
+        getSettings: async () => ({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET", leverageMode: "FIXED", fixedLeverage: 2 }),
+        client,
+        orderStore: new InMemoryLiveOrderStore(), reconciliationStore: new InMemoryReconciliationStore(),
+        accountingStore: new InMemoryAccountingStore(),
+      dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) }, socketFactory: () => socket,
+        now: () => now, reconciliationIntervalMs: 5_000,
+      });
+      await services.start();
+
+      now += 10_001;
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(services.privateWs.health().lastMessageAt).toBeNull();
+      await expect(services.preflight()).resolves.toMatchObject({ ready: true });
+      await services.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("publishes exits with entries frozen while unresolved reconciliation retries", async () => {
@@ -138,7 +171,8 @@ describe("production service composition with fake exchange", () => {
       db: {} as LiveDatabase,
       getSettings: async () => ({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET", leverageMode: "FIXED", fixedLeverage: 2 }),
       client, orderStore: orders, reconciliationStore: new InMemoryReconciliationStore(),
-      accountingStore: new InMemoryAccountingStore(), socketFactory: () => socket,
+      accountingStore: new InMemoryAccountingStore(),
+      dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) }, socketFactory: () => socket,
       now, reconciliationIntervalMs: 60_000, pauseAutoTrade,
     });
     const runtime = createProductionLiveRuntime({

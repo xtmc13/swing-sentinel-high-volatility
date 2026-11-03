@@ -399,9 +399,7 @@ export class ExecutionCoordinator {
       lastMessageAt: null,
       reconnects: 0,
     };
-    const privateWsFresh = privateWs.lastMessageAt !== null && this.now() >= privateWs.lastMessageAt
-      && this.now() - privateWs.lastMessageAt <= 10_000;
-    const privateWsHealthy = privateWs.configured && privateWs.running && privateWs.connected && privateWsFresh;
+    const privateWsHeartbeatValid = privateWs.lastMessageAt === null || this.now() >= privateWs.lastMessageAt;
     const issueSummary = operations.reconciliationSummary;
     const reconciliationState = this.dependencies.reconciliation?.health() ?? {
       configured: false,
@@ -412,6 +410,8 @@ export class ExecutionCoordinator {
       && this.now() - reconciliationState.lastRunAt <= 10_000;
     const reconciliationHealthy = reconciliationState.configured && reconciliationState.running
       && reconciliationFresh && issueSummary.severeIssues === 0;
+    const privateWsHealthy = privateWs.configured && privateWs.running && privateWs.connected
+      && privateWsHeartbeatValid && reconciliationHealthy;
     const missingProtections = settings.executionMode === "LIVE_MAINNET"
       ? positions.filter((position) => !operations.protectionOrders.some((order) => order.intentId === position.id
         && order.type === "STOP_MARKET" && order.reduceOnly && ["NEW", "PARTIALLY_FILLED"].includes(order.status)))

@@ -1,9 +1,19 @@
-import type { AccountSnapshot, Opportunity, PositionView } from "@contracts/trading";
+import type { AccountSnapshot, Opportunity, PositionView, TradingSettings } from "@contracts/trading";
 import { DEFAULT_MOMENTUM_CONFIG } from "../services/momentum";
-import type { BinanceAccountResponse, LiveOrderGateway } from "./binanceSigned";
-import { withFullUserTradePagination } from "./accounting";
+import { managePositionPrice } from "../services/risk";
+import type { BinanceAccountResponse, BinancePositionRisk, LiveOrderGateway } from "./binanceSigned";
+import { withFullUserTradePagination, type LiveAccountingStore } from "./accounting";
 import type { AssertCurrentLiveAdmission } from "./liveConfig";
-import { compareDecimals, decimal, divideDecimals, multiplyDecimals, subtractDecimals, type DecimalString } from "./decimal";
+import type { LiveDailyRisk } from "./liveDailyRisk";
+import {
+  addDecimals,
+  compareDecimals,
+  decimal,
+  multiplyDecimals,
+  normalizeDirectionalPrice,
+  subtractDecimals,
+  type DecimalString,
+} from "./decimal";
 import {
   claimLiveIntent,
   createLiveIntent,
@@ -39,7 +49,13 @@ export type PrepareLiveIntent = (
 
 export interface MainnetLiveExecutionDependencies {
   store: LiveOrderStore;
-  gateway: LiveOrderGateway & { account(): Promise<BinanceAccountResponse> };
+  gateway: LiveOrderGateway & {
+    account(): Promise<BinanceAccountResponse>;
+    positionRisk(symbol?: string): Promise<BinancePositionRisk[]>;
+  };
+  accounting?: Pick<LiveAccountingStore, "listLedgerEntries">;
+  dailyRisk?: LiveDailyRisk;
+  getSettings?: () => Promise<TradingSettings>;
   userTradesPageLimit?: number;
   workerId: string;
   assertCurrentAdmission: AssertCurrentLiveAdmission;
@@ -273,7 +289,48 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   }
 
   async manage(): Promise<void> {
-    return undefined;
+    const account = await this.account();
+    const settings = await this.dependencies.getSettings?.();
+    if (!settings) throw new Error("LIVE 持仓管理缺少交易设置");
+    const positions = await this.refreshPositions();
+    for (const position of positions) {
+      const direction = position.side === "LONG" ? 1 : -1;
+      const entryPrice = Number(position.entryPrice);
+      if (position.initialStopPrice == null) throw new Error(`${position.symbol} 缺少原始止损历史`);
+      const initialStop = Number(position.initialStopPrice);
+      const initialRisk = Math.abs(entryPrice - initialStop);
+      if (!(initialRisk > 0)) throw new Error(`${position.symbol} 缺少有效原始止损`);
+      const targetPrice = entryPrice + direction * initialRisk * 2.2;
+      const management = managePositionPrice({
+        side: position.side,
+        entryPrice,
+        stopPrice: Number(position.stopPrice),
+        targetPrice,
+        liquidationPrice: Number(position.liquidationPrice),
+        price: Number(position.markPrice),
+        initialRisk,
+        maxFavorableR: 0,
+        mode: "NORMAL",
+        dailyLossLocked: account.dailyLocked,
+        timedOut: this.now() - position.openedAt >= 72 * 60 * 60_000,
+        takerFeeBps: settings.takerFeeBps,
+        slippageBps: settings.slippageBps,
+      });
+      if (management.action === "CLOSE") {
+        await this.machine.closePosition(position.id);
+        continue;
+      }
+      if (compareDecimals(String(management.stopPrice), position.stopPrice) === 0) continue;
+      if (!position.tickSize) throw new Error(`${position.symbol} 缺少持久化 tickSize`);
+      const stopPrice = normalizeDirectionalPrice(
+        String(management.stopPrice), position.tickSize, position.side,
+      );
+      await this.dependencies.store.updatePosition(position.id, { stopPrice });
+      const protection = (await this.dependencies.store.listActiveProtectionOrders())
+        .find((order) => order.intentId === position.id);
+      if (protection) await this.machine.replaceOrder(protection.clientOrderId, stopPrice);
+      else await this.machine.protectPosition(position.id);
+    }
   }
 
   async emergency(): Promise<EmergencyExecutionResult> {
@@ -285,35 +342,111 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   }
 
   async account(): Promise<AccountSnapshot> {
-    const response = await this.dependencies.gateway.account();
+    const [response, remotePositions, settings, ledger] = await Promise.all([
+      this.dependencies.gateway.account(),
+      this.dependencies.gateway.positionRisk(),
+      this.dependencies.getSettings?.(),
+      this.dependencies.accounting?.listLedgerEntries() ?? Promise.resolve([]),
+    ]);
     const asset = response.assets.find((candidate) => candidate.asset === "USDT");
     if (!asset) throw new Error("签名账户缺少 USDT 余额");
-    const equity = Number(asset.walletBalance);
+    if (!settings || !this.dependencies.dailyRisk) throw new Error("LIVE 日损状态存储未配置");
+    const active = remotePositions.filter((position) => compareDecimals(position.positionAmt, "0") !== 0);
+    let unrealizedPnl: DecimalString = "0";
+    let usedMargin: DecimalString = "0";
+    for (const position of active) {
+      unrealizedPnl = addDecimals(unrealizedPnl, multiplyDecimals(
+        position.positionAmt, subtractDecimals(position.markPrice, position.entryPrice),
+      ));
+      if (position.isolatedWallet === undefined) throw new Error(`${position.symbol} 缺少签名 isolated margin`);
+      usedMargin = addDecimals(usedMargin, position.isolatedWallet);
+    }
+    const equity = Number(addDecimals(asset.walletBalance, unrealizedPnl));
     const availableMargin = Number(asset.availableBalance);
-    if (!Number.isFinite(equity) || !Number.isFinite(availableMargin)) throw new Error("签名账户余额无效");
+    const cash = Number(asset.walletBalance);
+    const unrealized = Number(unrealizedPnl);
+    const margin = Number(usedMargin);
+    if (![equity, availableMargin, cash, unrealized, margin].every(Number.isFinite)) {
+      throw new Error("签名账户或持仓估值无效");
+    }
+    const dayKey = new Date(this.now()).toISOString().slice(0, 10);
+    const daily = await this.dependencies.dailyRisk.evaluate(dayKey, equity, settings.dailyLossLimitPct);
+    const dayStartedAt = Date.parse(`${dayKey}T00:00:00.000Z`);
+    const realizedPnl = ledger.filter((entry) => entry.asset === "USDT" && entry.occurredAt >= dayStartedAt
+      && ["REALIZED_PNL", "COMMISSION", "FUNDING_FEE"].includes(entry.entryType))
+      .reduce((total, entry) => total + (entry.entryType === "COMMISSION"
+        ? -Math.abs(Number(entry.amount)) : Number(entry.amount)), 0);
     return {
       equity,
-      cash: equity,
+      cash,
       availableMargin,
-      usedMargin: Math.max(0, equity - availableMargin),
-      unrealizedPnl: 0,
-      realizedPnl: 0,
-      todayPnl: 0,
-      todayPnlPct: 0,
-      dayStartEquity: equity,
+      usedMargin: margin,
+      unrealizedPnl: unrealized,
+      realizedPnl,
+      todayPnl: equity - daily.dayStartEquity,
+      todayPnlPct: (equity - daily.dayStartEquity) / daily.dayStartEquity * 100,
+      dayStartEquity: daily.dayStartEquity,
       valuationValid: true,
       valuationIssues: [],
-      dailyLocked: false,
+      dailyLocked: daily.dailyLocked,
     };
   }
 
   async positions(): Promise<PositionView[]> {
     const positions = await this.dependencies.store.listOpenPositions();
-    return positions.map((position) => this.positionView(position));
+    try {
+      const refreshed = await this.refreshPositions(positions);
+      return refreshed.map((position) => this.positionView(position, true));
+    } catch {
+      return positions.map((position) => this.positionView(position, false));
+    }
+  }
+
+  private async refreshPositions(existing?: LivePosition[]): Promise<LivePosition[]> {
+    const [positions, remotePositions] = await Promise.all([
+      existing ?? this.dependencies.store.listOpenPositions(),
+      this.dependencies.gateway.positionRisk(),
+    ]);
+    const refreshed: LivePosition[] = [];
+    for (const position of positions) {
+      const remote = remotePositions.find((candidate) => candidate.symbol === position.symbol
+        && compareDecimals(candidate.positionAmt, "0") !== 0);
+      if (!remote) throw new Error(`${position.symbol} 缺少签名持仓标记`);
+      const expectedQuantity = position.side === "SHORT"
+        ? `-${decimal(position.quantity)}` : decimal(position.quantity);
+      if (compareDecimals(expectedQuantity, remote.positionAmt) !== 0) {
+        throw new Error(`${position.symbol} 签名持仓数量与数据库不一致`);
+      }
+      if (remote.isolatedWallet === undefined) throw new Error(`${position.symbol} 缺少签名 isolated margin`);
+      const updated = await this.dependencies.store.updatePosition(position.id, {
+        markPrice: remote.markPrice,
+        liquidationPrice: remote.liquidationPrice,
+        isolatedWallet: remote.isolatedWallet,
+      });
+      if (!updated) throw new Error(`${position.symbol} 持仓更新失败`);
+      refreshed.push(updated);
+    }
+    return refreshed;
   }
 
   async snapshot(): Promise<ExecutionSnapshot> {
-    const [account, positions] = await Promise.all([this.account(), this.positions()]);
+    const [account, positions] = await Promise.all([
+      this.account().catch((): AccountSnapshot => ({
+        equity: Number.NaN,
+        cash: Number.NaN,
+        availableMargin: Number.NaN,
+        usedMargin: Number.NaN,
+        unrealizedPnl: Number.NaN,
+        realizedPnl: Number.NaN,
+        todayPnl: Number.NaN,
+        todayPnlPct: Number.NaN,
+        dayStartEquity: Number.NaN,
+        valuationValid: false,
+        valuationIssues: ["签名 LIVE 账户或持仓估值不可用"],
+        dailyLocked: true,
+      })),
+      this.positions(),
+    ]);
     return { account, positions };
   }
 
@@ -321,19 +454,17 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     throw new Error("LIVE_MAINNET 禁止 paper reset");
   }
 
-  private positionView(position: LivePosition): PositionView {
+  private positionView(position: LivePosition, signedValuation: boolean): PositionView {
     const quantity = Number(position.quantity);
     const entryPrice = Number(position.entryPrice);
-    const markPrice = Number(position.markPrice);
+    const markPrice = signedValuation ? Number(position.markPrice) : Number.NaN;
     const direction = position.side === "LONG" ? 1 : -1;
-    const unrealizedPnl = direction * quantity * (markPrice - entryPrice);
-    const margin = Number(divideDecimals(
-      multiplyDecimals(position.quantity, position.entryPrice),
-      position.leverage,
-      { decimalPlaces: 30, roundingMode: "ROUND_DOWN" },
-    ));
-    const stopDistance = Number(subtractDecimals(entryPrice.toString(), position.stopPrice));
-    const initialRisk = Math.abs(Number(position.initialQuantity) * stopDistance);
+    const unrealizedPnl = signedValuation ? direction * quantity * (markPrice - entryPrice) : Number.NaN;
+    const margin = Number(position.isolatedWallet);
+    const initialStop = position.initialStopPrice == null ? Number.NaN : Number(position.initialStopPrice);
+    const initialRisk = Math.abs(Number(position.initialQuantity) * (entryPrice - initialStop));
+    const targetPrice = entryPrice + direction * Math.abs(entryPrice - initialStop) * 2.2;
+    const valuationValid = signedValuation && Number.isFinite(unrealizedPnl) && Number.isFinite(margin);
     return {
       id: position.id,
       signalId: position.signalId,
@@ -348,17 +479,17 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       entryPrice,
       markPrice,
       stopPrice: Number(position.stopPrice),
-      targetPrice: 0,
+      targetPrice,
       liquidationPrice: Number(position.liquidationPrice),
       leverage: Number(position.leverage),
       margin,
       unrealizedPnl,
-      unrealizedPct: margin > 0 ? unrealizedPnl / margin * 100 : 0,
-      realizedPnl: 0,
+      unrealizedPct: valuationValid && margin > 0 ? unrealizedPnl / margin * 100 : Number.NaN,
+      realizedPnl: Number.NaN,
       openedAt: new Date(position.openedAt).toISOString(),
       holdingMinutes: Math.max(0, (this.now() - position.openedAt) / 60_000),
-      rMultiple: initialRisk > 0 ? unrealizedPnl / initialRisk : 0,
-      valuationValid: Number.isFinite(unrealizedPnl),
+      rMultiple: valuationValid && initialRisk > 0 ? unrealizedPnl / initialRisk : Number.NaN,
+      valuationValid,
     };
   }
 }

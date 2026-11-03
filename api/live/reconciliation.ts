@@ -69,6 +69,7 @@ export interface ReconciliationStore {
   appendAccountSnapshot(snapshot: LiveAccountSnapshot): Promise<boolean>;
   latestAccountSnapshots(): Promise<LiveAccountSnapshot[]>;
   resolveBalanceIssues(asset: string, resolvedAt: number): Promise<void>;
+  resolveTransportIssues(resolvedAt: number): Promise<void>;
 }
 
 export class InMemoryReconciliationStore implements ReconciliationStore {
@@ -131,6 +132,15 @@ export class InMemoryReconciliationStore implements ReconciliationStore {
     for (const issue of this.issues) {
       if (issue.category === "BALANCE_MISMATCH" && issue.status !== "RESOLVED"
         && issue.message.startsWith(`${asset} `)) {
+        issue.status = "RESOLVED";
+        issue.resolvedAt = resolvedAt;
+      }
+    }
+  }
+
+  async resolveTransportIssues(resolvedAt: number): Promise<void> {
+    for (const issue of this.issues) {
+      if (issue.category === "REST_RECONCILIATION" && issue.status !== "RESOLVED") {
         issue.status = "RESOLVED";
         issue.resolvedAt = resolvedAt;
       }
@@ -241,6 +251,14 @@ export class DrizzleReconciliationStore implements ReconciliationStore {
         eq(reconciliationIssues.category, "BALANCE_MISMATCH"),
         ne(reconciliationIssues.status, "RESOLVED"),
         like(reconciliationIssues.message, `${asset} %`),
+      ));
+  }
+
+  async resolveTransportIssues(resolvedAt: number): Promise<void> {
+    await this.db.update(reconciliationIssues).set({ status: "RESOLVED", resolvedAt: new Date(resolvedAt) })
+      .where(and(
+        eq(reconciliationIssues.category, "REST_RECONCILIATION"),
+        ne(reconciliationIssues.status, "RESOLVED"),
       ));
   }
 }
@@ -557,8 +575,12 @@ export class ReconciliationService {
     }
 
     const ok = issues.length === 0;
-    if (ok) await mayResume?.resume();
-    else await mayResume?.discard();
+    if (ok) {
+      await this.options.store.resolveTransportIssues(this.now());
+      await mayResume?.resume();
+    } else {
+      await mayResume?.discard();
+    }
     return { ok, issues };
   }
 

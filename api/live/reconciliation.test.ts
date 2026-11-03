@@ -233,6 +233,26 @@ describe("startup reconciliation", () => {
     expect((await h.store.listIssues())[0]?.category).toBe("REST_RECONCILIATION");
   });
 
+  it("resolves recovered transport issues without clearing unrelated position or order findings", async () => {
+    const h = await harness();
+    await h.store.recordIssue({
+      category: "REST_RECONCILIATION", severity: "CRITICAL", symbol: null,
+      expectedValue: null, actualValue: null, message: "previous transport failure", detectedAt: 1,
+    });
+    await h.store.recordIssue({
+      category: "UNKNOWN_MANUAL_ORDER", severity: "CRITICAL", symbol: "BTCUSDT",
+      expectedValue: null, actualValue: null, message: "external order remains", detectedAt: 1,
+    });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(true);
+    expect(await h.store.listIssues()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ category: "REST_RECONCILIATION", status: "RESOLVED" }),
+      expect.objectContaining({ category: "UNKNOWN_MANUAL_ORDER", status: "OPEN" }),
+    ]));
+  });
+
   it("reports a persisted unsettled intent that has no order", async () => {
     const h = await harness({
       unsettledIntents: [{ id: "intent-without-order", symbol: "BTCUSDT", status: "SUBMITTING" }],

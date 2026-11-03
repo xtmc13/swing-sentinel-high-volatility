@@ -79,6 +79,7 @@ describe("已收盘 K 线正式信号", () => {
     expect(result.signalCloseTime).toBe(NOW - 300_000);
     expect(result.stateVersion).toBe(7);
     expect(result.createdAt).toBe(new Date(NOW).toISOString());
+    expect(result.momentumExhaustion).toMatchObject({ score: 28, resonanceCount: 0, resonant: false, protection: "NONE" });
   });
 
   it("未收盘 5M 的反向剧烈价格不参与正式入场判断", () => {

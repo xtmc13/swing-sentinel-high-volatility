@@ -13,6 +13,7 @@ import {
   type TradingSettings,
   type VolatilityState,
 } from "@contracts/trading";
+import { evaluateMomentumExhaustion } from "./momentumExhaustion";
 import { getSettings } from "../queries/trading";
 import { applyAdverseSlippage, approveHistoricalEntry, type EntryRiskPosition } from "./execution";
 import { persistBacktestResult } from "./backtest";
@@ -266,6 +267,17 @@ export async function loadPortfolioData(
   return Object.fromEntries(entries);
 }
 
+function candlesClosedAt(candles: Candle[], closeTime: number) {
+  let low = 0;
+  let high = candles.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (candles[middle].closeTime <= closeTime) low = middle + 1;
+    else high = middle;
+  }
+  return candles.slice(0, low);
+}
+
 export async function runPortfolioBacktest(
   symbols: string[],
   timeframe: PortfolioTimeframe,
@@ -343,6 +355,7 @@ export async function runPortfolioBacktest(
   const riskRejections: PortfolioRiskRejection[] = [];
   const transitions: PortfolioVolatilityTransition[] = [];
   const dailyLossLocks: PortfolioBacktestResult["dailyLossLocks"] = [];
+  const momentumExhaustion: PortfolioBacktestResult["momentumExhaustion"] = [];
   const curve: { time: number; equity: number }[] = [{ time: timeline[0].time, equity: initialEquity }];
   const timeoutBars = Math.max(1, Math.round(72 * 3_600_000 / INTERVAL_MS[timeframe]));
 
@@ -407,6 +420,10 @@ export async function runPortfolioBacktest(
       }
     }
     if (newDay) dailyLossLocked = false;
+
+    // Funding is payable only by the exact positions carried into this timestamp.
+    // A position opened/reopened at this timestamp cannot inherit prior funding eligibility.
+    const fundingEligiblePositions = new Map(positions);
 
     for (const symbol of symbols) {
       const opportunity = pending.get(symbol);
@@ -501,8 +518,9 @@ export async function runPortfolioBacktest(
     }
 
     for (const symbol of symbols) {
+      const carriedPosition = fundingEligiblePositions.get(symbol);
       const position = positions.get(symbol);
-      if (!position) continue;
+      if (!carriedPosition || position !== carriedPosition) continue;
       const bar = currentBars.get(symbol)!;
       for (const event of fundingBySymbol.get(symbol)!) {
         if (event.fundingTime !== openTime) continue;
@@ -587,6 +605,28 @@ export async function runPortfolioBacktest(
       position.stopPrice = favorable.stopPrice;
       position.maxFavorableR = favorable.maxFavorableR;
       adverseAdjustment += (adversePrice - position.entryPrice) * position.qty * dir;
+    }
+
+    // Shadow-only protection telemetry: observations are recorded for carried positions,
+    // but they never alter stops, quantities, or exits in this validation phase.
+    for (const position of positions.values()) {
+      const item = data[position.symbol];
+      const assessment = evaluateMomentumExhaustion({
+        side: position.side,
+        candles15m: candlesClosedAt(item.candles["15m"], closeTime),
+        candles1h: candlesClosedAt(item.candles["1h"], closeTime),
+        candles4h: candlesClosedAt(item.candles["4h"], closeTime),
+        now: closeTime,
+      });
+      if (assessment.protection !== "NONE") momentumExhaustion.push({
+        time: closeTime,
+        symbol: position.symbol,
+        side: position.side,
+        score: assessment.score,
+        resonanceCount: assessment.resonanceCount,
+        protection: assessment.protection,
+        structureBreak: assessment.structureBreak,
+      });
     }
 
     curve.push({ time: timeline[index].time, equity: cash + adverseAdjustment });
@@ -699,6 +739,7 @@ export async function runPortfolioBacktest(
     transitions,
     dailyLossLocks,
     dataGaps: [],
+    momentumExhaustion,
   };
   if (dependencies.persist !== false) await persistBacktestResult(result);
   return result;

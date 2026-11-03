@@ -63,6 +63,27 @@ describe("仓位、组合风险与持仓管理", () => {
     expect(result.qty).toBeCloseTo(35 / (5 + 199 * 0.0007), 10);
     expect(result.estimatedRisk).toBeCloseTo(35, 10);
     expect(result.targetPrice).toBeCloseTo(113);
+
+    const liveFill = sizePosition(sizeInput({ entrySlippageIncluded: true }));
+    const historicalFill = sizePosition(sizeInput({ entrySlippageIncluded: true }));
+    for (const fill of [liveFill, historicalFill]) {
+      expect(fill.ok).toBe(true);
+      if (fill.ok) {
+        // Entry price already contains adverse slippage; only stop-exit slippage remains.
+        expect(fill.qty).toBeCloseTo(35 / (5 + 199 * 0.0005 + 97 * 0.0002), 10);
+      }
+    }
+  });
+
+  it.each([
+    ["负止损价格", { stopPrice: -1 }],
+    ["负滑点", { slippageBps: -1 }],
+    ["NaN步长", { stepSize: Number.NaN }],
+    ["负最小数量", { minQty: -1 }],
+    ["NaN信号时间", { now: Number.NaN }],
+    ["负最小名义价值", { minNotional: -1 }],
+  ])("%s 必须失败关闭", (_name, overrides) => {
+    expect(sizePosition(sizeInput(overrides))).toMatchObject({ ok: false, reason: "仓位输入无效" });
   });
 
   it("HIGH 风险预算减半，EXTREME 不开新仓", () => {
@@ -106,17 +127,25 @@ describe("仓位、组合风险与持仓管理", () => {
     expect(rejected.reasons).toContain("组合止损风险超过1%上限");
   });
 
-  it("同方向且相关性绝对值达 0.8 的风险合计不得超过权益 0.5%", () => {
+  it("同方向且正相关性达到 0.8 的风险合计不得超过权益 0.5%", () => {
     const accepted = portfolioRisk(portfolioInput(40));
     const rejected = portfolioRisk(portfolioInput(46));
-    const opposite: Parameters<typeof portfolioRisk>[0] = portfolioInput(60, { AAA: -1 });
-    opposite.candidate!.side = "SHORT";
+    const negativeCorrelation = portfolioRisk(portfolioInput(60, { AAA: -1 }));
 
     expect(accepted.approved).toBe(true);
     expect(accepted.correlatedRisk).toBeCloseTo(45.0665, 10);
     expect(rejected.approved).toBe(false);
     expect(rejected.reasons).toContain("高相关同方向风险超过0.5%上限");
-    expect(portfolioRisk(opposite).approved).toBe(true);
+    expect(negativeCorrelation.approved).toBe(true);
+    expect(negativeCorrelation.correlatedRisk).toBe(0);
+  });
+
+  it("负相关同方向候选不应被误判为相关集中风险", () => {
+    const result = portfolioRisk(portfolioInput(60, { AAA: -0.95 }));
+
+    expect(result.approved).toBe(true);
+    expect(result.correlatedRisk).toBe(0);
+    expect(result.reasons).not.toContain("高相关同方向风险超过0.5%上限");
   });
 
   it("已有持仓时相关样本不足暂停新增，首仓无需相关样本", () => {
@@ -128,17 +157,23 @@ describe("仓位、组合风险与持仓管理", () => {
     expect(first.approved).toBe(true);
   });
 
-  it("止损达到或越过保本后组合风险贡献为零", () => {
+  it("止损达到或越过保本后仍计入止损退出手续费与滑点", () => {
     const long = portfolioRisk({ ...portfolioInput(), candidate: undefined, positions: [{ ...portfolioInput().positions[0], stopPrice: 100 }] });
+    const longAboveBreakeven = portfolioRisk({
+      ...portfolioInput(),
+      candidate: undefined,
+      positions: [{ ...portfolioInput().positions[0], stopPrice: 102 }],
+    });
     const short = portfolioRisk({
       ...portfolioInput(),
       candidate: undefined,
       positions: [{ symbol: "SHORT", side: "SHORT" as const, qty: 2, entryPrice: 100, markPrice: 100, stopPrice: 99 }],
     });
 
-    expect(long.totalRisk).toBe(0);
-    expect(long.positions[0].risk).toBe(0);
-    expect(short.totalRisk).toBe(0);
+    expect(long.totalRisk).toBeCloseTo(100 * 0.0007, 10);
+    expect(long.positions[0].breakeven).toBe(true);
+    expect(longAboveBreakeven.totalRisk).toBeCloseTo(102 * 0.0007, 10);
+    expect(short.totalRisk).toBeCloseTo(2 * 99 * 0.0007, 10);
   });
 
   it("相关性需要 60 个收益样本并只使用最近窗口", () => {

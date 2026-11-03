@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { LoaderCircle, LockKeyhole, UnlockKeyhole } from "lucide-react";
 import { toast } from "sonner";
-import { trpc } from "@/providers/trpc";
+import { queryClient, trpc } from "@/providers/trpc";
 import { clearAdminToken, getAdminToken, setAdminToken } from "@/lib/adminAuth";
 
 export default function AdminAccess() {
@@ -16,7 +16,9 @@ export default function AdminAccess() {
       await utils.trading.adminStatus.fetch();
       setUnlocked(true);
       setSecret("");
-      if (notify) toast.success("管理员控制已解锁；关闭标签页后会自动锁定");
+      // Authentication succeeded. A background refresh failure must not revoke a valid token.
+      void utils.trading.invalidate().catch(() => undefined);
+      if (notify) toast.success("管理员控制已解锁；刷新页面或关闭标签页后会自动锁定");
       return true;
     } catch (error) {
       clearAdminToken();
@@ -39,6 +41,8 @@ export default function AdminAccess() {
     clearAdminToken();
     setUnlocked(false);
     setSecret("");
+    // Abort in-flight requests before removing cached private account data.
+    void queryClient.cancelQueries().finally(() => queryClient.clear());
     toast.info("已退出管理员控制，当前为只读模式");
   };
   return (

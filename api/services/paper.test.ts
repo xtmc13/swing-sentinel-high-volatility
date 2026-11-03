@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS, type Opportunity, type TradingSettings, type VolatilityState } from "@contracts/trading";
 import { applyAdverseSlippage, approveAndPriceEntry, type EntryApprovalInput } from "./execution";
 import { assertAffectedRows } from "../queries/trading";
-import { toPositionView, type PositionRow } from "./paper";
+import { revalidateSnapshot, sameOpenPositionSet, toPositionView, type PositionRow } from "./paper";
 import type { MarketSnapshot } from "./binance";
 
 const NOW = 1_800_000_000_000;
@@ -82,6 +82,37 @@ function input(overrides: Partial<EntryApprovalInput> = {}): EntryApprovalInput 
   };
 }
 
+describe("持仓管理行情新鲜度", () => {
+  it("行情在资金费请求或账户锁等待期间过期时必须重新判定为无效", () => {
+    const stale = snapshot({
+      bookTime: NOW - (DEFAULT_SETTINGS.bookStaleSeconds + 1) * 1000,
+      markTime: NOW,
+    });
+    const result = revalidateSnapshot(stale, settings, NOW);
+
+    expect(result.quality.valid).toBe(false);
+    expect(result.quality.reasons.join(" ")).toMatch(/盘口|陈旧|过期/);
+  });
+
+  it("即使原始质量标记有效，也不能绕过基于当前时间的重新校验", () => {
+    const oldMark = snapshot({
+      bookTime: NOW,
+      markTime: NOW - (DEFAULT_SETTINGS.bookStaleSeconds + 1) * 1000,
+    });
+    expect(oldMark.quality.valid).toBe(true);
+    expect(revalidateSnapshot(oldMark, settings, NOW).quality.valid).toBe(false);
+  });
+});
+
+describe("账户快照持仓一致性", () => {
+  it("行情估值前后持仓ID集合变化时必须判定快照不一致", () => {
+    expect(sameOpenPositionSet([{ id: "A" }, { id: "B" }], [{ id: "B" }, { id: "A" }])).toBe(true);
+    expect(sameOpenPositionSet([{ id: "A" }], [])).toBe(false);
+    expect(sameOpenPositionSet([{ id: "A" }], [{ id: "B" }])).toBe(false);
+    expect(sameOpenPositionSet([{ id: "A" }, { id: "A" }], [{ id: "A" }, { id: "A" }])).toBe(false);
+  });
+});
+
 describe("实时与回测共用不利滑点方向", () => {
   it("开平仓均让成交价向不利于持仓方向移动", () => {
     expect(applyAdverseSlippage(100, "LONG", 2, "OPEN")).toBeCloseTo(100.02, 10);
@@ -98,11 +129,11 @@ describe("统一开仓审批与当前盘口定价", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.fillPrice).toBeCloseTo(100.080012, 10);
-    expect(result.qty).toBe(157.752);
+    expect(result.qty).toBeCloseTo(159.188, 10);
     expect(result.initialRisk).toBeCloseTo(2.080012, 10);
     expect(result.targetPrice).toBeCloseTo(104.6560384, 10);
-    expect(result.openFee).toBeCloseTo(7.893911026512, 10);
-    expect(result.margin).toBeCloseTo(789.3911026512, 10);
+    expect(result.openFee).toBeCloseTo(7.965768475128, 10);
+    expect(result.margin).toBeCloseTo(796.5768475128, 10);
     expect(result.estimatedRisk).toBeLessThanOrEqual(350);
   });
 

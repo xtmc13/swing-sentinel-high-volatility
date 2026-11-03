@@ -85,6 +85,15 @@ async function rollUtcDayBaseline(
   return { dayKey, dayStartEquity, dailyLockDay: null };
 }
 
+export function sameOpenPositionSet(
+  snapshotRows: Array<Pick<PositionRow, "id">>,
+  currentRows: Array<Pick<PositionRow, "id">>,
+) {
+  if (snapshotRows.length !== currentRows.length) return false;
+  const snapshotIds = new Set(snapshotRows.map((row) => row.id));
+  return snapshotIds.size === snapshotRows.length && currentRows.every((row) => snapshotIds.has(row.id));
+}
+
 export async function getAccountSnapshot(rows?: PositionRow[]): Promise<AccountSnapshot> {
   const [openRows, settings] = await Promise.all([rows ? Promise.resolve(rows) : getOpenPositions(), getSettings()]);
   const valued = await Promise.all(openRows.map(async (row) => {
@@ -102,36 +111,53 @@ export async function getAccountSnapshot(rows?: PositionRow[]): Promise<AccountS
   const valuationIssues = valued.flatMap((item) => item.issue ? [item.issue] : []);
   const unrealizedPnl = valuationValid ? valued.reduce((sum, item) => sum + item.view.unrealizedPnl, 0) : Number.NaN;
   const usedMargin = openRows.reduce((sum, row) => sum + row.margin, 0);
-  const { account, dayStartEquity, dailyLocked } = await getDb().transaction(async (tx) => {
+  const snapshotState = await getDb().transaction(async (tx) => {
     const locked = (await tx.select().from(simulationAccounts)
       .where(eq(simulationAccounts.id, 1)).limit(1).for("update"))[0];
     if (!locked) throw new Error("Simulation account is missing");
-    const equity = valuationValid ? locked.cash + unrealizedPnl : Number.NaN;
+    // Reconcile the position identity set after acquiring the account lock. An open/close
+    // between market valuation and this transaction would otherwise mix stale positions
+    // with post-trade cash and double-count (or omit) their unrealized PnL.
+    const currentRows = await tx.select({ id: positions.id }).from(positions).where(eq(positions.status, "OPEN"));
+    const positionSetStable = sameOpenPositionSet(openRows, currentRows);
+    const consistentValuationValid = valuationValid && positionSetStable;
+    const equity = consistentValuationValid ? locked.cash + unrealizedPnl : Number.NaN;
     const baseline = await rollUtcDayBaseline(locked, equity, Date.now(), (values) =>
       tx.update(simulationAccounts).set(values).where(eq(simulationAccounts.id, 1)));
-    const todayPnlPct = valuationValid && baseline.dayStartEquity > 0
+    const todayPnlPct = consistentValuationValid && baseline.dayStartEquity > 0
       ? (equity - baseline.dayStartEquity) / baseline.dayStartEquity * 100 : Number.NaN;
     let dailyLockDay = baseline.dailyLockDay;
     if (todayPnlPct <= -settings.dailyLossLimitPct && dailyLockDay !== baseline.dayKey) {
       dailyLockDay = baseline.dayKey;
       await tx.update(simulationAccounts).set({ dailyLockDay }).where(eq(simulationAccounts.id, 1));
     }
-    return { account: locked, dayStartEquity: baseline.dayStartEquity, dailyLocked: dailyLockDay === baseline.dayKey };
+    return {
+      account: locked,
+      dayStartEquity: baseline.dayStartEquity,
+      dailyLocked: dailyLockDay === baseline.dayKey,
+      valuationValid: consistentValuationValid,
+      positionSetStable,
+    };
   });
-  const equity = valuationValid ? account.cash + unrealizedPnl : Number.NaN;
+  const consistentUnrealizedPnl = snapshotState.valuationValid ? unrealizedPnl : Number.NaN;
+  const consistentUsedMargin = snapshotState.valuationValid ? usedMargin : Number.NaN;
+  const equity = snapshotState.valuationValid ? snapshotState.account.cash + consistentUnrealizedPnl : Number.NaN;
   return {
     equity,
-    cash: account.cash,
-    availableMargin: valuationValid ? Math.max(0, equity - usedMargin) : Number.NaN,
-    usedMargin,
-    unrealizedPnl,
-    realizedPnl: account.realizedPnl,
-    todayPnl: valuationValid ? equity - dayStartEquity : Number.NaN,
-    todayPnlPct: valuationValid && dayStartEquity > 0 ? (equity - dayStartEquity) / dayStartEquity * 100 : Number.NaN,
-    dayStartEquity,
-    valuationValid,
-    valuationIssues,
-    dailyLocked,
+    cash: snapshotState.account.cash,
+    availableMargin: snapshotState.valuationValid ? Math.max(0, equity - consistentUsedMargin) : Number.NaN,
+    usedMargin: consistentUsedMargin,
+    unrealizedPnl: consistentUnrealizedPnl,
+    realizedPnl: snapshotState.account.realizedPnl,
+    todayPnl: snapshotState.valuationValid ? equity - snapshotState.dayStartEquity : Number.NaN,
+    todayPnlPct: snapshotState.valuationValid && snapshotState.dayStartEquity > 0
+      ? (equity - snapshotState.dayStartEquity) / snapshotState.dayStartEquity * 100 : Number.NaN,
+    dayStartEquity: snapshotState.dayStartEquity,
+    valuationValid: snapshotState.valuationValid,
+    valuationIssues: snapshotState.positionSetStable
+      ? valuationIssues
+      : [...valuationIssues, "持仓在行情估值期间发生变化，请重新获取账户快照"],
+    dailyLocked: snapshotState.dailyLocked,
   };
 }
 
@@ -175,7 +201,7 @@ export interface PaperServiceDependencies {
   beforeVolatilityStateLock?: (symbol: string) => Promise<void>;
 }
 
-function revalidateSnapshot(snapshot: MarketSnapshot, settings: TradingSettings, now: number) {
+export function revalidateSnapshot(snapshot: MarketSnapshot, settings: TradingSettings, now: number) {
   const current = createMarketSnapshot({
     source: snapshot.source,
     symbol: snapshot.symbol,
@@ -215,26 +241,33 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
 
   const fundingCheckedAt = new Map<string, number>();
 
-  async function settlePositionFunding(row: PositionRow, snapshot: MarketSnapshot) {
+  async function settlePositionFunding(row: PositionRow, snapshot: MarketSnapshot, settings: TradingSettings, sourceGeneration: number) {
     if (!market.getFundingRates || !snapshot.quality.valid) return;
     const lastCheck = fundingCheckedAt.get(row.id) ?? 0;
     if (now() - lastCheck < 60_000) return;
     const db = dbFor();
     const events = await market.getFundingRates(row.symbol, row.openedAt.getTime(), now());
+    let retryRequired = false;
     for (const event of events) {
       if (event.fundingTime < row.openedAt.getTime() || event.fundingTime > now()) continue;
       if (!Number.isFinite(event.fundingRate) || !Number.isFinite(event.fundingTime)) throw new Error(`${row.symbol} 资金费历史数据无效`);
       const settled = await db.transaction(async (tx) => {
         await tx.select().from(simulationAccounts).where(eq(simulationAccounts.id, 1)).limit(1).for("update");
         const current = (await tx.select().from(positions).where(eq(positions.id, row.id)).limit(1))[0];
-        if (!current || current.status !== "OPEN") return false;
+        if (market.sourceGeneration !== sourceGeneration) return "retry" as const;
+        if (!current || current.status !== "OPEN") return "skip" as const;
         const existing = await tx.select().from(fundingSettlements).where(and(
           eq(fundingSettlements.positionId, row.id),
           eq(fundingSettlements.fundingTime, event.fundingTime),
         )).limit(1);
-        if (existing.length) return false;
+        if (existing.length) return "skip" as const;
+        // Funding history is fetched asynchronously. Revalidate the original quote only
+        // after acquiring the account lock so a slow API call or lock wait cannot apply
+        // funding using a stale mark price.
+        const currentSnapshot = revalidateSnapshot(snapshot, settings, now());
+        if (!currentSnapshot.quality.valid) return "retry" as const;
         const direction = current.side === "LONG" ? 1 : -1;
-        const notional = current.qty * snapshot.markPrice;
+        const notional = current.qty * currentSnapshot.markPrice;
         const amount = -direction * notional * event.fundingRate;
         if (!Number.isFinite(notional) || !Number.isFinite(amount)) throw new Error(`${row.symbol} 资金费结算金额无效`);
         await tx.insert(fundingSettlements).values({ id: crypto.randomUUID(), positionId: current.id, symbol: current.symbol, fundingTime: event.fundingTime, rate: event.fundingRate, notional, amount });
@@ -244,11 +277,14 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
           cash: sql`${simulationAccounts.cash} + ${amount}`,
           realizedPnl: sql`${simulationAccounts.realizedPnl} + ${amount}`,
         }).where(eq(simulationAccounts.id, 1));
-        return true;
+        return "settled" as const;
       });
-      if (settled) await reportEvent("INFO", "资金费结算", `${row.symbol} 按当前标记价近似结算资金费`, row.symbol);
+      if (settled === "retry") retryRequired = true;
+      if (settled === "settled") await reportEvent("INFO", "资金费结算", `${row.symbol} 按当前标记价近似结算资金费`, row.symbol);
     }
-    fundingCheckedAt.set(row.id, now());
+    // Do not throttle a retryable stale-quote/source-switch failure for 60 seconds.
+    // Duplicate or already-closed events are safe to mark checked.
+    if (!retryRequired) fundingCheckedAt.set(row.id, now());
   }
 
   async function openPaperPosition(opportunity: Opportunity, executionHealthy?: () => boolean) {
@@ -259,6 +295,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       const preflightSettings = await getSettings();
       if (!preflightSettings.autoTrade) return { ok: false as const, reason: "自动交易已暂停" };
       const preflightRows = await db.select().from(positions).where(eq(positions.status, "OPEN"));
+      const preflightSourceGeneration = market.sourceGeneration;
       const symbols = [...new Set([opportunity.symbol, ...preflightRows.map((row) => row.symbol)])];
       const snapshots = new Map(await Promise.all(symbols.map(async (symbol) => {
         const current = await market.getMarketSnapshot(symbol);
@@ -294,6 +331,11 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         const settingsRow = (await tx.select().from(tradingSettings).where(eq(tradingSettings.id, 1)).limit(1))[0];
         if (!settingsRow) throw new Error("Trading settings are missing");
         const settings = settingsFromRow(settingsRow);
+        // Recheck the kill switch while holding the account lock. The preflight check
+        // happens before market-data I/O and can become stale while emergencyStop commits.
+        // emergencyStop uses the same account lock, so this closes the late-entry race.
+        if (!settings.autoTrade) return { ok: false as const, reason: "自动交易已暂停" };
+        if (market.sourceGeneration !== preflightSourceGeneration) return { retry: true as const };
         const openRows = await tx.select().from(positions).where(eq(positions.status, "OPEN"));
         if (settings.correlationWindow !== preflightSettings.correlationWindow
           || (openRows.length > 0 && preflightRows.length === 0)
@@ -310,6 +352,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
         await dependencies.beforeVolatilityStateLock?.(opportunity.symbol);
         const stateRow = (await tx.select().from(volatilityStates)
           .where(eq(volatilityStates.symbol, opportunity.symbol)).limit(1).for("update"))[0];
+        if (market.sourceGeneration !== preflightSourceGeneration) return { retry: true as const };
         if (!stateRow) return { ok: false as const, reason: "缺少当前波动状态，禁止开仓" };
         const riskPositions: EntryRiskPosition[] = openRows.map((row) => ({
           symbol: row.symbol,
@@ -357,7 +400,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
           symbolMeta: meta,
           maxLeverage: currentMarket.maxLeverage,
           now: now(),
-          currentSourceGeneration: market.sourceGeneration,
+          currentSourceGeneration: preflightSourceGeneration,
           executionHealthy,
         });
         if (!approved.ok) return approved;
@@ -410,6 +453,7 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
     if (!preflightRow || preflightRow.status !== "OPEN") {
       return { ok: false as const, reason: "持仓不存在或已关闭", unsettled: false as const, alreadyClosed: true as const, pnl: undefined };
     }
+    const sourceGeneration = market.sourceGeneration;
     const snapshot = await market.getMarketSnapshot(preflightRow.symbol);
     const result = await db.transaction(async (tx) => {
       const account = (await tx.select().from(simulationAccounts)
@@ -418,6 +462,9 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       const settingsRow = (await tx.select().from(tradingSettings).where(eq(tradingSettings.id, 1)).limit(1))[0];
       if (!settingsRow) throw new Error("Trading settings are missing");
       const settings = settingsFromRow(settingsRow);
+      if (market.sourceGeneration !== sourceGeneration) {
+        return { ok: false as const, reason: "行情数据源已切换，拒绝使用旧源价格平仓", unsettled: true as const, alreadyClosed: false as const };
+      }
       const row = (await tx.select().from(positions).where(eq(positions.id, positionId)).limit(1))[0];
       if (!row || row.status !== "OPEN") {
         return { ok: false as const, reason: "持仓不存在或已关闭", unsettled: false as const, alreadyClosed: true as const, pnl: undefined };
@@ -436,6 +483,9 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       const holdingMinutes = Math.max(0, (now() - row.openedAt.getTime()) / 60_000);
       const closedAt = new Date(now());
       await dependencies.beforeCloseUpdate?.(row.id);
+      if (market.sourceGeneration !== sourceGeneration) {
+        return { ok: false as const, reason: "平仓期间行情数据源已切换，持仓保持 OPEN 并等待重试", unsettled: true as const, alreadyClosed: false as const };
+      }
       const updated = await tx.update(positions).set({ status: "CLOSED", closedAt, realizedPnl: netPnl })
         .where(and(eq(positions.id, row.id), eq(positions.status, "OPEN")));
       assertAffectedRows(updated);
@@ -482,30 +532,55 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
   async function manageOpenPositions() {
     const settings = await getSettings();
     const db = dbFor();
+    const sourceGeneration = market.sourceGeneration;
     const rows = await db.select().from(positions).where(eq(positions.status, "OPEN"));
     const snapshots = new Map(await Promise.all(rows.map(async (row) => [row.symbol, await market.getMarketSnapshot(row.symbol)] as const)));
+    if (market.sourceGeneration !== sourceGeneration) {
+      log.warn("market source changed during position snapshot; skipping management cycle");
+      return;
+    }
     for (const row of rows) {
       const snapshot = snapshots.get(row.symbol);
       if (!snapshot?.quality.valid) continue;
       try {
-        await settlePositionFunding(row, snapshot);
+        await settlePositionFunding(row, snapshot, settings, sourceGeneration);
       } catch (error) {
         log.error("funding settlement failed", { symbol: row.symbol, error: String(error) });
       }
     }
-    const valuationValid = rows.every((row) => snapshots.get(row.symbol)?.quality.valid);
+    // Funding lookups above may take time. Recompute quote freshness immediately before
+    // account valuation and stop/target decisions; never trust quality from fetch time.
+    // A source switch invalidates every quote collected in the previous generation.
+    if (market.sourceGeneration !== sourceGeneration) {
+      log.warn("market source changed during funding lookup; skipping position decisions");
+      return;
+    }
+    const managementSnapshots = new Map([...snapshots].map(([symbol, snapshot]) => [
+      symbol,
+      revalidateSnapshot(snapshot, settings, now()),
+    ] as const));
+    const valuationValid = rows.every((row) => managementSnapshots.get(row.symbol)?.quality.valid);
     const unrealizedPnl = valuationValid ? rows.reduce((sum, row) => {
-      const snapshot = snapshots.get(row.symbol)!;
+      const snapshot = managementSnapshots.get(row.symbol)!;
       return sum + (snapshot.markPrice - row.entryPrice) * row.qty * (row.side === "LONG" ? 1 : -1);
     }, 0) : Number.NaN;
     const dailyBaseline = await db.transaction(async (tx) => {
+      if (market.sourceGeneration !== sourceGeneration) return null;
       const account = (await tx.select().from(simulationAccounts)
         .where(eq(simulationAccounts.id, 1)).limit(1).for("update"))[0];
       if (!account) return null;
-      const equity = valuationValid ? account.cash + unrealizedPnl : Number.NaN;
+      // The rows and quotes were collected before this lock. Reconcile the open-position
+      // identity set before mixing their unrealized PnL with the locked cash balance.
+      const currentRows = await tx.select({ id: positions.id }).from(positions).where(eq(positions.status, "OPEN"));
+      if (!sameOpenPositionSet(rows, currentRows)) {
+        log.warn("open positions changed during management valuation; skipping cycle");
+        return null;
+      }
+      const consistentValuationValid = valuationValid;
+      const equity = consistentValuationValid ? account.cash + unrealizedPnl : Number.NaN;
       const baseline = await rollUtcDayBaseline(account, equity, now(), (values) =>
         tx.update(simulationAccounts).set(values).where(eq(simulationAccounts.id, 1)));
-      const todayPnlPct = valuationValid && baseline.dayStartEquity > 0
+      const todayPnlPct = consistentValuationValid && baseline.dayStartEquity > 0
         ? (equity - baseline.dayStartEquity) / baseline.dayStartEquity * 100 : Number.NaN;
       let dailyLockDay = baseline.dailyLockDay;
       if (todayPnlPct <= -settings.dailyLossLimitPct && dailyLockDay !== baseline.dayKey) {
@@ -514,12 +589,22 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
       }
       return { dailyLocked: dailyLockDay === baseline.dayKey };
     });
-    if (!dailyBaseline) return;
+    if (!dailyBaseline || market.sourceGeneration !== sourceGeneration) return;
     const dailyLocked = dailyBaseline.dailyLocked;
     for (const row of rows) {
-      const snapshot = snapshots.get(row.symbol);
-      if (!snapshot?.quality.valid) continue;
+      if (market.sourceGeneration !== sourceGeneration) {
+        log.warn("market source changed during position management; stopping cycle");
+        return;
+      }
+      const capturedSnapshot = managementSnapshots.get(row.symbol);
+      if (!capturedSnapshot) continue;
       const state = (await db.select().from(volatilityStates).where(eq(volatilityStates.symbol, row.symbol)).limit(1))[0];
+      if (market.sourceGeneration !== sourceGeneration) {
+        log.warn("market source changed while loading position state; stopping cycle");
+        return;
+      }
+      const snapshot = revalidateSnapshot(capturedSnapshot, settings, now());
+      if (!snapshot.quality.valid) continue;
       const mode: VolatilityMode = state?.mode === "HIGH" || state?.mode === "EXTREME" ? state.mode : "NORMAL";
       const managed = managePositionPrice({
         side: row.side as Side,
@@ -565,13 +650,15 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
     }
     if (!unsettled.length) {
       const remaining = await db.transaction(async (tx) => {
-        await tx.select().from(simulationAccounts).where(eq(simulationAccounts.id, 1)).limit(1).for("update");
+        const account = (await tx.select().from(simulationAccounts)
+          .where(eq(simulationAccounts.id, 1)).limit(1).for("update"))[0];
+        if (!account) throw new Error("Simulation account is missing");
         const openRows = await tx.select().from(positions).where(eq(positions.status, "OPEN"));
         if (openRows.length) return openRows;
         await tx.update(simulationAccounts).set({
-          cash: 100_000,
+          cash: account.initialBalance,
           realizedPnl: 0,
-          dayStartEquity: 100_000,
+          dayStartEquity: account.initialBalance,
           dayKey: new Date(now()).toISOString().slice(0, 10),
           dailyLockDay: null,
         }).where(eq(simulationAccounts.id, 1));

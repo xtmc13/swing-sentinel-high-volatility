@@ -14,6 +14,8 @@ export interface SizePositionInput {
   usedMargin: number;
   takerFeeBps: number;
   slippageBps: number;
+  // True when entryPrice already includes modeled adverse entry slippage (live or historical fills).
+  entrySlippageIncluded?: boolean;
   stepSize: number;
   minQty: number;
   minNotional: number;
@@ -45,9 +47,16 @@ export function sizePosition(input: SizePositionInput): PositionSize {
   const numbers = [
     input.equity, input.entryPrice, input.stopPrice, input.leverage,
     input.riskPerTradePct, input.highVolatilityRiskMultiplier, input.marginPerTradePct, input.totalMarginCapPct,
-    input.usedMargin, input.takerFeeBps, input.slippageBps,
+    input.usedMargin, input.takerFeeBps, input.slippageBps, input.stepSize, input.minQty, input.minNotional,
+    input.signalCloseTime, input.now, input.maxSignalAgeSeconds,
   ];
-  if (!numbers.every(Number.isFinite) || input.equity <= 0 || input.entryPrice <= 0 || input.leverage <= 0) {
+  if (!numbers.every(Number.isFinite)
+    || input.equity <= 0 || input.entryPrice <= 0 || input.stopPrice <= 0 || input.leverage <= 0
+    || input.riskPerTradePct <= 0 || input.highVolatilityRiskMultiplier <= 0
+    || input.marginPerTradePct <= 0 || input.totalMarginCapPct <= 0 || input.usedMargin < 0
+    || input.takerFeeBps < 0 || input.slippageBps < 0
+    || input.stepSize < 0 || input.minQty < 0 || input.minNotional < 0
+    || input.signalCloseTime <= 0 || input.now <= 0 || input.maxSignalAgeSeconds <= 0) {
     return { ok: false, reason: "仓位输入无效" };
   }
   const direction = input.side === "LONG" ? 1 : -1;
@@ -56,8 +65,10 @@ export function sizePosition(input: SizePositionInput): PositionSize {
 
   const multiplier = input.mode === "HIGH" ? input.highVolatilityRiskMultiplier : 1;
   const riskBudget = input.equity * input.riskPerTradePct / 100 * multiplier;
-  const twoSidedCostPerUnit = (input.entryPrice + input.stopPrice)
-    * (input.takerFeeBps + input.slippageBps) / 10_000;
+  // Fees apply on both sides. The supplied entry price already includes modeled adverse entry slippage,
+  // so reserve only stop-exit slippage here for both live and historical fills.
+  const twoSidedCostPerUnit = (input.entryPrice + input.stopPrice) * input.takerFeeBps / 10_000
+    + (input.stopPrice + (input.entrySlippageIncluded ? 0 : input.entryPrice)) * input.slippageBps / 10_000;
   const riskPerUnit = stopDistance + twoSidedCostPerUnit;
   const qtyByRisk = riskBudget / riskPerUnit;
   const qtyByMargin = input.equity * input.marginPerTradePct / 100 * input.leverage / input.entryPrice;
@@ -143,7 +154,9 @@ export function portfolioRisk(input: PortfolioRiskInput): PortfolioRiskResult {
     const breakeven = position.side === "LONG"
       ? position.stopPrice >= position.entryPrice
       : position.stopPrice <= position.entryPrice;
-    if (breakeven) return { symbol: position.symbol, risk: 0, breakeven };
+    // Risk here is the remaining mark-to-stop exposure; unrealized PnL is already reflected in equity.
+    // A breached stop therefore has no remaining price distance, but still incurs stop-exit costs.
+    // A breakeven-or-better stop removes price-loss exposure, not the cost of executing the stop.
     const adverseDistance = Math.max(0, (position.markPrice - position.stopPrice) * direction);
     const exitCost = position.stopPrice * (input.takerFeeBps + input.slippageBps) / 10_000;
     const risk = Math.max(0, position.qty * (adverseDistance + exitCost));
@@ -166,7 +179,7 @@ export function portfolioRisk(input: PortfolioRiskInput): PortfolioRiskResult {
     const correlatedPositions = input.positions.filter((position, index) => {
       const value = correlations[index];
       return position.side === input.candidate!.side && value !== null && value !== undefined
-        && Math.abs(value) >= input.correlationThreshold;
+        && value >= input.correlationThreshold;
     });
     if (correlatedPositions.length > 0) {
       correlatedRisk = candidateRisk + correlatedPositions.reduce((sum, position) => {

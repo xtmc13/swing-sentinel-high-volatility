@@ -19,10 +19,11 @@ export class DrizzleLiveDailyRisk implements LiveDailyRisk {
   }
 
   async evaluate(dayKey: string, equity: number, dailyLossLimitPct: number): Promise<LiveDailyRiskSnapshot> {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey) || !Number.isFinite(equity) || equity <= 0
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey) || (Number.isFinite(equity) && equity < 0)
       || !Number.isFinite(dailyLossLimitPct) || dailyLossLimitPct < 0) {
       throw new Error("Invalid LIVE daily risk input");
     }
+    if (equity === 0 || !Number.isFinite(equity)) return { dayStartEquity: 0, dailyLocked: true };
     return this.db.transaction(async (tx) => {
       const locked = await tx.select().from(liveDailyRisk).where(eq(liveDailyRisk.dayKey, dayKey)).for("update");
       if (!locked[0]) {

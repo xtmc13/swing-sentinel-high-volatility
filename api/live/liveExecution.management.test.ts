@@ -125,6 +125,27 @@ describe("signed LIVE account and position management", () => {
     expect(timeout.placed.at(-1)).toMatchObject({ type: "MARKET", reduceOnly: true });
   });
 
+  it.each(["0", "unavailable"])("returns a locked zero no-data account for signed equity %s", async (walletBalance) => {
+    const h = harness();
+    h.gateway.account = async () => ({ assets: [{ asset: "USDT", walletBalance, availableBalance: walletBalance }] });
+    h.gateway.positionRisk = async () => [];
+
+    await expect(h.adapter.account()).resolves.toEqual({
+      equity: 0,
+      cash: 0,
+      availableMargin: 0,
+      usedMargin: 0,
+      unrealizedPnl: 0,
+      realizedPnl: 0,
+      todayPnl: 0,
+      todayPnlPct: 0,
+      dayStartEquity: 0,
+      valuationValid: false,
+      valuationIssues: ["签名 LIVE 账户或持仓估值不可用"],
+      dailyLocked: true,
+    });
+  });
+
   it("returns zero display values without clearing unavailable flags when signed REST fails", async () => {
     const h = harness();
     await h.open();

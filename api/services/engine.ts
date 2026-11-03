@@ -143,6 +143,7 @@ export class TradingEngine {
   private states = new Map<string, VolatilityState>();
   private invalidatedStateSymbols = new Set<string>();
   private failedRiskSymbols = new Set<string>();
+  private reportedErrors = new Map<string, string>();
   private atrBaselines = new Map<string, AtrBaseline>();
   private tickReturns = new Map<string, number[]>();
   private tickCloses = new Map<string, number>();
@@ -274,8 +275,11 @@ export class TradingEngine {
   }
 
   private async report(level: EventLevel, category: string, message: string, symbol?: string) {
+    const errorKey = `${category}:${symbol ?? ""}`;
+    if (level === "ERROR" && this.reportedErrors.get(errorKey) === message) return;
     try {
       await this.deps.addEvent(level, category, message, symbol);
+      if (level === "ERROR") this.reportedErrors.set(errorKey, message);
     } catch (error) {
       log.error("engine event write failed", {
         category,
@@ -303,13 +307,14 @@ export class TradingEngine {
         currentSpreadBps: metrics?.snapshot?.spreadBps ?? Number.NaN,
         ...risk,
       }, previousForEvaluation, this.deps.now());
+      const lastDataAt = metrics?.oneMinute?.eventTime ?? metrics?.snapshot?.markTime;
       const next: VolatilityState = {
         symbol: evaluated.symbol,
         mode: evaluated.mode,
         confirmationCount: evaluated.confirmationCount,
         stableSince: evaluated.stableSince,
         metrics: evaluated.metrics,
-        lastDataAt: metrics?.oneMinute?.eventTime ?? metrics?.snapshot?.markTime ?? this.deps.now(),
+        lastDataAt: lastDataAt !== undefined && Number.isFinite(lastDataAt) && lastDataAt >= 0 ? lastDataAt : 0,
         version: evaluated.version,
       };
       if (sourceGeneration !== this.marketGeneration) {
@@ -324,6 +329,7 @@ export class TradingEngine {
       this.invalidatedStateSymbols.delete(symbol);
       this.states.set(symbol, next);
       this.failedRiskSymbols.delete(symbol);
+      this.reportedErrors.delete(`单币风控失败:${symbol}`);
 
       const previousMode = previous?.mode ?? "NORMAL";
       const transitioned = previousMode !== next.mode || previous?.version !== next.version;

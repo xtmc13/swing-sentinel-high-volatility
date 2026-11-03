@@ -114,6 +114,23 @@ function exceedsDirectionalLimit(price: DecimalString, cap: DecimalString, side:
   return side === "LONG" ? comparison > 0 : comparison < 0;
 }
 
+function unavailableAccount(): AccountSnapshot {
+  return {
+    equity: 0,
+    cash: 0,
+    availableMargin: 0,
+    usedMargin: 0,
+    unrealizedPnl: 0,
+    realizedPnl: 0,
+    todayPnl: 0,
+    todayPnlPct: 0,
+    dayStartEquity: 0,
+    valuationValid: false,
+    valuationIssues: ["签名 LIVE 账户或持仓估值不可用"],
+    dailyLocked: true,
+  };
+}
+
 export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   readonly machine: OrderStateMachine;
   private readonly now: () => number;
@@ -390,13 +407,18 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       if (position.isolatedWallet === undefined) throw new Error(`${position.symbol} 缺少签名 isolated margin`);
       usedMargin = addDecimals(usedMargin, position.isolatedWallet);
     }
-    const equity = Number(addDecimals(asset.walletBalance, unrealizedPnl));
+    let equity: number;
+    try {
+      equity = Number(addDecimals(asset.walletBalance, unrealizedPnl));
+    } catch {
+      return unavailableAccount();
+    }
     const availableMargin = Number(asset.availableBalance);
     const cash = Number(asset.walletBalance);
     const unrealized = Number(unrealizedPnl);
     const margin = Number(usedMargin);
-    if (![equity, availableMargin, cash, unrealized, margin].every(Number.isFinite)) {
-      throw new Error("签名账户或持仓估值无效");
+    if (equity === 0 || ![equity, availableMargin, cash, unrealized, margin].every(Number.isFinite)) {
+      return unavailableAccount();
     }
     const dayKey = new Date(this.now()).toISOString().slice(0, 10);
     const daily = await this.dependencies.dailyRisk.evaluate(dayKey, equity, settings.dailyLossLimitPct);
@@ -460,20 +482,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
 
   async snapshot(): Promise<ExecutionSnapshot> {
     const [account, positions] = await Promise.all([
-      this.account().catch((): AccountSnapshot => ({
-        equity: 0,
-        cash: 0,
-        availableMargin: 0,
-        usedMargin: 0,
-        unrealizedPnl: 0,
-        realizedPnl: 0,
-        todayPnl: 0,
-        todayPnlPct: 0,
-        dayStartEquity: 0,
-        valuationValid: false,
-        valuationIssues: ["签名 LIVE 账户或持仓估值不可用"],
-        dailyLocked: true,
-      })),
+      this.account().catch(unavailableAccount),
       this.positions(),
     ]);
     return { account, positions };

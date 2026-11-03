@@ -738,6 +738,58 @@ describe("三态引擎编排", () => {
     expect(h.events.some((event) => event.category === "单币风控失败" && event.symbol === "ETHUSDT")).toBe(true);
   });
 
+  it("启动行情不可用时持久化零指标和零时间且保持 EXTREME", async () => {
+    const h = harness({ quality: { valid: false, reasons: ["等待行情"], bookAgeMs: null, markAgeMs: null, candleAgeMs: null } });
+    h.monitor.getSymbolMetrics = () => undefined;
+
+    await h.engine.refreshMarkets();
+    await h.engine.reevaluateRisk();
+
+    expect(h.savedStates).toEqual([expect.objectContaining({
+      symbol: "BTCUSDT",
+      mode: "EXTREME",
+      metrics: { atrQuantile: 0, tickSigma: 0, spreadRatio: 0 },
+      lastDataAt: 0,
+    })]);
+    expect(h.events.filter((event) => event.level === "ERROR")).toEqual([]);
+  });
+
+  it("相同风控错误不重复写入审计，变化及恢复后的错误仍保留", async () => {
+    let failure = "启动数据不可用";
+    let shouldFail = true;
+    const h = harness({
+      dependencies: {
+        saveVolatilityState: async () => {
+          if (shouldFail) throw new Error(failure);
+        },
+      },
+    });
+
+    await h.engine.refreshMarkets();
+    await h.engine.reevaluateRisk();
+    await h.engine.reevaluateRisk();
+    expect(h.events.filter((event) => event.category === "单币风控失败").map((event) => event.message)).toEqual([
+      "启动数据不可用",
+    ]);
+
+    failure = "数据库连接失败";
+    await h.engine.reevaluateRisk();
+    expect(h.events.filter((event) => event.category === "单币风控失败").map((event) => event.message)).toEqual([
+      "启动数据不可用",
+      "数据库连接失败",
+    ]);
+
+    shouldFail = false;
+    await h.engine.reevaluateRisk();
+    shouldFail = true;
+    await h.engine.reevaluateRisk();
+    expect(h.events.filter((event) => event.category === "单币风控失败").map((event) => event.message)).toEqual([
+      "启动数据不可用",
+      "数据库连接失败",
+      "数据库连接失败",
+    ]);
+  });
+
   it("150 合约 Dashboard 使用一次只读观测快照，不按 symbol 重算聚合或刷新监测状态", () => {
     const symbols = Array.from({ length: 150 }, (_, index) => `S${index}USDT`);
     const metrics = {

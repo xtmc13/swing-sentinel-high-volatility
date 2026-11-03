@@ -39,6 +39,10 @@ function tickSigma(values: number[], current: number, minimum: number) {
   return sigma > 0 ? Math.abs(current - mean) / sigma : current === mean ? 0 : Number.POSITIVE_INFINITY;
 }
 
+function availableMetric(value: number | null) {
+  return value !== null && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
 export function evaluateVolatility(
   input: EvaluateVolatilityInput,
   previous: VolatilityState | null,
@@ -60,7 +64,11 @@ export function evaluateVolatility(
   const spreadRatio = Number.isFinite(input.currentSpreadBps) && input.currentSpreadBps >= 0 && spreadMedian
     ? input.currentSpreadBps / spreadMedian
     : null;
-  const metrics: VolatilityMetrics = { atrQuantile, tickSigma: sigma, spreadRatio };
+  const metrics: VolatilityMetrics = {
+    atrQuantile: availableMetric(atrQuantile),
+    tickSigma: availableMetric(sigma),
+    spreadRatio: availableMetric(spreadRatio),
+  };
 
   let isExtreme = false;
   if (!input.quality.valid) {

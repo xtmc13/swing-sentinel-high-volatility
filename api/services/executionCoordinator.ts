@@ -3,6 +3,7 @@ import { binance } from "./binance";
 import {
   DEFAULT_LIVE_CONTROLS,
   type AccountSnapshot,
+  type Candle,
   type DataSource,
   type ExecutionMode,
   type ExecutionStatus,
@@ -15,7 +16,7 @@ import {
 } from "@contracts/trading";
 import { liveControls, livePositions, positions } from "@db/schema";
 import { getDb } from "../queries/connection";
-import { getOutstandingOrderCounts, getSettings, switchExecutionModeAtomic } from "../queries/trading";
+import { addEvent, getOutstandingOrderCounts, getSettings, switchExecutionModeAtomic } from "../queries/trading";
 import {
   closePaperPosition,
   emergencyStop,
@@ -30,6 +31,8 @@ import {
   momentumFeatureFrameSchema,
   type MomentumFeatureFrame,
 } from "./momentum";
+import { evaluateMomentumExhaustion } from "./momentumExhaustion";
+import { momentumProtectionStop } from "./momentumProtection";
 import {
   drizzleMomentumStateStore,
   type MomentumStateStore,
@@ -106,7 +109,18 @@ export interface ExecutionCoordinatorDependencies {
   credentialsConfigured?: () => Promise<boolean>;
   privateWs?: { health(): PrivateWsHealth };
   reconciliation?: { health(): { configured: boolean; running: boolean; lastRunAt: number | null } };
-  market?: { readonly dataSource: DataSource };
+  market?: {
+    readonly dataSource: DataSource;
+    readonly sourceGeneration?: number;
+    getCandles?: (symbol: string, interval: string, limit?: number) => Promise<Candle[]>;
+  };
+  evaluateExhaustion?: typeof evaluateMomentumExhaustion;
+  recordEvent?: (
+    level: "INFO" | "WARN" | "ERROR" | "SUCCESS",
+    category: string,
+    message: string,
+    symbol?: string,
+  ) => Promise<unknown>;
   env?: Record<string, string | undefined>;
   now?: () => number;
   momentumStore?: MomentumStateStore;
@@ -170,6 +184,7 @@ export class ExecutionCoordinator {
   private readonly dependencies: ExecutionCoordinatorDependencies;
   private openSwitchTail: Promise<void> = Promise.resolve();
   private lastMomentumFrame: MomentumFeatureFrame | null = null;
+  private readonly exhaustionEvents = new Set<string>();
 
   constructor(dependencies: ExecutionCoordinatorDependencies = {}) {
     this.dependencies = dependencies;
@@ -321,8 +336,39 @@ export class ExecutionCoordinator {
 
   async manage(): Promise<void> {
     const adapter = (await this.adapter(await this.settings()));
-    await adapter.manage();
+    let managementError: unknown = null;
+    try {
+      await adapter.manage();
+    } catch (error) {
+      managementError = error;
+    }
     await this.manageMomentumExits();
+    await this.manageMomentumProtection();
+    if (managementError) throw managementError;
+  }
+
+  private async submitMomentumExit(
+    settings: TradingSettings,
+    adapter: ExecutionAdapter,
+    position: PositionView,
+    reason: string,
+  ): Promise<void> {
+    const claimId = crypto.randomUUID();
+    const claimed = await this.momentumStore.claimExit(
+      settings.executionMode,
+      position.id,
+      reason,
+      claimId,
+      this.now(),
+      5_000,
+    );
+    if (!claimed) return;
+    const result = await adapter.close(position.id, reason);
+    if (result.ok || result.unsettled) {
+      await this.momentumStore.markExitSubmitted(settings.executionMode, position.id, claimId);
+    } else {
+      await this.momentumStore.releaseExit(settings.executionMode, position.id, claimId);
+    }
   }
 
   async manageMomentumExits(): Promise<void> {
@@ -347,22 +393,62 @@ export class ExecutionCoordinator {
         now,
         frame,
       });
-      if (!reason) continue;
-      const claimId = crypto.randomUUID();
-      const claimed = await this.momentumStore.claimExit(
-        settings.executionMode,
-        position.id,
-        reason,
-        claimId,
-        now,
-        5_000,
-      );
-      if (!claimed) continue;
-      const result = await adapter.close(position.id, reason);
-      if (result.ok || result.unsettled) {
-        await this.momentumStore.markExitSubmitted(settings.executionMode, position.id, claimId);
-      } else {
-        await this.momentumStore.releaseExit(settings.executionMode, position.id, claimId);
+      if (reason) await this.submitMomentumExit(settings, adapter, position, reason);
+    }
+  }
+
+  async manageMomentumProtection(): Promise<void> {
+    const market = this.dependencies.market;
+    if (!market?.getCandles) return;
+    const settings = await this.settings();
+    const adapter = await this.adapter(settings);
+    const openPositions = await adapter.positions();
+    const evaluate = this.dependencies.evaluateExhaustion ?? evaluateMomentumExhaustion;
+    const record = this.dependencies.recordEvent ?? addEvent;
+    for (const position of openPositions) {
+      if (position.strategyType !== "MOMENTUM" || position.exitPending) continue;
+      try {
+        const now = this.now();
+        const generation = market.sourceGeneration ?? 0;
+        const [candles15m, candles1h, candles4h] = await Promise.all([
+          market.getCandles(position.symbol, "15m", 220),
+          market.getCandles(position.symbol, "1h", 220),
+          market.getCandles(position.symbol, "4h", 220),
+        ]);
+        if (generation !== (market.sourceGeneration ?? 0)) continue;
+        const assessment = evaluate({ side: position.side, candles15m, candles1h, candles4h, now });
+        if (assessment.protection === "NONE") continue;
+        const latestClose = candles15m.filter((candle) => candle.closeTime <= now).at(-1)?.closeTime ?? 0;
+        const eventKey = `${settings.executionMode}:${position.id}:${assessment.protection}:${latestClose}`;
+        if (!this.exhaustionEvents.has(eventKey)) {
+          await record(
+            assessment.protection === "EXIT_CANDIDATE" ? "WARN" : "INFO",
+            "动能衰竭",
+            `${position.symbol} ${assessment.protection} ${assessment.score}/100，${assessment.resonanceCount}/3 周期${assessment.structureBreak ? "，结构破位" : ""}`,
+            position.symbol,
+          );
+          this.exhaustionEvents.add(eventKey);
+          if (this.exhaustionEvents.size > 1_000) this.exhaustionEvents.delete(this.exhaustionEvents.values().next().value!);
+        }
+        if (assessment.protection === "EXIT_CANDIDATE") {
+          if (settings.executionMode === "PAPER" && !position.valuationValid) continue;
+          await this.submitMomentumExit(
+            settings,
+            adapter,
+            position,
+            `动能衰竭 ${assessment.score}/100 且结构破位`,
+          );
+          continue;
+        }
+        if (!["TIGHTEN", "REDUCE_CANDIDATE"].includes(assessment.protection) || !position.valuationValid) continue;
+        const stopPrice = momentumProtectionStop({ side: position.side, markPrice: position.markPrice, candles15m, now });
+        if (stopPrice === null) continue;
+        const tightened = await adapter.tightenStop(position.id, stopPrice, `动能衰竭 ${assessment.score}/100 收紧`);
+        if (!tightened.ok) {
+          await record("ERROR", "动能衰竭", `${position.symbol} ${tightened.reason}`, position.symbol);
+        }
+      } catch (error) {
+        await record("ERROR", "动能衰竭", `${position.symbol} 衰竭评估失败：${error instanceof Error ? error.message : String(error)}`, position.symbol);
       }
     }
   }

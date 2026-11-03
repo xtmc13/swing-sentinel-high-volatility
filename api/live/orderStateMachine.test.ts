@@ -604,6 +604,22 @@ describe("fill-driven live order state machine", () => {
     });
   });
 
+  it("a cancelled unfilled close gets a new controlled retry instead of blocking forever", async () => {
+    const { store, gateway, machine } = setup();
+    entry(store, "1");
+    await machine.submit("entry-1");
+    await machine.handleFill("entry-1", fill(), seed);
+
+    const first = await machine.closePosition(seed.id);
+    expect(first).toMatchObject({ status: "NEW", reduceOnly: true });
+    await store.transitionOrder(first!.clientOrderId, ["NEW"], { status: "CANCEL" });
+    const retry = await machine.closePosition(seed.id);
+
+    expect(retry).toMatchObject({ status: "NEW", clientOrderId: `close-${seed.id}-retry-1`, reduceOnly: true });
+    expect(retry!.clientOrderId).not.toBe(first!.clientOrderId);
+    expect(gateway.placed.filter((order) => order.type === "MARKET" && order.reduceOnly)).toHaveLength(2);
+  });
+
   it("duplicate workers cannot submit the same persisted order twice", async () => {
     const { store, gateway } = setup();
     entry(store);

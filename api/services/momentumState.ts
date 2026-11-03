@@ -171,13 +171,17 @@ export class DrizzleMomentumStateStore implements MomentumStateStore {
           eq(liveOrders.intentId, positionId),
           eq(liveOrders.reduceOnly, true),
           eq(liveOrders.type, "MARKET"),
-        )).limit(2);
+        ));
         const claimExpired = row.exitPending && row.exitClaimId !== null && claimedAt !== undefined
           && now - claimedAt >= leaseMs;
-        const resumableClose = existingClose.length === 1
-          && existingClose[0].clientOrderId === `close-${positionId}`
-          && existingClose[0].symbol === row.symbol
-          && existingClose[0].status === "PENDING_SEND";
+        const resumableClose = existingClose.length > 0 && existingClose.every((order) => (
+          order.symbol === row.symbol && (
+            order.status === "CANCEL" || (
+              order.status === "PENDING_SEND"
+              && new RegExp(`^close-${positionId}(?:-retry-\\d+)?$`).test(order.clientOrderId)
+            )
+          )
+        ));
         if (existingClose.length && !(claimExpired && resumableClose)) return false;
       } else {
         const existingClose = await tx.select({ id: executionOrders.id }).from(executionOrders).where(and(

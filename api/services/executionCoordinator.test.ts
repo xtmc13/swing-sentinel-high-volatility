@@ -3,6 +3,7 @@ import {
   DEFAULT_LIVE_CONTROLS,
   DEFAULT_SETTINGS,
   type AccountSnapshot,
+  type MomentumProtection,
   type Opportunity,
   type PositionView,
   type PrivateWsHealth,
@@ -142,6 +143,11 @@ function setup(options: {
   riskLoader?: () => Promise<{ openPositions: number; pendingIntents: number; unfinishedOrders: number }>;
   now?: () => number;
   momentumStore?: InMemoryMomentumStateStore;
+  protection?: MomentumProtection;
+  structureBreak?: boolean;
+  generation?: () => number;
+  candleError?: boolean;
+  events?: string[];
 } = {}) {
   const settings: TradingSettings = { ...DEFAULT_SETTINGS, autoTrade: true, ...options.settings };
   const paper = options.paper ?? adapter();
@@ -178,7 +184,30 @@ function setup(options: {
     privateWs: options.privateWs ?? { health: () => ({ configured: true, running: true, connected: true, lastMessageAt: 1_800_000_001_000, reconnects: 0 }) },
     reconciliation: options.reconciliation ?? { health: () => ({ configured: true, running: true, lastRunAt: 1_800_000_001_000 }) },
     getOutstandingRisk: options.riskLoader ?? (async () => options.risk ?? { openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
-    market: { dataSource: options.source ?? "MAINNET" },
+    market: {
+      dataSource: options.source ?? "MAINNET",
+      get sourceGeneration() { return options.generation?.() ?? 0; },
+      getCandles: async (_symbol, interval) => {
+        if (options.candleError) throw new Error("K线读取失败");
+        const intervalMs = interval === "15m" ? 900_000 : interval === "1h" ? 3_600_000 : 14_400_000;
+        const now = options.now?.() ?? 1_800_000_001_000;
+        return Array.from({ length: 80 }, (_, index) => {
+          const time = now - (80 - index) * intervalMs;
+          return { time: time / 1000, closeTime: time + intervalMs - 1, open: 100, high: 100.5, low: 99.5, close: 100, volume: 100 };
+        });
+      },
+    },
+    evaluateExhaustion: () => ({
+      side: "LONG",
+      score: options.protection === "EXIT_CANDIDATE" ? 80 : options.protection === "REDUCE_CANDIDATE" ? 70 : options.protection === "TIGHTEN" ? 50 : options.protection === "WARN" ? 30 : 0,
+      resonanceCount: options.protection && options.protection !== "WARN" && options.protection !== "NONE" ? 2 : 0,
+      resonant: Boolean(options.protection && !["NONE", "WARN"].includes(options.protection)),
+      protection: options.protection ?? "NONE",
+      structureBreak: options.structureBreak ?? false,
+      timeframes: [],
+      reasons: [],
+    }),
+    recordEvent: async (_level, _category, message) => { options.events?.push(message); },
     env: options.env ?? {},
     now: options.now ?? (() => 1_800_000_001_000),
     momentumStore,
@@ -471,6 +500,69 @@ describe("ExecutionCoordinator", () => {
 
     await restarted.coordinator.manage();
     expect(paper.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("NONE 和 WARN 不操作持仓，WARN 事件按持仓与K线去重", async () => {
+    const protectedPosition = { ...position, strategyType: "MOMENTUM" as const, breakoutPrice: 99 };
+    const paper = adapter({ positions: async () => [protectedPosition] });
+    const events: string[] = [];
+    const none = setup({ paper, protection: "NONE", events });
+
+    await none.coordinator.manageMomentumProtection();
+    expect(paper.tightenStop).not.toHaveBeenCalled();
+    expect(paper.close).not.toHaveBeenCalled();
+
+    const warn = setup({ paper, protection: "WARN", events });
+    await warn.coordinator.manageMomentumProtection();
+    await warn.coordinator.manageMomentumProtection();
+    expect(paper.tightenStop).not.toHaveBeenCalled();
+    expect(paper.close).not.toHaveBeenCalled();
+    expect(events.filter((message) => message.includes("30/100"))).toHaveLength(1);
+  });
+
+  it.each(["TIGHTEN", "REDUCE_CANDIDATE"] as const)("%s 只收紧有效MOMENTUM持仓", async (protection) => {
+    const protectedPosition = { ...position, strategyType: "MOMENTUM" as const, breakoutPrice: 99 };
+    const paper = adapter({ positions: async () => [protectedPosition] });
+    const h = setup({ paper, protection, settings: { autoTrade: false } });
+
+    await h.coordinator.manageMomentumProtection();
+
+    expect(paper.tightenStop).toHaveBeenCalledWith(protectedPosition.id, 100, expect.stringContaining("衰竭"));
+    expect(paper.close).not.toHaveBeenCalled();
+  });
+
+  it("EXIT 在未armed且自动开仓暂停时优先使用同一adapter平仓", async () => {
+    const protectedPosition = { ...position, strategyType: "MOMENTUM" as const, breakoutPrice: 99 };
+    const paper = adapter({ positions: async () => [protectedPosition] });
+    const h = setup({ paper, protection: "EXIT_CANDIDATE", structureBreak: true, settings: { autoTrade: false }, armed: false });
+
+    await h.coordinator.manageMomentumProtection();
+
+    expect(paper.close).toHaveBeenCalledWith(protectedPosition.id, expect.stringContaining("结构破位"));
+    expect(paper.tightenStop).not.toHaveBeenCalled();
+  });
+
+  it("SWING、退出中、数据源切换和K线失败均不产生衰竭动作", async () => {
+    const swing = adapter({ positions: async () => [position] });
+    const swingSetup = setup({ paper: swing, protection: "EXIT_CANDIDATE", structureBreak: true });
+    await swingSetup.coordinator.manageMomentumProtection();
+    expect(swing.close).not.toHaveBeenCalled();
+
+    const exiting = adapter({ positions: async () => [{ ...position, strategyType: "MOMENTUM" as const, breakoutPrice: 99, exitPending: true }] });
+    const exitingSetup = setup({ paper: exiting, protection: "TIGHTEN" });
+    await exitingSetup.coordinator.manageMomentumProtection();
+    expect(exiting.tightenStop).not.toHaveBeenCalled();
+
+    let generation = 0;
+    const racing = adapter({ positions: async () => [{ ...position, strategyType: "MOMENTUM" as const, breakoutPrice: 99 }] });
+    const racingSetup = setup({ paper: racing, protection: "TIGHTEN", generation: () => ++generation });
+    await racingSetup.coordinator.manageMomentumProtection();
+    expect(racing.tightenStop).not.toHaveBeenCalled();
+
+    const failed = adapter({ positions: async () => [{ ...position, strategyType: "MOMENTUM" as const, breakoutPrice: 99 }] });
+    const failedSetup = setup({ paper: failed, protection: "TIGHTEN", candleError: true });
+    await failedSetup.coordinator.manageMomentumProtection();
+    expect(failed.tightenStop).not.toHaveBeenCalled();
   });
 
   it("过期动量信号和重复 signalId 不进入 adapter", async () => {

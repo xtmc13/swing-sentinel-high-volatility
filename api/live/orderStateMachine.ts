@@ -605,18 +605,28 @@ export class OrderStateMachine {
   async closePosition(positionId: string): Promise<LiveOrder | null> {
     const position = await this.store.getPosition(positionId);
     if (!position || position.status !== "OPEN" || compareDecimals(position.quantity, "0") <= 0) return null;
-    const clientOrderId = `close-${positionId}`;
-    const reuse = async () => {
-      const existing = await this.store.getOrder(clientOrderId);
+    let clientOrderId = `close-${positionId}`;
+    const reuse = async (id: string) => {
+      const existing = await this.store.getOrder(id);
       if (!existing) return null;
       if (existing.intentId !== positionId || existing.symbol !== position.symbol
         || existing.type !== "MARKET" || !existing.reduceOnly) {
         throw new Error("Deterministic close order ownership mismatch");
       }
-      return existing.status === "PENDING_SEND" ? this.submit(clientOrderId) : existing;
+      return existing.status === "PENDING_SEND" ? this.submit(id) : existing;
     };
-    const existing = await reuse();
-    if (existing) return existing;
+    const closeOrders = (await this.store.listOrders()).filter((order) => order.intentId === positionId
+      && order.type === "MARKET" && order.reduceOnly
+      && new RegExp(`^close-${positionId}(?:-retry-\\d+)?$`).test(order.clientOrderId));
+    const latest = closeOrders.at(-1);
+    if (latest) {
+      const reused = await reuse(latest.clientOrderId);
+      if (latest.status !== "CANCEL") return reused;
+      const retry = closeOrders.filter((order) => order.status === "CANCEL").length;
+      clientOrderId = `close-${positionId}-retry-${retry}`;
+      const raced = await reuse(clientOrderId);
+      if (raced) return raced;
+    }
     const order: LiveOrder = {
       id: this.id(),
       intentId: position.id,
@@ -638,7 +648,7 @@ export class OrderStateMachine {
     try {
       await this.createOrder(order);
     } catch (error) {
-      const raced = await reuse();
+      const raced = await reuse(clientOrderId);
       if (!raced) throw error;
       return raced;
     }

@@ -239,14 +239,20 @@ function useMomentumClaimDatabase(store: InMemoryLiveOrderStore, positionId: str
   const tx = {
     select: () => ({
       from: (table: unknown) => ({
-        where: () => ({
-          limit: (count: number) => table === livePositions
-            ? { for: async () => [position] }
+        where: () => {
+          const read = () => table === livePositions
+            ? Promise.resolve([position])
             : table === liveOrders
               ? store.listOrders().then((orders) => orders.filter((order) => order.intentId === positionId
-                && order.reduceOnly && order.type === "MARKET").slice(0, count))
-              : Promise.reject(new Error("Unexpected claim table")),
-        }),
+                && order.reduceOnly && order.type === "MARKET"))
+              : Promise.reject(new Error("Unexpected claim table"));
+          return {
+            limit: (count: number) => table === livePositions
+              ? { for: async () => [position] }
+              : read().then((rows) => rows.slice(0, count)),
+            then: (resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) => read().then(resolve, reject),
+          };
+        },
       }),
     }),
     update: (table: unknown) => {
@@ -809,6 +815,38 @@ describe("mainnet live execution adapter", () => {
 
     expect(h.gateway.placed.filter((request) => request.type === "MARKET")).toHaveLength(1);
     expect((await h.store.listOrders()).filter((order) => order.type === "MARKET" && order.reduceOnly)).toHaveLength(1);
+  });
+
+  it("cancelled unfilled LIVE close can claim and submit one controlled retry", async () => {
+    const h = setup();
+    await h.adapter.open(opportunity);
+    const positionId = h.created[0].id;
+    await h.adapter.handleFill(`${positionId}-entry`, {
+      exchangeTradeId: "cancel-close-retry-fill",
+      exchangeOrderId: "500",
+      symbol: "BTCUSDT",
+      side: "BUY",
+      price: "100",
+      quantity: "2",
+      commission: "0.1",
+      commissionAsset: "USDT",
+      realizedPnl: "0",
+      isMaker: false,
+      executedAt: 10,
+    }, seedFor(h.created[0]));
+    useMomentumClaimDatabase(h.store, positionId);
+    const claims = new DrizzleMomentumStateStore();
+    const now = 1_800_000_001_000;
+    expect(await claims.claimExit("LIVE_MAINNET", positionId, "衰竭平仓", "claim-first", now, 5_000)).toBe(true);
+
+    await h.adapter.close(positionId, "衰竭平仓");
+    await h.store.transitionOrder(`close-${positionId}`, ["NEW"], { status: "CANCEL" });
+    expect(await claims.claimExit("LIVE_MAINNET", positionId, "衰竭平仓", "claim-retry", now + 5_001, 5_000)).toBe(true);
+    const retry = await h.adapter.close(positionId, "衰竭平仓");
+
+    expect(retry).toMatchObject({ ok: true, unsettled: true });
+    expect(h.gateway.placed.filter((request) => request.type === "MARKET" && request.reduceOnly)).toHaveLength(2);
+    expect((await h.store.listOrders()).filter((order) => order.type === "MARKET" && order.reduceOnly)).toHaveLength(2);
   });
 
   it("live emergency pauses auto trading and paper reset is disabled", async () => {

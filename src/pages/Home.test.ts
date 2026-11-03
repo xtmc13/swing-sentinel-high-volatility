@@ -6,6 +6,7 @@ import { DEFAULT_SETTINGS } from "@contracts/trading";
 const view = vi.hoisted(() => ({
   executionMode: "PAPER" as "PAPER" | "LIVE_MAINNET",
   valuationValid: true,
+  dailyLocked: false,
 }));
 
 vi.mock("@/components/terminal-context", () => ({
@@ -15,14 +16,14 @@ vi.mock("@/components/terminal-context", () => ({
       lastScanAt: null,
       settings: { ...DEFAULT_SETTINGS, executionMode: view.executionMode },
       account: {
-        equity: view.valuationValid ? 100_000 : 0,
+        equity: view.valuationValid ? 100_000 : Number.NaN,
         availableMargin: 0,
         usedMargin: 0,
         todayPnl: 0,
         todayPnlPct: 0,
         valuationValid: view.valuationValid,
         valuationIssues: view.valuationValid ? [] : ["交易所账户接口不可用"],
-        dailyLocked: false,
+        dailyLocked: view.dailyLocked,
       },
       markets: [],
       opportunities: [],
@@ -67,6 +68,7 @@ describe("Home 主账户指标", () => {
   beforeEach(() => {
     view.executionMode = "PAPER";
     view.valuationValid = true;
+    view.dailyLocked = false;
   });
 
   it.each(["PAPER", "LIVE_MAINNET"] as const)("%s 使用统一的账户权益标签", (executionMode) => {
@@ -78,14 +80,24 @@ describe("Home 主账户指标", () => {
     expect(html).not.toContain("真实账户权益");
   });
 
-  it("LIVE 账户接口不可用时继续显示零值和估值不可用，不填充模拟余额", () => {
+  it("LIVE 账户接口不可用时显示固定标签和零值，并保留真实日损锁定警告", () => {
     view.executionMode = "LIVE_MAINNET";
     view.valuationValid = false;
+    view.dailyLocked = true;
     const html = renderToStaticMarkup(createElement(Home));
 
     expect(html).toContain("账户权益");
-    expect(html).toContain("估值不可用");
-    expect(html).toContain("交易所账户接口不可用");
+    expect(html).toContain("0.00");
+    expect(html).toContain("USDT");
+    expect(html).toContain("+0.00%");
+    expect(html).toContain("% 权益");
+    expect(html).toContain("当日亏损熔断已锁存");
+    expect(html).not.toContain("当日已锁定");
+    expect(html).not.toContain("估值不可用");
+    expect(html).not.toContain("交易所账户接口不可用");
     expect(html).not.toContain("100,000");
+    expect(html).not.toContain("NaN");
+    expect(html).not.toContain("N/A");
+    expect(html).not.toContain("—");
   });
 });

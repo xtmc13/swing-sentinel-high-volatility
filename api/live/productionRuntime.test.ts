@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_SETTINGS, type ExecutionMode } from "@contracts/trading";
-import type { ExecutionAdapter } from "../services/executionCoordinator";
+import { DEFAULT_SETTINGS, type ExecutionMode, type Opportunity } from "@contracts/trading";
+import { createExecutionCoordinator, type ExecutionAdapter } from "../services/executionCoordinator";
 import { createProductionLiveRuntime, type ProductionLiveServices } from "./productionRuntime";
 
 function adapter(): ExecutionAdapter {
@@ -80,12 +80,42 @@ describe("production live runtime gates", () => {
     expect(h.runtime.privateWs.health().configured).toBe(false);
   });
 
-  it("unarmed LIVE without outstanding risk stays unconstructed", async () => {
-    const createServices = vi.fn(services);
-    const h = setup({ createServices });
+  it("unarmed LIVE starts read-only account access while order submission remains blocked", async () => {
+    const created = services();
+    const start = vi.fn(created.start);
+    const open = vi.fn(created.adapter.open);
+    created.start = start;
+    created.adapter.open = open;
+    const h = setup({ createServices: () => created });
+    const coordinator = createExecutionCoordinator({
+      getSettings: async () => h.settings,
+      getLiveControls: async () => ({ armed: false }),
+      getLiveAdapter: h.runtime.getLiveAdapter,
+      runLivePreflight: h.runtime.runLivePreflight,
+      getLiveOperations: async () => ({
+        orders: [], protectionOrders: [], unsettledIntents: [], reconciliationIssues: [],
+        reconciliationSummary: { openIssues: 0, severeIssues: 0, lastDetectedAt: null },
+      }),
+      getOutstandingRisk: async () => ({ openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
+      credentialsConfigured: async () => true,
+      env: { LIVE_TRADING_ENABLED: "true" },
+    });
 
-    await expect(h.runtime.getLiveAdapter()).resolves.toBeNull();
-    expect(createServices).not.toHaveBeenCalled();
+    await expect(coordinator.snapshot()).resolves.toMatchObject({ account: { equity: 1 }, positions: [] });
+    expect(start).toHaveBeenCalledTimes(1);
+
+    const signal: Opportunity = {
+      id: "BTCUSDT-LONG", signalId: "test-only", strategyType: "SWING", symbol: "BTCUSDT", side: "LONG",
+      status: "READY", score: 90, regime: "多头共振", entry: 100, stop: 99, target: 103,
+      stopDistancePct: 1, rewardRisk: 3, leverage: 2, marginPct: 2, riskPct: 0.35,
+      reasons: ["测试信号"], signalCloseTime: 1_800_000_000_000, signalTime: 1_800_000_000_000,
+      expiryTime: 1_800_000_015_000, triggerPrice: 100, limitPrice: 100.1, stateVersion: 0,
+      sourceGeneration: 0, detectorVersion: "test", configVersion: "test", atr15: 1,
+      createdAt: new Date(1_800_000_000_000).toISOString(),
+    };
+    await expect(coordinator.open(signal)).resolves.toEqual({ ok: false, reason: "主网执行未 armed" });
+    expect(open).not.toHaveBeenCalled();
+    await h.runtime.stop();
   });
 
   it("accepts stored credential status without env credentials while preserving every other gate", async () => {

@@ -3,7 +3,7 @@ import { ArrowDownUp, Search } from "lucide-react";
 import { useNavigate } from "react-router";
 import { useTerminal } from "@/components/terminal-context";
 import VolatilityBadge from "@/components/VolatilityBadge";
-import { formatAge, formatCompact, formatPercent, formatPrice } from "@/lib/format";
+import { formatAge, formatCompact, formatNumber, formatPercent, formatPrice } from "@/lib/format";
 
 export default function MarketsPage() {
   const { data, setSelectedSymbol } = useTerminal();
@@ -58,7 +58,7 @@ export default function MarketsPage() {
                   <th scope="row" className="px-4 py-3 font-normal"><button type="button" onClick={() => { setSelectedSymbol(market.symbol); navigate("/"); }} className="min-h-8 text-left hover:text-[#22d3ee]"><span className="block font-medium text-[#dce5f1]">{market.baseAsset}<span className="text-[#596983]">/USDT</span></span><span className="block text-[9px] text-[#8290aa]">流动性 {market.liquidityScore.toFixed(0)}</span></button></th>
                   <td className="px-3 py-3"><VolatilityBadge mode={state?.mode ?? null} /><div className={`reading mt-1 max-w-[170px] text-[9px] ${quality?.valid === false ? "data-negative" : "text-[#8290aa]"}`}>{quality ? (quality.valid ? "行情有效" : quality.reasons.join(" · ")) : "等待行情质量"}</div></td>
                   <td className="px-3 py-3 text-[9px] leading-5 text-[#91a0b8]"><div>盘口 {formatAge(quality?.bookAgeMs ?? null)}</div><div>标记 {formatAge(quality?.markAgeMs ?? null)}</div><div>1M {formatAge(quality?.candleAgeMs ?? null)}</div></td>
-                  <td className="px-3 py-3 text-[9px] leading-5"><div>ATR {state?.metrics.atrQuantile == null ? "—" : `P${(state.metrics.atrQuantile * 100).toFixed(1)}`}</div><div>跳动 {state?.metrics.tickSigma == null ? "—" : `${state.metrics.tickSigma.toFixed(2)}σ`}</div><div>点差比 {state?.metrics.spreadRatio?.toFixed(2) ?? "—"}×</div></td>
+                  <td className="px-3 py-3 text-[9px] leading-5"><div>ATR P{formatNumber((state?.metrics.atrQuantile ?? 0) * 100, 1)}</div><div>跳动 {formatNumber(state?.metrics.tickSigma ?? 0, 2)}σ</div><div>点差比 {formatNumber(state?.metrics.spreadRatio ?? 0, 2)}×</div></td>
                   <td className="px-3 py-3"><div>{formatPrice(market.price)}</div><div className="text-[9px] text-[#8290aa]">M {formatPrice(market.markPrice)}</div></td>
                   <td className={`px-3 py-3 ${market.change24h >= 0 ? "data-positive" : "data-negative"}`}>{formatPercent(market.change24h)}</td>
                   <td className="px-3 py-3">{formatCompact(market.quoteVolume)}</td>

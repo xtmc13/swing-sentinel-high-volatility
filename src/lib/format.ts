@@ -1,33 +1,33 @@
 export function formatNumber(value: number, digits = 2) {
-  if (!Number.isFinite(value)) return "—";
-  return value.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  const normalized = Number.isFinite(value) ? value : 0;
+  return normalized.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
 export function formatSignedNumber(value: number, valid = true, digits = 2) {
-  if (!valid || !Number.isFinite(value)) return "—";
-  return `${value > 0 ? "+" : ""}${formatNumber(value, digits)}`;
+  const normalized = valid && Number.isFinite(value) ? value : 0;
+  return `${normalized > 0 ? "+" : ""}${formatNumber(normalized, digits)}`;
 }
 
 export function formatPrice(value: number) {
-  if (!Number.isFinite(value) || value <= 0) return "—";
-  const digits = value >= 1000 ? 2 : value >= 10 ? 3 : value >= 0.1 ? 5 : 7;
-  return value.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  const normalized = Number.isFinite(value) && value > 0 ? value : 0;
+  const digits = normalized >= 1000 ? 2 : normalized >= 10 ? 3 : normalized >= 0.1 ? 5 : 7;
+  return normalized.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
 export function formatCompact(value: number) {
-  if (!Number.isFinite(value)) return "—";
-  return Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 2 }).format(value);
+  const normalized = Number.isFinite(value) ? value : 0;
+  return Intl.NumberFormat("zh-CN", { notation: "compact", maximumFractionDigits: 2 }).format(normalized);
 }
 
 export function formatPercent(value: number, digits = 2) {
-  if (!Number.isFinite(value)) return "—";
-  return `${value >= 0 ? "+" : ""}${formatNumber(value, digits)}%`;
+  const normalized = Number.isFinite(value) ? value : 0;
+  return `${normalized >= 0 ? "+" : ""}${formatNumber(normalized, digits)}%`;
 }
 
 export function formatTime(value: string | Date | null, withDate = false) {
-  if (!value) return "—";
+  if (!value) return "0";
   const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
+  if (Number.isNaN(date.getTime())) return "0";
   return date.toLocaleString("zh-CN", {
     timeZone: "UTC", hour12: false,
     month: withDate ? "2-digit" : undefined, day: withDate ? "2-digit" : undefined,
@@ -36,8 +36,7 @@ export function formatTime(value: string | Date | null, withDate = false) {
 }
 
 export function formatAge(value: number | null) {
-  if (value === null || !Number.isFinite(value)) return "—";
-  const milliseconds = Math.max(0, value);
+  const milliseconds = value === null || !Number.isFinite(value) ? 0 : Math.max(0, value);
   if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`;
   const seconds = milliseconds / 1000;
   if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} 秒`;
@@ -45,7 +44,7 @@ export function formatAge(value: number | null) {
 }
 
 export function formatMissedMessages(value: number | null) {
-  return value === null ? "N/A" : `${value} 条`;
+  return `${value === null || !Number.isFinite(value) ? 0 : value} 条`;
 }
 
 export function sideLabel(side: "LONG" | "SHORT") { return side === "LONG" ? "做多" : "做空"; }

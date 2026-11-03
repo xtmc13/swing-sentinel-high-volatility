@@ -26,9 +26,9 @@ export default function Home() {
   const live = data.settings.executionMode === "LIVE_MAINNET";
   const transitions = data.events.filter((event) => event.category === "三态迁移");
   const metrics = [
-    { label: "账户权益", value: formatNumber(data.account.equity), suffix: data.account.valuationValid ? "USDT" : "估值不可用", tone: !data.account.valuationValid ? "data-warning" : data.account.equity >= 100000 ? "data-positive" : "data-negative" },
+    { label: "账户权益", value: formatNumber(data.account.equity), suffix: "USDT", tone: !data.account.valuationValid ? "data-warning" : data.account.equity >= 100000 ? "data-positive" : "data-negative" },
     { label: "可用保证金", value: formatNumber(data.account.availableMargin), suffix: "USDT", tone: "text-[#e7edf7]" },
-    { label: "今日净盈亏", value: `${data.account.todayPnl >= 0 ? "+" : ""}${formatNumber(data.account.todayPnl)}`, suffix: data.account.dailyLocked ? "当日已锁定" : formatPercent(data.account.todayPnlPct), tone: !data.account.valuationValid ? "data-warning" : data.account.todayPnl >= 0 ? "data-positive" : "data-negative" },
+    { label: "今日净盈亏", value: `${data.account.todayPnl >= 0 ? "+" : ""}${formatNumber(data.account.todayPnl)}`, suffix: formatPercent(data.account.todayPnlPct), tone: !data.account.valuationValid ? "data-warning" : data.account.todayPnl >= 0 ? "data-positive" : "data-negative" },
     { label: "当前止损风险", value: formatNumber(openRisk), suffix: "% 权益", tone: openRisk > 1 ? "data-warning" : "data-live" },
   ];
 
@@ -53,11 +53,6 @@ export default function Home() {
         </div>
       )}
 
-      {!data.account.valuationValid && (
-        <div className="mb-3 border border-[#7f1d1d] bg-[#1c1015] px-4 py-3 text-[11px] leading-5 text-[#fca5a5]" role="alert">
-          持仓估值不可用，页面以“—”显示未知盈亏，不再按开仓价伪装成 0。权益快照已暂停写入。{data.account.valuationIssues.length > 0 && <span className="block mt-1">{data.account.valuationIssues.join("；")}</span>}
-        </div>
-      )}
       {data.account.dailyLocked && (
         <div className="mb-3 border border-[#55461e] bg-[#17150e] px-4 py-3 text-[11px] text-[#fbbf24]" role="alert">当日亏损熔断已锁存；即使价格恢复，也要到下一 UTC 日才允许新增持仓。</div>
       )}
@@ -145,7 +140,7 @@ export default function Home() {
                   ["畸形消息", `${data.monitor.malformedMessages} 条`],
                 ].map(([label, value]) => <div key={label}><dt className="text-[#8290aa]">{label}</dt><dd className="mt-1">{value}</dd></div>)}
               </dl>
-              <div className="mt-3 border-t border-[#141f33] pt-2 text-[9px] text-[#596983]">最近消息 {data.monitor.lastMessageAt ? `${formatTime(new Date(data.monitor.lastMessageAt))} UTC` : "—"}</div>
+              <div className="mt-3 border-t border-[#141f33] pt-2 text-[9px] text-[#596983]">最近消息 {data.monitor.lastMessageAt ? `${formatTime(new Date(data.monitor.lastMessageAt))} UTC` : "0"}</div>
             </div>
           </section>
 

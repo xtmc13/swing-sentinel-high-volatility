@@ -37,6 +37,7 @@ export function createProductionLiveRuntime(options: ProductionLiveRuntimeOption
   let generation = 0;
 
   async function getLiveAdapter(humanApproved = false): Promise<ExecutionAdapter | null> {
+    void humanApproved;
     while (true) {
       if (stopping) await stopping;
       const requestedGeneration = generation;
@@ -50,8 +51,6 @@ export function createProductionLiveRuntime(options: ProductionLiveRuntimeOption
         if (requestedGeneration === generation) return current.adapter;
         continue;
       }
-      const controls = await options.getLiveControls();
-      if (!controls.armed && !humanApproved && !await options.hasOutstandingLiveRisk()) return null;
       if (requestedGeneration !== generation) continue;
       let pending = starting;
       if (!pending) {

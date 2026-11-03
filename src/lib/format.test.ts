@@ -1,20 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { formatMissedMessages, formatSignedNumber } from "./format";
+import {
+  formatAge,
+  formatCompact,
+  formatMissedMessages,
+  formatNumber,
+  formatPercent,
+  formatPrice,
+  formatSignedNumber,
+  formatTime,
+} from "./format";
 
-describe("WebSocket 丢包指标展示", () => {
-  it("不可用时显示 N/A 而不是测量值 0", () => {
-    expect(formatMissedMessages(null)).toBe("N/A");
-    expect(formatMissedMessages(null)).not.toBe("0 条");
+describe("不可用数值的固定零值展示", () => {
+  it("数值格式化器使用对应精度的零，不输出 NaN 或占位符", () => {
+    expect(formatNumber(Number.NaN)).toBe("0.00");
+    expect(formatNumber(Number.POSITIVE_INFINITY, 0)).toBe("0");
+    expect(formatSignedNumber(0, false)).toBe("0.00");
+    expect(formatSignedNumber(Number.NaN, false)).toBe("0.00");
+    expect(formatPrice(Number.NaN)).toBe("0.0000000");
+    expect(formatPrice(0)).toBe("0.0000000");
+    expect(formatCompact(Number.NaN)).toBe("0");
+    expect(formatPercent(Number.NaN)).toBe("+0.00%");
+    expect(formatAge(null)).toBe("0 ms");
+    expect(formatMissedMessages(null)).toBe("0 条");
+    expect(formatTime(null)).toBe("0");
+    expect(formatTime("invalid")).toBe("0");
   });
 
-  it("保留未来可用计数和当前其他数值指标的展示语义", () => {
+  it("保留可用数值的展示语义", () => {
     expect(formatMissedMessages(0)).toBe("0 条");
     expect(formatMissedMessages(3)).toBe("3 条");
-  });
-
-  it("未知 LIVE 盈亏不伪装成零，有效零仍显示数值", () => {
-    expect(formatSignedNumber(0, false)).toBe("—");
-    expect(formatSignedNumber(Number.NaN, false)).toBe("—");
     expect(formatSignedNumber(0, true)).toBe("0.00");
     expect(formatSignedNumber(2, true)).toBe("+2.00");
   });

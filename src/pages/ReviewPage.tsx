@@ -4,6 +4,7 @@ import { Layers3, Play, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { trpc } from "@/providers/trpc";
 import { useTerminal } from "@/components/terminal-context";
+import { MomentumExhaustionDiagnostics } from "@/components/MomentumExhaustion";
 import type { BacktestResult, PortfolioBacktestResult } from "@contracts/trading";
 import { formatNumber, formatPercent, formatPrice, formatTime, sideColor, sideLabel } from "@/lib/format";
 
@@ -108,6 +109,8 @@ export default function ReviewPage() {
               <section className="border-b border-[#141f33] p-4"><h3 className="terminal-label">日损与数据缺口</h3><ul className="mt-3 space-y-2 text-[9px]">{portfolio.dailyLossLocks.map((item) => <li key={`${item.day}-${item.time}`} className="data-warning">{item.day} · 日损锁定 · 权益 {formatNumber(item.equity)}</li>)}{portfolio.dataGaps.map((gap) => <li key={gap} className="data-negative">{gap}</li>)}{!portfolio.dailyLossLocks.length && !portfolio.dataGaps.length && <li className="text-[#8290aa]">无日损锁定或数据缺口</li>}</ul></section>
             </div>
           </section>}
+
+          {portfolio && <section className="panel mb-3"><MomentumExhaustionDiagnostics events={portfolio.momentumExhaustion} /></section>}
 
           <section className="panel mb-3">
             <div className="border-b border-[#1a2540] px-4 py-3"><h2 className="terminal-label">BACKTEST TRADES</h2></div>

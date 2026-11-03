@@ -76,6 +76,8 @@ describe("已收盘 K 线正式信号", () => {
 
     expect(result.status).toBe("READY");
     expect(result.side).toBe("LONG");
+    expect(result.score).toBe(93);
+    expect(result.momentumExhaustion).toMatchObject({ score: 28, resonanceCount: 0, resonant: false, protection: "NONE" });
     expect(result.signalCloseTime).toBe(NOW - 300_000);
     expect(result.signalTime).toBe(NOW - 300_000);
     expect(result.expiryTime).toBe(NOW - 285_000);

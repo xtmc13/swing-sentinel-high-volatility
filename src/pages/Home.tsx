@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { trpc } from "@/providers/trpc";
 import { useTerminal } from "@/components/terminal-context";
 import MarketChart from "@/components/MarketChart";
+import { OpportunityMomentumExhaustion } from "@/components/MomentumExhaustion";
 import { formatMissedMessages, formatNumber, formatPercent, formatPrice, formatSignedNumber, formatTime, sideColor, sideLabel } from "@/lib/format";
 import { closeExecutionFeedback } from "@/lib/executionFeedback";
 
@@ -77,15 +78,16 @@ export default function Home() {
               <span className="text-[10px] text-[#8290aa]">{data.lastScanAt ? `${formatTime(data.lastScanAt)} UTC` : "尚未扫描"}</span>
             </div>
             <div className="overflow-x-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#22d3ee]" tabIndex={0} role="region" aria-labelledby="opportunity-table-caption">
-              <table className="w-full min-w-[720px] border-collapse text-left text-[11px]">
-                <caption id="opportunity-table-caption" className="sr-only">当前合约机会、方向、评分、进场与风险</caption>
-                <thead><tr className="border-b border-[#1a2540] text-[9px] uppercase tracking-[0.12em] text-[#8290aa]"><th scope="col" className="px-4 py-3 font-normal">合约</th><th scope="col" className="px-3 py-3 font-normal">方向／状态</th><th scope="col" className="px-3 py-3 font-normal">评分</th><th scope="col" className="hidden px-3 py-3 font-normal md:table-cell">进场／失效</th><th scope="col" className="hidden px-3 py-3 font-normal lg:table-cell">判断依据</th><th scope="col" className="px-3 py-3 font-normal">杠杆</th></tr></thead>
+              <table className="w-full min-w-[940px] border-collapse text-left text-[11px]">
+                <caption id="opportunity-table-caption" className="sr-only">当前合约机会、方向、评分、动能衰竭、进场与风险</caption>
+                <thead><tr className="border-b border-[#1a2540] text-[9px] uppercase tracking-[0.12em] text-[#8290aa]"><th scope="col" className="px-4 py-3 font-normal">合约</th><th scope="col" className="px-3 py-3 font-normal">方向／状态</th><th scope="col" className="px-3 py-3 font-normal">评分</th><th scope="col" className="px-3 py-3 font-normal">动能衰竭</th><th scope="col" className="hidden px-3 py-3 font-normal md:table-cell">进场／失效</th><th scope="col" className="hidden px-3 py-3 font-normal lg:table-cell">判断依据</th><th scope="col" className="px-3 py-3 font-normal">杠杆</th></tr></thead>
                 <tbody>
                   {data.opportunities.map((opportunity) => (
                     <tr key={opportunity.id} className={`border-b border-[#141f33] transition-colors duration-150 hover:bg-[#101a2a] ${selectedSymbol === opportunity.symbol ? "bg-[#0f1827]" : ""}`}>
                       <th scope="row" className="px-4 py-3 font-normal"><button type="button" onClick={() => setSelectedSymbol(opportunity.symbol)} className="min-h-8 text-left hover:text-[#22d3ee]"><span className="block font-medium text-[#dce5f1]">{opportunity.symbol.replace("USDT", "")}</span><span className="block text-[9px] text-[#8290aa]">{opportunity.regime}</span></button></th>
                       <td className="px-3 py-3"><span className={sideColor(opportunity.side)}>{sideLabel(opportunity.side)}</span><div className={`mt-1 text-[9px] ${opportunity.status === "READY" ? "data-positive" : opportunity.status === "BLOCKED" ? "data-negative" : "data-warning"}`}>{opportunity.status === "READY" ? "可执行" : opportunity.status === "BLOCKED" ? "已阻断" : "等待中"}</div></td>
                       <td className="px-3 py-3"><span className={opportunity.score >= 70 ? "data-positive" : "text-[#c5d0df]"}>{opportunity.score}</span><span className="text-[#596983]">/100</span></td>
+                      <td className="px-3 py-3"><OpportunityMomentumExhaustion momentumExhaustion={opportunity.momentumExhaustion} reasons={opportunity.reasons} /></td>
                       <td className="hidden px-3 py-3 md:table-cell"><div>{formatPrice(opportunity.entry)}</div><div className="text-[9px] text-[#f87171]">SL {formatPrice(opportunity.stop)}</div></td>
                       <td className="hidden max-w-[300px] px-3 py-3 text-[10px] leading-5 text-[#91a0b8] lg:table-cell">{opportunity.reasons.join(" · ")}</td>
                       <td className="px-3 py-3"><span className="data-warning">{opportunity.leverage}×</span><div className="text-[9px] text-[#8290aa]">风险 {opportunity.riskPct}%</div></td>

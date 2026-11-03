@@ -19,6 +19,7 @@ import { persistBacktestResult } from "./backtest";
 import { atrSeries, maxDrawdown } from "./indicators";
 import { alignedCorrelation, managePositionPrice } from "./risk";
 import { analyzeClosedCandles, type AnalyzeClosedCandlesInput } from "./strategy";
+import { evaluateMomentumExhaustion } from "./momentumExhaustion";
 import { evaluateVolatility, type EvaluateVolatilityInput } from "./volatility";
 import { binance, type SymbolMeta } from "./binance";
 
@@ -266,6 +267,17 @@ export async function loadPortfolioData(
   return Object.fromEntries(entries);
 }
 
+function candlesClosedAt(candles: Candle[], closeTime: number) {
+  let low = 0;
+  let high = candles.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (candles[middle].closeTime <= closeTime) low = middle + 1;
+    else high = middle;
+  }
+  return candles.slice(0, low);
+}
+
 export async function runPortfolioBacktest(
   symbols: string[],
   timeframe: PortfolioTimeframe,
@@ -343,6 +355,7 @@ export async function runPortfolioBacktest(
   const riskRejections: PortfolioRiskRejection[] = [];
   const transitions: PortfolioVolatilityTransition[] = [];
   const dailyLossLocks: PortfolioBacktestResult["dailyLossLocks"] = [];
+  const momentumExhaustion: NonNullable<PortfolioBacktestResult["momentumExhaustion"]> = [];
   const curve: { time: number; equity: number }[] = [{ time: timeline[0].time, equity: initialEquity }];
   const timeoutBars = Math.max(1, Math.round(72 * 3_600_000 / INTERVAL_MS[timeframe]));
 
@@ -589,6 +602,27 @@ export async function runPortfolioBacktest(
       adverseAdjustment += (adversePrice - position.entryPrice) * position.qty * dir;
     }
 
+    // Shadow diagnostics never change historical stops, fills or equity.
+    for (const position of positions.values()) {
+      const item = data[position.symbol];
+      const assessment = evaluateMomentumExhaustion({
+        side: position.side,
+        candles15m: candlesClosedAt(item.candles["15m"], closeTime),
+        candles1h: candlesClosedAt(item.candles["1h"], closeTime),
+        candles4h: candlesClosedAt(item.candles["4h"], closeTime),
+        now: closeTime,
+      });
+      if (assessment.protection !== "NONE") momentumExhaustion.push({
+        time: closeTime,
+        symbol: position.symbol,
+        side: position.side,
+        score: assessment.score,
+        resonanceCount: assessment.resonanceCount,
+        protection: assessment.protection,
+        structureBreak: assessment.structureBreak,
+      });
+    }
+
     curve.push({ time: timeline[index].time, equity: cash + adverseAdjustment });
     const closeEquity = equityAt((position) => currentBars.get(position.symbol)!.close);
     curve.push({ time: closeTime / 1000, equity: closeEquity });
@@ -699,6 +733,7 @@ export async function runPortfolioBacktest(
     transitions,
     dailyLossLocks,
     dataGaps: [],
+    momentumExhaustion,
   };
   if (dependencies.persist !== false) await persistBacktestResult(result);
   return result;

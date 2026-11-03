@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isAdminRequest } from "./admin";
+import { isAdminRequest, isAdminAuthDisabled } from "./admin";
 const SECRET = "test-admin-secret-with-at-least-32-characters";
 const request = (authorization?: string) => new Request("http://localhost/api/trpc/trading.adminStatus", { headers: authorization ? { authorization } : undefined });
 describe("管理员令牌校验", () => {
@@ -12,5 +12,19 @@ describe("管理员令牌校验", () => {
   it("空密钥和超长令牌失败关闭", () => {
     expect(isAdminRequest(request("Bearer "), "")).toBe(false);
     expect(isAdminRequest(request(`Bearer ${"x".repeat(513)}`), SECRET)).toBe(false);
+  });
+  it("仅显式本机开关关闭认证，默认仍需要认证", () => {
+    const previous = process.env.ADMIN_AUTH_DISABLED;
+    try {
+      delete process.env.ADMIN_AUTH_DISABLED;
+      expect(isAdminAuthDisabled()).toBe(false);
+      process.env.ADMIN_AUTH_DISABLED = "true";
+      expect(isAdminAuthDisabled()).toBe(true);
+      process.env.ADMIN_AUTH_DISABLED = "false";
+      expect(isAdminAuthDisabled()).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.ADMIN_AUTH_DISABLED;
+      else process.env.ADMIN_AUTH_DISABLED = previous;
+    }
   });
 });

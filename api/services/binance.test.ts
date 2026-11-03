@@ -71,6 +71,18 @@ describe("单源 REST 行情", () => {
     expect(client.sourceGeneration).toBe(1);
   });
 
+  it("可通过环境变量选择测试网公开行情且不影响执行模式", () => {
+    const previous = process.env.MARKET_DATA_SOURCE;
+    process.env.MARKET_DATA_SOURCE = "TESTNET";
+    try {
+      const client = new BinanceFuturesClient({ fetch: (async () => { throw new Error("not used"); }) as typeof fetch });
+      expect(client.dataSource).toBe("TESTNET");
+    } finally {
+      if (previous === undefined) delete process.env.MARKET_DATA_SOURCE;
+      else process.env.MARKET_DATA_SOURCE = previous;
+    }
+  });
+
   it("主网失败不会回退到测试网或混合两个源", async () => {
     const calls: string[] = [];
     const fetchFake = (async (input: string | URL | Request) => {

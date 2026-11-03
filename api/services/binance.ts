@@ -188,7 +188,7 @@ export class BinanceFuturesClient {
   private candleCache = new Map<string, CacheEntry<Candle[]>>();
 
   constructor(options: BinanceClientOptions = {}) {
-    this.source = options.source ?? "MAINNET";
+    this.source = options.source ?? (process.env.MARKET_DATA_SOURCE === "TESTNET" ? "TESTNET" : "MAINNET");
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
     this.now = options.now ?? Date.now;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 7000;

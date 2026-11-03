@@ -41,7 +41,7 @@
 - 交易总览：账户、K 线、机会队列、持仓、组合风险、三态迁移和 WebSocket 指标；LIVE 估值未知时显示不可用，不以零或旧标记价代替。
 - 流动性交易池：搜索、筛选、排序，以及每币状态、数据年龄和波动指标。
 - 订单与持仓：明确区分模拟与真实成交、费用、平仓和复盘记录。
-- 风险与执行：三态与组合参数、暂停、紧急停止、模拟账户重置，以及需独立管理员确认的手动真实 canary。
+- 风险与执行：三态与组合参数、暂停、紧急停止、模拟账户重置，以及需独立确认短语的手动真实 canary。
 - 回测与复盘：单标的（以单合约组合运行）或多标的同步组合回测、历史结果和权益曲线；旧格式结果仍可读取。
 - 信号验证：1–5 个合约、900–10000 根主时间轴的后台批量回测；按时间顺序 60%／20%／20% 划分训练、验证和样本外区间，保存每个 READY 的成交或拒绝、净 R、MFE、MAE 与成交偏差，并导出全部或测试集 CSV。
 
@@ -54,7 +54,7 @@
 
 ## 配置与运行
 
-准备外部数据库并设置 `DATABASE_URL=mysql://user:password@host:port/database`。不要把生产数据库用于测试。另需设置至少 32 个字符的随机 `APP_SECRET`：它只用于本系统管理员控制鉴权，不是币安 API 密钥。可复制 `.env.example` 为 `.env` 后填写，切勿提交真实 `.env`。
+准备外部数据库并设置 `DATABASE_URL=mysql://user:password@host:port/database`。不要把生产数据库用于测试。可复制 `.env.example` 为 `.env` 后填写，切勿提交真实 `.env`。
 
 开发运行：
 
@@ -73,10 +73,10 @@ npm run check
 npm test
 npm run lint
 npm run build
-DATABASE_URL='mysql://user:password@host:port/database' APP_SECRET='replace-with-a-random-secret-of-32-plus-characters' PORT=3000 npm start
+DATABASE_URL='mysql://user:password@host:port/database' PORT=3000 npm start
 ```
 
-端口被占用时选择其他空闲端口（例如 3001），不要终止不认识的进程。只读查询保持公开；扫描、参数修改、自动交易开关、平仓、重置及回测写操作均要求 `Authorization: Bearer <APP_SECRET>`。页面顶部“解锁控制”会完成同源验证，令牌只保存在当前标签页的 `sessionStorage`。公网部署仍必须使用 HTTPS 和反向代理访问控制，不得把 `APP_SECRET` 写入前端环境变量、Git 或 URL。
+端口被占用时选择其他空闲端口（例如 3001），不要终止不认识的进程。查询和控制 API 均不要求应用内管理员令牌，页面也不提供只读模式。公网部署仍必须使用 HTTPS；如需限制访问，应由反向代理保护整个服务。
 
 ### 主网执行门控
 
@@ -84,7 +84,7 @@ DATABASE_URL='mysql://user:password@host:port/database' APP_SECRET='replace-with
 
 主网预检还要求 `BINANCE_MAINNET_ALLOWED_SYMBOLS` 显式白名单、固定 1–20 倍杠杆、one-way、关闭 multi-assets、isolated margin、真实档位/过滤值/强平数据、已连接私有 WS 与新鲜对账。最终风险使用签名 positionRisk 的持仓数量、标记价、margin、强平价和账户权益，执行日损、maxPositions、同 symbol、组合及相关性限制；flat symbol 仅使用保守估算缓冲。REST 与响应体有硬 deadline，预检网络不持有 DB 锁，transport 前以 DB 时间重查过期、armed 和 emergency generation。币安凭据可由服务器 `BINANCE_MAINNET_API_KEY`／`BINANCE_MAINNET_API_SECRET` 完整环境变量对提供，或在风险页保存为 AES-256-GCM 密文；完整环境变量对始终优先，否则读取数据库密文。后者必须在服务器设置 `CREDENTIAL_ENCRYPTION_KEY`（32 字节 base64 或 64 位十六进制），缺失或错误会失败关闭。保存、替换或删除凭据不会改变 LIVE、momentum、armed 或 autoTrade；只有成功写入后才停止已初始化的签名客户端，避免并发请求保留旧凭据，加密或数据库失败不会中断现有服务。明文不进入数据库、Rust、状态响应或日志。
 
-本轮只完成 fake/replay、独立测试库与无真实凭据验证。主网只读仍需用户提供权限受限凭据并另行确认；真实 canary 由 `trading.manualCanary` 和风险页表单触发，必须重新输入管理员令牌及 `SUBMIT LIVE CANARY`，不会开启自动交易，并仍受白名单和完整风控约束。小范围自动交易还要求真实 canary 与观察期通过。完成这些工程验证不代表已经启用实盘或能够盈利。
+本轮只完成 fake/replay、独立测试库与无真实凭据验证。主网只读仍需用户提供权限受限凭据并另行确认；真实 canary 由 `trading.manualCanary` 和风险页表单触发，必须输入 `SUBMIT LIVE CANARY`，不会开启自动交易，并仍受白名单和完整风控约束。小范围自动交易还要求真实 canary 与观察期通过。完成这些工程验证不代表已经启用实盘或能够盈利。
 
 Docker 采用多阶段构建，不复制 `.env` 进镜像：
 

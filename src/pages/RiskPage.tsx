@@ -21,11 +21,10 @@ export default function RiskPage() {
 function RiskPageContent() {
   const { data, refresh } = useTerminal();
   const [form, setForm] = useState<TradingSettings>(data.settings);
-  const [adminSecret, setAdminSecret] = useState("");
   const [confirmationPhrase, setConfirmationPhrase] = useState("");
   const [canary, setCanary] = useState({
     symbol: "BTCUSDT", side: "LONG" as "LONG" | "SHORT", limitPrice: "", stopPrice: "",
-    adminSecret: "", confirmationPhrase: "",
+    confirmationPhrase: "",
   });
   const save = trpc.trading.saveSettings.useMutation({
     onSuccess: async () => { toast.success("风险与执行参数已保存，下一轮扫描生效"); refresh(); },
@@ -38,7 +37,6 @@ function RiskPageContent() {
   const setControls = trpc.trading.setLiveControls.useMutation({
     onSuccess: async (result) => {
       toast.success(result.armed ? "主网已 armed；每次提交仍重新执行全部门控" : "主网已 disarm");
-      setAdminSecret("");
       setConfirmationPhrase("");
       refresh();
     },
@@ -48,7 +46,7 @@ function RiskPageContent() {
     onSuccess: async (result) => {
       if (result.ok) toast.success(`真实 canary 已提交；等待成交回报：${result.reason}`);
       else toast.error(`canary 未提交：${result.reason}`);
-      setCanary((current) => ({ ...current, adminSecret: "", confirmationPhrase: "" }));
+      setCanary((current) => ({ ...current, confirmationPhrase: "" }));
       refresh();
     },
     onError: (error) => toast.error(error.message),
@@ -175,10 +173,9 @@ function RiskPageContent() {
             {data.execution.armed ? (
               <button type="button" className="btn-danger mt-3 w-full" disabled={setControls.isPending} onClick={() => setControls.mutate({ armed: false })}>立即 disarm</button>
             ) : (
-              <form className="mt-4 space-y-3" onSubmit={(event) => { event.preventDefault(); setControls.mutate({ armed: true, adminSecret, confirmationPhrase }); }}>
-                <label className="block"><span className="terminal-label">重新输入管理员令牌</span><input className="terminal-input mt-2 !text-[11px]" type="password" autoComplete="off" required minLength={32} value={adminSecret} onChange={(event) => setAdminSecret(event.target.value)} /></label>
+              <form className="mt-4 space-y-3" onSubmit={(event) => { event.preventDefault(); setControls.mutate({ armed: true, confirmationPhrase }); }}>
                 <label className="block"><span className="terminal-label">确认短语</span><input className="terminal-input mt-2 !text-[11px]" required value={confirmationPhrase} onChange={(event) => setConfirmationPhrase(event.target.value)} placeholder="ARM LIVE MAINNET" /></label>
-                <button type="submit" className="btn-danger w-full" disabled={setControls.isPending || data.settings.executionMode !== "LIVE_MAINNET" || confirmationPhrase !== "ARM LIVE MAINNET" || adminSecret.length < 32}>{setControls.isPending ? "正在预检" : "通过全部预检并 armed"}</button>
+                <button type="submit" className="btn-danger w-full" disabled={setControls.isPending || data.settings.executionMode !== "LIVE_MAINNET" || confirmationPhrase !== "ARM LIVE MAINNET"}>{setControls.isPending ? "正在预检" : "通过全部预检并 armed"}</button>
               </form>
             )}
           </section>
@@ -192,7 +189,6 @@ function RiskPageContent() {
                 side: canary.side,
                 limitPrice: Number(canary.limitPrice),
                 stopPrice: Number(canary.stopPrice),
-                adminSecret: canary.adminSecret,
                 confirmationPhrase: canary.confirmationPhrase,
               });
             }}>
@@ -200,12 +196,11 @@ function RiskPageContent() {
               <label className="block"><span className="terminal-label">方向</span><select className="terminal-input mt-2" value={canary.side} onChange={(event) => setCanary({ ...canary, side: event.target.value as "LONG" | "SHORT" })}><option value="LONG">LONG</option><option value="SHORT">SHORT</option></select></label>
               <label className="block"><span className="terminal-label">IOC 限价</span><input className="terminal-input mt-2 !text-[11px]" type="number" required min="0" step="any" value={canary.limitPrice} onChange={(event) => setCanary({ ...canary, limitPrice: event.target.value })} /></label>
               <label className="block"><span className="terminal-label">原始止损</span><input className="terminal-input mt-2 !text-[11px]" type="number" required min="0" step="any" value={canary.stopPrice} onChange={(event) => setCanary({ ...canary, stopPrice: event.target.value })} /></label>
-              <label className="block"><span className="terminal-label">重新输入管理员令牌</span><input className="terminal-input mt-2 !text-[11px]" type="password" autoComplete="off" required minLength={32} value={canary.adminSecret} onChange={(event) => setCanary({ ...canary, adminSecret: event.target.value })} /></label>
               <label className="block"><span className="terminal-label">确认短语</span><input className="terminal-input mt-2 !text-[11px]" required value={canary.confirmationPhrase} onChange={(event) => setCanary({ ...canary, confirmationPhrase: event.target.value })} placeholder="SUBMIT LIVE CANARY" /></label>
               <button type="submit" className="btn-danger w-full" disabled={manualCanary.isPending || !data.execution.armed
                 || !(Number(canary.limitPrice) > 0) || !(Number(canary.stopPrice) > 0)
                 || (canary.side === "LONG" ? Number(canary.stopPrice) >= Number(canary.limitPrice) : Number(canary.stopPrice) <= Number(canary.limitPrice))
-                || canary.adminSecret.length < 32 || canary.confirmationPhrase !== "SUBMIT LIVE CANARY"}>{manualCanary.isPending ? "正在执行完整门控" : "提交真实 canary IOC"}</button>
+                || canary.confirmationPhrase !== "SUBMIT LIVE CANARY"}>{manualCanary.isPending ? "正在执行完整门控" : "提交真实 canary IOC"}</button>
             </form>
           </section>}
           <section className="panel border-[#66343c] p-4">

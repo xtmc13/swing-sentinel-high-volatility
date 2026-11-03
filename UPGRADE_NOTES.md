@@ -5,7 +5,7 @@
 - 对账恢复覆盖 terminal owned orders，并使用持久 intent、tick 和真实 bracket seed 恢复漏掉的首笔 fill；账本可解释的余额变化会解决旧 balance issue。
 - LIVE 使用签名 positionRisk 管理日损、组合/相关性、持仓上限、同 symbol、2.2R、保本/移动止损和 72 小时退出；日初权益与日损锁由 `0013_live_daily_risk.sql` 持久化。
 - 签名 REST 与响应体有 deadline；预检网络在 DB 锁外，最终 transport 以 DB 时间复核过期和准入。空闲但已连接的私有 WS 可结合健康 REST 对账保持资格。
-- Replay 与 Rust 使用独立 mark 事件、三个历史和同口径 P80；LIVE 未知估值显示不可用。管理员可通过独立确认的 `manualCanary` mutation 和风险页表单提交受控真实 canary，不会开启 autoTrade。
+- Replay 与 Rust 使用独立 mark 事件、三个历史和同口径 P80；LIVE 未知估值显示不可用。可通过独立确认的 `manualCanary` mutation 和风险页表单提交受控真实 canary，不会开启 autoTrade。
 - 本轮不使用真实交易所凭据、不发送真实订单、不访问 preview DB/server；真实只读、真实 canary 和观察期仍是后续门禁。逐项证据见 `final-fix-report.md`。
 
 ## Task 9：生产接线与全链路验收

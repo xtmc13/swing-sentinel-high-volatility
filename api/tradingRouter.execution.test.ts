@@ -1,8 +1,5 @@
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "@contracts/trading";
-
-const SECRET = "execution-router-admin-secret-with-32-characters";
-process.env.APP_SECRET = SECRET;
 
 const mocks = vi.hoisted(() => ({
   close: vi.fn(async () => ({ ok: true as const, reason: "人工平仓", pnl: 0, unsettled: false as const, alreadyClosed: false as const })),
@@ -97,16 +94,14 @@ vi.mock("./queries/connection", () => ({ getDb: vi.fn() }));
 
 const { tradingRouter, settingsInput } = await import("./tradingRouter");
 
-function caller(authorization: string | null = SECRET) {
+function caller() {
   return tradingRouter.createCaller({
-    req: new Request("http://localhost/api/trpc", { headers: authorization ? { authorization: `Bearer ${authorization}` } : undefined }),
+    req: new Request("http://localhost/api/trpc"),
     resHeaders: new Headers(),
   });
 }
 
-afterAll(() => { delete process.env.APP_SECRET; });
-
-describe("统一执行管理入口", () => {
+describe("统一执行公共入口", () => {
   it("close 和 emergency 只通过 coordinator", async () => {
     const positionId = crypto.randomUUID();
 
@@ -158,34 +153,27 @@ describe("统一执行管理入口", () => {
     expect(mocks.paperReset).toHaveBeenCalledTimes(1);
   });
 
-  it("无权限返回 UNAUTHORIZED（HTTP 401），不会触及 armed", async () => {
-    await expect(caller(null).setLiveControls({ armed: true, confirmationPhrase: "ARM LIVE MAINNET", adminSecret: SECRET }))
-      .rejects.toMatchObject({ code: "UNAUTHORIZED" });
-    expect(mocks.setArmed).not.toHaveBeenCalled();
-  });
-
-  it("armed 需要重新输入管理员令牌和精确确认短语，disarm 保持可用", async () => {
-    await expect(caller().setLiveControls({ armed: true, confirmationPhrase: "ARM LIVE MAINNET", adminSecret: "wrong" }))
-      .rejects.toMatchObject({ code: "UNAUTHORIZED" });
-    await expect(caller().setLiveControls({ armed: true, confirmationPhrase: "wrong", adminSecret: SECRET }))
+  it("无管理员令牌或 adminSecret 也可 armed，但仍需精确确认短语，disarm 保持可用", async () => {
+    await expect(caller().setLiveControls({ armed: true, confirmationPhrase: "wrong" }))
       .rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
     expect(mocks.setArmed).not.toHaveBeenCalled();
 
-    await expect(caller().setLiveControls({ armed: true, confirmationPhrase: "ARM LIVE MAINNET", adminSecret: SECRET }))
+    await expect(caller().setLiveControls({ armed: true, confirmationPhrase: "ARM LIVE MAINNET" }))
       .resolves.toMatchObject({ armed: true });
     expect(mocks.setArmed).toHaveBeenLastCalledWith(true);
     await expect(caller().setLiveControls({ armed: false })).resolves.toMatchObject({ armed: false });
     expect(mocks.setArmed).toHaveBeenLastCalledWith(false);
   });
 
-  it("manual canary 需要独立确认，只调用 openManual 且不开启自动交易", async () => {
+  it("manual canary 无 adminSecret 仍需独立确认，只调用 openManual 且不开启自动交易", async () => {
     mocks.saveSettings.mockClear();
     mocks.openManual.mockClear();
     const input = {
       symbol: "BTCUSDT", side: "LONG" as const, limitPrice: 100.004, stopPrice: 99,
-      adminSecret: SECRET, confirmationPhrase: "SUBMIT LIVE CANARY",
+      confirmationPhrase: "SUBMIT LIVE CANARY",
     };
-    await expect(caller().manualCanary({ ...input, adminSecret: "wrong" })).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(caller().manualCanary({ ...input, confirmationPhrase: "wrong" }))
+      .rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
     expect(mocks.openManual).not.toHaveBeenCalled();
 
     await expect(caller().manualCanary(input)).resolves.toMatchObject({ ok: true });
@@ -198,7 +186,7 @@ describe("统一执行管理入口", () => {
   it("缺失主网门控作为 PRECONDITION_FAILED 拒绝，而不是内部 500", async () => {
     mocks.setArmed.mockRejectedValueOnce(new Error("LIVE_TRADING_ENABLED 未开启"));
 
-    await expect(caller().setLiveControls({ armed: true, confirmationPhrase: "ARM LIVE MAINNET", adminSecret: SECRET }))
+    await expect(caller().setLiveControls({ armed: true, confirmationPhrase: "ARM LIVE MAINNET" }))
       .rejects.toMatchObject({ code: "PRECONDITION_FAILED", message: "LIVE_TRADING_ENABLED 未开启" });
   });
 
@@ -207,7 +195,7 @@ describe("统一执行管理入口", () => {
     mocks.setArmed.mockRejectedValueOnce(new Error(sensitive));
 
     const rejection = await caller().setLiveControls({
-      armed: true, confirmationPhrase: "ARM LIVE MAINNET", adminSecret: SECRET,
+      armed: true, confirmationPhrase: "ARM LIVE MAINNET",
     }).catch((error: unknown) => error);
     expect(rejection).toMatchObject({ code: "INTERNAL_SERVER_ERROR", message: "主网控制操作失败" });
     expect(JSON.stringify(rejection)).not.toContain("internal-db");

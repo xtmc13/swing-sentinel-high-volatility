@@ -2,8 +2,7 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { desc, eq } from "drizzle-orm";
 import { createRouter, publicQuery } from "./middleware";
-import { adminQuery, isFreshAdminSecret } from "./admin";
-import { env } from "./lib/env";
+import { adminQuery } from "./admin";
 import { engine } from "./services/engine";
 import { binance } from "./services/binance";
 import {
@@ -129,12 +128,8 @@ export const tradingRouter = createRouter({
   setLiveControls: adminQuery.input(z.object({
     armed: z.boolean(),
     confirmationPhrase: z.string().max(64).optional(),
-    adminSecret: z.string().max(512).optional(),
   })).mutation(async ({ input }) => {
     if (input.armed) {
-      if (!isFreshAdminSecret(input.adminSecret ?? "", env.appSecret)) {
-        throw new TRPCError({ code: "UNAUTHORIZED", message: "armed 需要重新输入正确的管理员令牌" });
-      }
       if (input.confirmationPhrase !== "ARM LIVE MAINNET") {
         throw new TRPCError({ code: "PRECONDITION_FAILED", message: "请输入确认短语 ARM LIVE MAINNET" });
       }
@@ -162,12 +157,8 @@ export const tradingRouter = createRouter({
     side: z.enum(["LONG", "SHORT"]),
     limitPrice: z.number().finite().positive(),
     stopPrice: z.number().finite().positive(),
-    adminSecret: z.string().max(512),
     confirmationPhrase: z.string().max(64),
   })).mutation(async ({ input }) => {
-    if (!isFreshAdminSecret(input.adminSecret, env.appSecret)) {
-      throw new TRPCError({ code: "UNAUTHORIZED", message: "manual canary 需要重新输入正确的管理员令牌" });
-    }
     if (input.confirmationPhrase !== "SUBMIT LIVE CANARY") {
       throw new TRPCError({ code: "PRECONDITION_FAILED", message: "请输入确认短语 SUBMIT LIVE CANARY" });
     }
@@ -193,7 +184,7 @@ export const tradingRouter = createRouter({
         leverage: 1,
         marginPct: 0,
         riskPct: 0,
-        reasons: ["管理员手动 canary；数量仍由实时风控批准"],
+        reasons: ["手动 canary；数量仍由实时风控批准"],
         signalCloseTime: now,
         signalTime: now,
         expiryTime: now + 5_000,
@@ -201,7 +192,7 @@ export const tradingRouter = createRouter({
         limitPrice: input.limitPrice,
         stateVersion: 0,
         sourceGeneration: 0,
-        detectorVersion: "manual-admin",
+        detectorVersion: "manual-canary",
         configVersion: "manual-canary-v1",
         createdAt: new Date(now).toISOString(),
       });

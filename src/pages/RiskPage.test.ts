@@ -1,8 +1,9 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "@contracts/trading";
 
+const view = vi.hoisted(() => ({ executionMode: "LIVE_MAINNET" as "PAPER" | "LIVE_MAINNET" }));
 const mutations = vi.hoisted(() => ({
   save: vi.fn(),
   setMode: vi.fn(),
@@ -15,8 +16,8 @@ const mutations = vi.hoisted(() => ({
 vi.mock("@/components/terminal-context", () => ({
   useTerminal: () => ({
     data: {
-      settings: { ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" },
-      execution: { executionMode: "LIVE_MAINNET", armed: false },
+      settings: { ...DEFAULT_SETTINGS, executionMode: view.executionMode },
+      execution: { executionMode: view.executionMode, armed: false },
       volatilityStates: [],
       events: [],
     },
@@ -48,6 +49,10 @@ vi.mock("@/providers/trpc", () => ({
 import RiskPage from "./RiskPage";
 
 describe("RiskPage 公共实时控制", () => {
+  beforeEach(() => {
+    view.executionMode = "LIVE_MAINNET";
+  });
+
   it("保留凭据、armed 和 canary 表单，但不渲染管理员或只读限制", () => {
     const html = renderToStaticMarkup(createElement(RiskPage));
 
@@ -58,5 +63,13 @@ describe("RiskPage 公共实时控制", () => {
     expect(html).not.toContain("管理员");
     expect(html).not.toContain("只读");
     expect(html).not.toContain('type="password"');
+  });
+
+  it("PAPER 主账户重置使用中性账户文案", () => {
+    view.executionMode = "PAPER";
+    const html = renderToStaticMarkup(createElement(RiskPage));
+
+    expect(html).toContain("重置账户");
+    expect(html).not.toContain("重置模拟账户");
   });
 });

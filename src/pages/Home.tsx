@@ -26,7 +26,7 @@ export default function Home() {
   const live = data.settings.executionMode === "LIVE_MAINNET";
   const transitions = data.events.filter((event) => event.category === "三态迁移");
   const metrics = [
-    { label: live ? "真实账户权益" : "模拟账户权益", value: formatNumber(data.account.equity), suffix: data.account.valuationValid ? "USDT" : "估值不可用", tone: !data.account.valuationValid ? "data-warning" : data.account.equity >= 100000 ? "data-positive" : "data-negative" },
+    { label: "账户权益", value: formatNumber(data.account.equity), suffix: data.account.valuationValid ? "USDT" : "估值不可用", tone: !data.account.valuationValid ? "data-warning" : data.account.equity >= 100000 ? "data-positive" : "data-negative" },
     { label: "可用保证金", value: formatNumber(data.account.availableMargin), suffix: "USDT", tone: "text-[#e7edf7]" },
     { label: "今日净盈亏", value: `${data.account.todayPnl >= 0 ? "+" : ""}${formatNumber(data.account.todayPnl)}`, suffix: data.account.dailyLocked ? "当日已锁定" : formatPercent(data.account.todayPnlPct), tone: !data.account.valuationValid ? "data-warning" : data.account.todayPnl >= 0 ? "data-positive" : "data-negative" },
     { label: "当前止损风险", value: formatNumber(openRisk), suffix: "% 权益", tone: openRisk > 1 ? "data-warning" : "data-live" },

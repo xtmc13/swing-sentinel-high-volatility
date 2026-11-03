@@ -56,7 +56,7 @@ function RiskPageContent() {
     onError: (error) => toast.error(error.message),
   });
   const reset = trpc.trading.reset.useMutation({
-    onSuccess: async (result) => { const feedback = bulkExecutionFeedback("模拟账户重置", result); toast[feedback.tone](feedback.message); refresh(); },
+    onSuccess: async (result) => { const feedback = bulkExecutionFeedback("账户重置", result); toast[feedback.tone](feedback.message); refresh(); },
     onError: (error) => toast.error(error.message),
   });
   const update = <K extends keyof TradingSettings>(key: K, value: TradingSettings[K]) => setForm((current) => ({ ...current, [key]: value }));
@@ -207,7 +207,7 @@ function RiskPageContent() {
             <div className="flex items-center gap-2 text-[#f87171]"><OctagonAlert size={16} aria-hidden="true" /><h2 className="terminal-label !text-[#f87171]">EMERGENCY CONTROL</h2></div>
             <p className="reading mt-3 text-[11px] leading-5 text-[#a8b5c8]">紧急停止会关闭自动开仓，并按当前{data.settings.executionMode === "LIVE_MAINNET" ? "真实主网" : "模拟"}市价退出所有持仓。未结算结果会明确显示为失败。</p>
             <button type="button" className="btn-danger mt-4 w-full" disabled={emergency.isPending} onClick={() => { if (window.confirm(`确认暂停自动交易并退出全部${data.settings.executionMode === "LIVE_MAINNET" ? "真实" : "模拟"}持仓？`)) emergency.mutate(); }}>紧急停止并全部平仓</button>
-            {data.settings.executionMode === "PAPER" && <button type="button" className="btn-secondary mt-2 w-full" disabled={reset.isPending} onClick={() => { if (window.confirm("确认把模拟账户重置为 100,000 USDT？历史订单与复盘记录会保留。")) reset.mutate(); }}><RotateCcw size={13} aria-hidden="true" />重置模拟账户</button>}
+            {data.settings.executionMode === "PAPER" && <button type="button" className="btn-secondary mt-2 w-full" disabled={reset.isPending} onClick={() => { if (window.confirm("确认把账户重置为 100,000 USDT？历史订单与复盘记录会保留。")) reset.mutate(); }}><RotateCcw size={13} aria-hidden="true" />重置账户</button>}
           </section>
 
           <section className="panel p-4">

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router";
 import {
-  Activity, ChartCandlestick, ChartNoAxesCombined, FlaskConical, LayoutDashboard,
+  ChartCandlestick, ChartNoAxesCombined, FlaskConical, LayoutDashboard,
   ListFilter, Pause, Play, RefreshCw, Settings2, ShieldCheck, WalletCards,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -146,10 +146,6 @@ export default function TerminalLayout() {
             ))}
             {!data && <div className="p-4 text-[11px] text-[#8290aa]">正在构建交易池…</div>}
           </div>
-        </div>
-        <div className="border-t border-[#1a2540] p-4 text-[10px] leading-5 text-[#8290aa]">
-          <div className={`mb-2 flex items-center gap-2 ${executionMode === "LIVE_MAINNET" ? "text-[#fca5a5]" : "text-[#c5d0df]"}`}><Activity size={13} /> {executionMode === "LIVE_MAINNET" ? "真实主网执行环境" : "模拟执行环境"}</div>
-          {executionMode === "LIVE_MAINNET" ? "账户、持仓与订单均为真实主网数据；armed 不代表已绕过任何预检或风险门控。" : "不会请求 API 密钥，不会发送真实订单。杠杆上限为模拟参数，实际账户档位以币安为准。"}
         </div>
       </aside>
 

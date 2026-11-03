@@ -27,7 +27,7 @@ function trade(id: number, overrides: Partial<BinanceUserTrade> = {}): BinanceUs
   };
 }
 
-function income(tranId: number, time: number, amount = "1.5"): BinanceIncome {
+function income(tranId: number | string, time: number, amount = "1.5"): BinanceIncome {
   return {
     symbol: "BTCUSDT",
     incomeType: "FUNDING_FEE",
@@ -88,6 +88,16 @@ describe("live accounting pagination", () => {
 
     expect(records.map((item) => item.tranId)).toEqual([1, 2, 3]);
     expect(startTimes).toEqual([100, 200, 300]);
+  });
+
+  it("accepts exact int64 transaction ID strings without losing distinct records", async () => {
+    const records = await fetchAllIncome({
+      income: async ({ startTime } = {}) => startTime === undefined
+        ? [income("9223372036854775806", 100), income("9223372036854775807", 200)]
+        : [income("9223372036854775807", 200)],
+    }, {}, 2);
+
+    expect(records.map((item) => item.tranId)).toEqual(["9223372036854775806", "9223372036854775807"]);
   });
 
   it("walks the complete income history in bounded time windows", async () => {

@@ -417,7 +417,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     const cash = Number(asset.walletBalance);
     const unrealized = Number(unrealizedPnl);
     const margin = Number(usedMargin);
-    if (equity === 0 || ![equity, availableMargin, cash, unrealized, margin].every(Number.isFinite)) {
+    if (![equity, availableMargin, cash, unrealized, margin].every(Number.isFinite)) {
       return unavailableAccount();
     }
     const dayKey = new Date(this.now()).toISOString().slice(0, 10);
@@ -427,6 +427,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       && ["REALIZED_PNL", "COMMISSION", "FUNDING_FEE"].includes(entry.entryType))
       .reduce((total, entry) => total + (entry.entryType === "COMMISSION"
         ? -Math.abs(Number(entry.amount)) : Number(entry.amount)), 0);
+    const todayPnl = equity - daily.dayStartEquity;
     return {
       equity,
       cash,
@@ -434,8 +435,8 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       usedMargin: margin,
       unrealizedPnl: unrealized,
       realizedPnl,
-      todayPnl: equity - daily.dayStartEquity,
-      todayPnlPct: (equity - daily.dayStartEquity) / daily.dayStartEquity * 100,
+      todayPnl,
+      todayPnlPct: daily.dayStartEquity > 0 ? todayPnl / daily.dayStartEquity * 100 : 0,
       dayStartEquity: daily.dayStartEquity,
       valuationValid: true,
       valuationIssues: [],

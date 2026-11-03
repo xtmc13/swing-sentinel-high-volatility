@@ -98,6 +98,8 @@ interface HarnessOptions {
   withOrder?: boolean;
   reconcile?: () => Promise<{ ok: boolean }>;
   pause?: () => Promise<void>;
+  reconnectDelayMs?: number;
+  sleep?: (milliseconds: number) => Promise<void>;
   intentMetadata?: {
     signalId: string;
     strategyType: "SWING" | "MOMENTUM";
@@ -186,8 +188,8 @@ function harness(options: HarnessOptions = {}) {
     }),
     pauseNewEntries: options.pause ?? (async () => { calls.push("pause"); }),
     keepAliveIntervalMs: 60_000,
-    reconnectDelayMs: 0,
-    sleep: async () => undefined,
+    reconnectDelayMs: options.reconnectDelayMs ?? 0,
+    sleep: options.sleep ?? (async () => undefined),
   });
   return { stream, sockets, calls, orders, store, client, machine };
 }
@@ -267,6 +269,23 @@ describe("private user-data lifecycle", () => {
 
     expect(attempts).toBe(2);
     expect(h.sockets).toHaveLength(2);
+  });
+
+  it("backs off exponentially instead of hammering a failed reconciliation", async () => {
+    const delays: number[] = [];
+    const h = harness({
+      reconnectDelayMs: 1_000,
+      reconcile: async () => ({ ok: false }),
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+        if (delays.length === 3) await h.stream.stop();
+      },
+    });
+
+    await h.stream.start();
+
+    expect(delays).toEqual([1_000, 2_000, 4_000]);
+    expect(h.stream.health().running).toBe(false);
   });
 
   it("pauses immediately on disconnect and reconciles before releasing buffered events", async () => {

@@ -183,6 +183,7 @@ export class UserDataStream {
   }
 
   private async connectWithRetry(generation: number, retryErrors: boolean): Promise<void> {
+    let failures = 0;
     while (this.isCurrent(generation)) {
       try {
         await this.connectAndReconcile(generation);
@@ -192,7 +193,9 @@ export class UserDataStream {
         this.discardAttempt();
         if (!retryErrors && !(error instanceof ReconciliationNotReady)) throw error;
         await this.recordIssue("REST_RECONCILIATION", null, "私有流连接或 REST 对账未就绪，保持冻结并重试");
-        await this.sleep(this.reconnectDelayMs);
+        const delay = Math.min(this.reconnectDelayMs * 2 ** Math.min(failures, 5), 30_000);
+        failures += 1;
+        await this.sleep(delay);
       }
     }
   }

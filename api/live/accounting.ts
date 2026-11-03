@@ -173,7 +173,10 @@ export async function fetchAllIncome(
     while (true) {
       const page = await client.income({ ...params, startTime: cursor, endTime: windowEnd, limit });
       for (const record of page) {
-        if (!Number.isSafeInteger(record.time) || record.time < 0 || !Number.isSafeInteger(record.tranId)) {
+        const validTransactionId = typeof record.tranId === "string"
+          ? /^\d+$/.test(record.tranId)
+          : Number.isSafeInteger(record.tranId) && record.tranId >= 0;
+        if (!Number.isSafeInteger(record.time) || record.time < 0 || !validTransactionId) {
           throw new Error("Invalid income pagination record");
         }
         const key = String(record.tranId);

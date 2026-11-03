@@ -287,6 +287,20 @@ describe("Binance signed mainnet client", () => {
     await expect(client.income({ symbol: "BTCUSDT" })).resolves.toEqual([income]);
   });
 
+  it("preserves int64 income transaction IDs as exact strings", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ serverTime: NOW }))
+      .mockResolvedValueOnce(new Response(
+        '[{"symbol":"BTCUSDT","incomeType":"FUNDING_FEE","income":"0.01","asset":"USDT","time":1700000000000,"tranId":9223372036854775806}]',
+        { headers: { "content-type": "application/json" } },
+      ));
+    const client = clientWith(fetchMock);
+
+    const records = await client.income({ symbol: "BTCUSDT" });
+
+    expect(records[0]?.tranId).toBe("9223372036854775806");
+  });
+
   it.each([
     { method: "POST", invoke: (client: BinanceSignedClient) => client.createListenKey() },
     { method: "PUT", invoke: (client: BinanceSignedClient) => client.keepAliveListenKey() },
@@ -371,7 +385,7 @@ describe("Binance signed mainnet client", () => {
   });
 
   it("applies the same hard deadline to response body parsing and listenKey calls", async () => {
-    const hungBody = { ok: true, status: 200, headers: new Headers(), json: () => new Promise(() => undefined) } as unknown as Response;
+    const hungBody = { ok: true, status: 200, headers: new Headers(), text: () => new Promise(() => undefined) } as unknown as Response;
     const client = new BinanceSignedClient({
       ...credentials,
       requestTimeoutMs: 5,

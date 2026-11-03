@@ -125,21 +125,30 @@ describe("signed LIVE account and position management", () => {
     expect(timeout.placed.at(-1)).toMatchObject({ type: "MARKET", reduceOnly: true });
   });
 
-  it.each(["0", "unavailable"])("returns a locked zero no-data account for signed equity %s", async (walletBalance) => {
+  it("accepts a successfully signed zero-balance account while keeping new risk locked", async () => {
     const h = harness();
-    h.gateway.account = async () => ({ assets: [{ asset: "USDT", walletBalance, availableBalance: walletBalance }] });
+    h.gateway.account = async () => ({ assets: [{ asset: "USDT", walletBalance: "0", availableBalance: "0.00009186" }] });
     h.gateway.positionRisk = async () => [];
 
-    await expect(h.adapter.account()).resolves.toEqual({
+    await expect(h.adapter.account()).resolves.toMatchObject({
       equity: 0,
       cash: 0,
-      availableMargin: 0,
+      availableMargin: 0.00009186,
       usedMargin: 0,
       unrealizedPnl: 0,
-      realizedPnl: 0,
-      todayPnl: 0,
-      todayPnlPct: 0,
-      dayStartEquity: 0,
+      valuationValid: true,
+      valuationIssues: [],
+      dailyLocked: true,
+    });
+  });
+
+  it("rejects an invalid signed equity instead of treating it as a real zero", async () => {
+    const h = harness();
+    h.gateway.account = async () => ({ assets: [{ asset: "USDT", walletBalance: "unavailable", availableBalance: "unavailable" }] });
+    h.gateway.positionRisk = async () => [];
+
+    await expect(h.adapter.account()).resolves.toMatchObject({
+      equity: 0,
       valuationValid: false,
       valuationIssues: ["签名 LIVE 账户或持仓估值不可用"],
       dailyLocked: true,

@@ -133,7 +133,7 @@ export interface BinanceIncome {
   asset: string;
   info?: string;
   time: number;
-  tranId: number;
+  tranId: number | string;
   tradeId?: string;
   [key: string]: unknown;
 }
@@ -300,7 +300,7 @@ export class BinanceSignedClient {
 
   async income(params: IncomeParams = {}): Promise<BinanceIncome[]> {
     this.validateSignedNumericParams(params);
-    return this.signedRequest("GET", "/fapi/v1/income", { ...params });
+    return this.signedRequest("GET", "/fapi/v1/income", { ...params }, true);
   }
 
   createListenKey(): Promise<{ listenKey: string }> {
@@ -325,9 +325,14 @@ export class BinanceSignedClient {
     await this.timeSync;
   }
 
-  private async signedRequest<T>(method: "GET", path: string, params: QueryParams = {}): Promise<T> {
+  private async signedRequest<T>(
+    method: "GET",
+    path: string,
+    params: QueryParams = {},
+    preserveIncomeTransactionIds = false,
+  ): Promise<T> {
     await this.ensureServerTime();
-    return this.perform<T>(method, path, params, true, true, this.maxRateLimitRetries);
+    return this.perform<T>(method, path, params, true, true, this.maxRateLimitRetries, preserveIncomeTransactionIds);
   }
 
   private async perform<T>(
@@ -337,6 +342,7 @@ export class BinanceSignedClient {
     signed: boolean,
     withApiKey: boolean,
     retries: number,
+    preserveIncomeTransactionIds = false,
   ): Promise<T> {
     for (let attempt = 0; ; attempt += 1) {
       const query = new URLSearchParams();
@@ -352,7 +358,7 @@ export class BinanceSignedClient {
       const { response, body } = await this.requestWithDeadline(`${BINANCE_MAINNET_REST_URL}${path}${suffix}`, {
         method,
         headers: withApiKey ? { "X-MBX-APIKEY": this.apiKey } : undefined,
-      });
+      }, preserveIncomeTransactionIds);
 
       if (!response.ok) {
         const code = typeof body === "object" && body !== null && "code" in body
@@ -370,7 +376,11 @@ export class BinanceSignedClient {
     }
   }
 
-  private async requestWithDeadline(input: string, init: RequestInit): Promise<{ response: Response; body: unknown }> {
+  private async requestWithDeadline(
+    input: string,
+    init: RequestInit,
+    preserveIncomeTransactionIds = false,
+  ): Promise<{ response: Response; body: unknown }> {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<never>((_, reject) => {
@@ -387,7 +397,11 @@ export class BinanceSignedClient {
         throw new BinanceSignedError("Binance network request failed");
       }
       try {
-        return { response, body: await response.json() as unknown };
+        const text = await response.text();
+        const normalized = preserveIncomeTransactionIds
+          ? text.replace(/("tranId"\s*:\s*)(-?\d+)(?=\s*[,}])/g, '$1"$2"')
+          : text;
+        return { response, body: JSON.parse(normalized) as unknown };
       } catch (error) {
         if (!response.ok) return { response, body: undefined };
         throw error;

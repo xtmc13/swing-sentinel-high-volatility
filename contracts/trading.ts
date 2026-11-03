@@ -6,6 +6,7 @@ export type VolatilityMode = "NORMAL" | "HIGH" | "EXTREME";
 export type ExecutionMode = "PAPER" | "LIVE_MAINNET";
 export type StrategyMode = "SWING" | "MOMENTUM" | "BOTH";
 export type StrategyType = "SWING" | "MOMENTUM";
+export type MomentumProtection = "NONE" | "WARN" | "TIGHTEN" | "REDUCE_CANDIDATE" | "EXIT_CANDIDATE";
 
 export interface LiveControls {
   armed: boolean;
@@ -236,6 +237,13 @@ export interface Opportunity {
   detectorVersion: string;
   configVersion: string;
   atr15?: number;
+  momentumExhaustion?: {
+    score: number;
+    resonanceCount: number;
+    resonant: boolean;
+    protection: MomentumProtection;
+    structureBreak: boolean;
+  };
   createdAt: string;
 }
 
@@ -436,6 +444,16 @@ export interface SignalEvaluation {
   maeR: number | null;
 }
 
+export interface MomentumExhaustionEvent {
+  time: number;
+  symbol: string;
+  side: Side;
+  score: number;
+  resonanceCount: number;
+  protection: MomentumProtection;
+  structureBreak: boolean;
+}
+
 export interface PortfolioBacktestResult extends BacktestResult {
   symbol: "PORTFOLIO";
   signals: SignalEvaluation[];
@@ -447,6 +465,7 @@ export interface PortfolioBacktestResult extends BacktestResult {
   transitions: PortfolioVolatilityTransition[];
   dailyLossLocks: { time: number; day: string; equity: number; dayStartEquity: number }[];
   dataGaps: string[];
+  momentumExhaustion?: MomentumExhaustionEvent[];
 }
 
 export const DEFAULT_SETTINGS: TradingSettings = {

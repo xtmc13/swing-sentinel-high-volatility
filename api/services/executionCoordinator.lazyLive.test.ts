@@ -45,6 +45,7 @@ function setup(options: {
   getLiveAdapter?: (humanApproved?: boolean) => Promise<ExecutionAdapter | null>;
   runLivePreflight?: (humanApproved?: boolean) => Promise<{ ready: boolean; reasons: string[]; checkedAt: string | null }>;
   stopLive?: () => Promise<void>;
+  storedCredentials?: boolean;
 } = {}) {
   let armed = options.armed ?? false;
   const settings = { ...DEFAULT_SETTINGS, executionMode: options.executionMode ?? "PAPER" };
@@ -60,7 +61,11 @@ function setup(options: {
     getOutstandingRisk: async () => ({ openPositions: 0, pendingIntents: 0, unfinishedOrders: 0 }),
     runLivePreflight: options.runLivePreflight,
     stopLive: options.stopLive,
-    env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake", BINANCE_MAINNET_API_SECRET: "fake" },
+    credentialsConfigured: options.storedCredentials === undefined
+      ? undefined : async () => options.storedCredentials === true,
+    env: options.storedCredentials === undefined
+      ? { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake", BINANCE_MAINNET_API_SECRET: "fake" }
+      : { LIVE_TRADING_ENABLED: "true" },
   });
   return { coordinator, settings };
 }
@@ -91,6 +96,20 @@ describe("lazy production live adapter", () => {
     const dashboard = await h.coordinator.dashboard();
     expect(dashboard.account.cash).toBe(200);
     expect(dashboard.status.adapterConfigured).toBe(true);
+  });
+
+  it("uses stored credential status for LIVE gates without changing armed or autoTrade", async () => {
+    const h = setup({
+      executionMode: "LIVE_MAINNET",
+      armed: true,
+      storedCredentials: true,
+      getLiveAdapter: async () => adapter("live"),
+    });
+
+    const status = await h.coordinator.status();
+    expect(status.credentialsConfigured).toBe(true);
+    expect(status.armed).toBe(true);
+    expect(h.settings.autoTrade).toBe(false);
   });
 
   it("arming passes explicit human approval to preflight before persisting armed", async () => {

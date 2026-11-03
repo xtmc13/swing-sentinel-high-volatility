@@ -7,6 +7,7 @@ import type { TradingSettings } from "@contracts/trading";
 import { formatTime } from "@/lib/format";
 import { bulkExecutionFeedback } from "@/lib/executionFeedback";
 import ExecutionStatusPanel from "@/components/ExecutionStatusPanel";
+import BinanceCredentialForm from "@/components/BinanceCredentialForm";
 
 function NumberField({ label, value, suffix, step = 0.1, min = 0, max, onChange }: { label: string; value: number; suffix: string; step?: number; min?: number; max?: number; onChange: (value: number) => void }) {
   return <label className="block"><span className="terminal-label">{label}</span><span className="relative mt-2 block"><input type="number" className="terminal-input pr-16" value={value} step={step} min={min} max={max} onChange={(event) => onChange(Number(event.target.value))} /><span className="pointer-events-none absolute right-3 top-3 text-[10px] text-[#596983]">{suffix}</span></span></label>;
@@ -162,6 +163,7 @@ function RiskPageContent() {
         </div>
 
         <aside className="space-y-3">
+          <BinanceCredentialForm />
           <ExecutionStatusPanel status={data.execution} />
           <section className="panel p-4" aria-labelledby="execution-controls-title">
             <h2 id="execution-controls-title" className="terminal-label">EXECUTION CONTROL</h2>

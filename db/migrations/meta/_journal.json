@@ -99,6 +99,13 @@
       "when": 1793675401304,
       "tag": "0013_live_daily_risk",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "5",
+      "when": 1793689000000,
+      "tag": "0014_binance_credentials",
+      "breakpoints": true
     }
   ]
 }

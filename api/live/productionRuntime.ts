@@ -16,7 +16,8 @@ export interface ProductionLiveRuntimeOptions {
   getSettings: () => Promise<TradingSettings>;
   getLiveControls: () => Promise<LiveControls>;
   hasOutstandingLiveRisk: () => Promise<boolean>;
-  createServices: () => ProductionLiveServices;
+  credentialsConfigured?: () => Promise<boolean>;
+  createServices: () => ProductionLiveServices | Promise<ProductionLiveServices>;
 }
 
 const disconnectedPrivateWs = (): PrivateWsHealth => ({
@@ -40,7 +41,10 @@ export function createProductionLiveRuntime(options: ProductionLiveRuntimeOption
     const requestedGeneration = generation;
     const settings = await options.getSettings();
     if (settings.executionMode !== "LIVE_MAINNET") return null;
-    if (!liveTradingEnabled(options.env) || !getLivePublicStatus(options.env).credentialsConfigured) return null;
+    if (!liveTradingEnabled(options.env)) return null;
+    const credentialsConfigured = options.credentialsConfigured
+      ? await options.credentialsConfigured() : getLivePublicStatus(options.env).credentialsConfigured;
+    if (!credentialsConfigured) return null;
     if (current) return current.adapter;
     const controls = await options.getLiveControls();
     if (!controls.armed && !humanApproved && !await options.hasOutstandingLiveRisk()) return null;
@@ -49,7 +53,7 @@ export function createProductionLiveRuntime(options: ProductionLiveRuntimeOption
     if (!pending) {
       const startGeneration = generation;
       pending = (async () => {
-        const created = options.createServices();
+        const created = await options.createServices();
         try {
           await created.start();
         } catch (error) {

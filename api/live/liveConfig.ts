@@ -52,3 +52,24 @@ export function createLiveAdapter<T>(
   }
   return factory(credentials);
 }
+
+export async function hasConfiguredLiveCredentials(
+  env: ServerEnvironment,
+  loadStoredStatus: () => Promise<{ configured: boolean }>,
+): Promise<LivePublicStatus> {
+  if (configuredCredentials(env)) return { credentialsConfigured: true };
+  return { credentialsConfigured: (await loadStoredStatus()).configured };
+}
+
+export async function createStoredLiveAdapter<T>(
+  env: ServerEnvironment,
+  loadStored: () => Promise<LiveCredentials | null>,
+  factory: (credentials: LiveCredentials) => T,
+): Promise<T> {
+  if (!liveTradingEnabled(env)) {
+    throw new Error("Live adapter is disabled or credentials are not configured");
+  }
+  const credentials = configuredCredentials(env) ?? await loadStored();
+  if (!credentials) throw new Error("Live adapter is disabled or credentials are not configured");
+  return factory(credentials);
+}

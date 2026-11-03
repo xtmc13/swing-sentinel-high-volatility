@@ -39,11 +39,13 @@ import { readLiveOperations, type LiveOperations } from "../live/liveOperations"
 import {
   createLiveAdmissionGuard,
   getLivePublicStatus,
+  hasConfiguredLiveCredentials,
   liveTradingEnabled,
   type AssertCurrentLiveAdmission,
 } from "../live/liveConfig";
 import { setLiveArmed } from "../live/livePersistence";
 import { productionLiveRuntime } from "../live/productionSingleton";
+import { binanceCredentialStore } from "../credentials/binanceCredentialStore";
 
 export { liveTradingEnabled } from "../live/liveConfig";
 
@@ -96,6 +98,7 @@ export interface ExecutionCoordinatorDependencies {
   getLiveOperations?: () => Promise<LiveOperations>;
   runLivePreflight?: (humanApproved?: boolean) => Promise<LiveReadiness>;
   stopLive?: () => Promise<void>;
+  credentialsConfigured?: () => Promise<boolean>;
   privateWs?: { health(): PrivateWsHealth };
   reconciliation?: { health(): { configured: boolean; running: boolean; lastRunAt: number | null } };
   market?: { readonly dataSource: DataSource };
@@ -184,6 +187,11 @@ export class ExecutionCoordinator {
 
   private settings() {
     return (this.dependencies.getSettings ?? getSettings)();
+  }
+
+  private async credentialsConfigured(): Promise<boolean> {
+    if (this.dependencies.credentialsConfigured) return this.dependencies.credentialsConfigured();
+    return getLivePublicStatus(this.dependencies.env ?? process.env).credentialsConfigured;
   }
 
   private liveSupported(): boolean {
@@ -377,10 +385,10 @@ export class ExecutionCoordinator {
     positions: PositionView[],
     preflight: LiveReadiness,
     adapterConfigured: boolean,
+    credentialsConfigured: boolean,
   ): ExecutionStatus {
     const env = this.dependencies.env ?? process.env;
     const environmentEnabled = liveTradingEnabled(env);
-    const credentialsConfigured = getLivePublicStatus(env).credentialsConfigured;
     const frame = this.lastMomentumFrame;
     const frameFresh = frame !== null && frame.quality === "GOOD"
       && this.now() >= frame.received_time && this.now() - frame.received_time <= 5_000;
@@ -467,11 +475,11 @@ export class ExecutionCoordinator {
     settings: TradingSettings,
     controls: LiveControls,
     adapterConfigured: boolean,
+    credentialsConfigured: boolean,
   ): Promise<LiveReadiness> {
     const env = this.dependencies.env ?? process.env;
     const basicGates = settings.executionMode === "LIVE_MAINNET" && controls.armed
-      && adapterConfigured && liveTradingEnabled(env)
-      && getLivePublicStatus(env).credentialsConfigured;
+      && adapterConfigured && liveTradingEnabled(env) && credentialsConfigured;
     if (basicGates) return this.currentPreflight();
     return Promise.resolve({
       ready: false,
@@ -496,8 +504,11 @@ export class ExecutionCoordinator {
       positionPromise,
     ]);
     const adapterConfigured = settings.executionMode === "LIVE_MAINNET" && selectedAdapter !== null;
-    const preflight = await this.statusPreflight(settings, controls, adapterConfigured);
-    return this.buildStatus(settings, controls, outstanding, operations, positions, preflight, adapterConfigured);
+    const credentialsConfigured = await this.credentialsConfigured();
+    const preflight = await this.statusPreflight(settings, controls, adapterConfigured, credentialsConfigured);
+    return this.buildStatus(
+      settings, controls, outstanding, operations, positions, preflight, adapterConfigured, credentialsConfigured,
+    );
   }
 
   async dashboard(): Promise<ExecutionDashboard> {
@@ -532,12 +543,15 @@ export class ExecutionCoordinator {
       ? await this.dependencies.getOutstandingRisk()
       : await defaultOutstandingRisk(Promise.resolve(snapshot.positions));
     const adapterConfigured = settings.executionMode === "LIVE_MAINNET" && selectedAdapter !== null;
-    const preflight = await this.statusPreflight(settings, controls, adapterConfigured);
+    const credentialsConfigured = await this.credentialsConfigured();
+    const preflight = await this.statusPreflight(settings, controls, adapterConfigured, credentialsConfigured);
     return {
       ...snapshot,
       ...operations,
       settings,
-      status: this.buildStatus(settings, controls, outstanding, operations, snapshot.positions, preflight, adapterConfigured),
+      status: this.buildStatus(
+        settings, controls, outstanding, operations, snapshot.positions, preflight, adapterConfigured, credentialsConfigured,
+      ),
     };
   }
 
@@ -549,7 +563,7 @@ export class ExecutionCoordinator {
         if (this.marketSource === "TESTNET") throw new Error("TESTNET 行情禁止 armed");
         const env = this.dependencies.env ?? process.env;
         if (!liveTradingEnabled(env)) throw new Error("LIVE_TRADING_ENABLED 未开启");
-        if (!getLivePublicStatus(env).credentialsConfigured) throw new Error("主网凭据未配置");
+        if (!await this.credentialsConfigured()) throw new Error("主网凭据未配置");
         if (!this.liveSupported()) throw new Error("LIVE_MAINNET adapter 尚未配置");
         const preflight = await this.currentPreflight(true);
         if (!preflight.ready) throw new Error(`主网预检未通过：${preflight.reasons.join("；") || "未知原因"}`);
@@ -600,6 +614,9 @@ export const executionCoordinator = createExecutionCoordinator({
   getLiveAdapter: (humanApproved) => productionLiveRuntime.getLiveAdapter(humanApproved),
   runLivePreflight: (humanApproved) => productionLiveRuntime.runLivePreflight(humanApproved),
   stopLive: () => productionLiveRuntime.stop(),
+  credentialsConfigured: async () => (
+    await hasConfiguredLiveCredentials(process.env, () => binanceCredentialStore.status())
+  ).credentialsConfigured,
   privateWs: productionLiveRuntime.privateWs,
   reconciliation: productionLiveRuntime.reconciliation,
 });

@@ -2,9 +2,11 @@ import { eq, notInArray } from "drizzle-orm";
 import { liveControls, liveIntents, liveOrders } from "@db/schema";
 import { getDb } from "../queries/connection";
 import { getSettings, TERMINAL_EXECUTION_STATUSES } from "../queries/trading";
+import { binanceCredentialStore } from "../credentials/binanceCredentialStore";
 import { DrizzleLiveOrderStore } from "./drizzleLiveOrderStore";
 import { createProductionLiveRuntime } from "./productionRuntime";
-import { createBinanceProductionLiveServices } from "./productionServices";
+import { createBinanceProductionLiveServicesFromStore } from "./productionServices";
+import { hasConfiguredLiveCredentials } from "./liveConfig";
 
 export const productionLiveRuntime = createProductionLiveRuntime({
   env: process.env,
@@ -23,7 +25,10 @@ export const productionLiveRuntime = createProductionLiveRuntime({
     ]);
     return positions.length > 0 || intents.length > 0 || orders.length > 0;
   },
-  createServices: () => createBinanceProductionLiveServices({ env: process.env, db: getDb() }),
+  credentialsConfigured: async () => (
+    await hasConfiguredLiveCredentials(process.env, () => binanceCredentialStore.status())
+  ).credentialsConfigured,
+  createServices: () => createBinanceProductionLiveServicesFromStore({ env: process.env, db: getDb() }),
 });
 
 export function stopProductionLiveServices(): Promise<void> {

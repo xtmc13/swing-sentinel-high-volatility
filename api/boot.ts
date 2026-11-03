@@ -9,6 +9,7 @@ import { log } from "./lib/logger";
 import { handleClientLog } from "./lib/clientlog";
 import { REQUEST_ID_HEADER, runWithRequestId } from "./lib/requestcontext";
 import { installProductionShutdown } from "./lib/processShutdown";
+import { credentialBodyLimit } from "./lib/httpLimits";
 import { stopProductionLiveServices } from "./live/productionSingleton";
 import { engine, startAutomation } from "./services/engine";
 import {
@@ -101,6 +102,7 @@ app.post(
 // rebuild throw `TypeError: Cannot read private member #state ...`, so every
 // bodyless request (DELETE/PATCH on the app's own REST routes) 500s at dispatch.
 // /api/log keeps its own 64KB caps in lib/clientlog.ts, so it needs no middleware.
+app.use("/api/trpc/*", credentialBodyLimit);
 app.use("/api/trpc/*", bodyLimit({ maxSize: 50 * 1024 * 1024 }));
 app.use("/api/trpc/*", async (c) => {
   return fetchRequestHandler({

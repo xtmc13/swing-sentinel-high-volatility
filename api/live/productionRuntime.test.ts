@@ -40,6 +40,7 @@ function setup(options: {
   armed?: boolean;
   outstanding?: boolean;
   createServices?: () => ProductionLiveServices;
+  storedCredentials?: boolean;
 } = {}) {
   const settings = { ...DEFAULT_SETTINGS, executionMode: options.executionMode ?? "LIVE_MAINNET" };
   const runtime = createProductionLiveRuntime({
@@ -51,6 +52,8 @@ function setup(options: {
     getSettings: async () => settings,
     getLiveControls: async () => ({ armed: options.armed ?? false }),
     hasOutstandingLiveRisk: async () => options.outstanding ?? false,
+    credentialsConfigured: options.storedCredentials === undefined
+      ? undefined : async () => options.storedCredentials === true,
     createServices: options.createServices ?? services,
   });
   return { runtime, settings };
@@ -83,6 +86,19 @@ describe("production live runtime gates", () => {
 
     await expect(h.runtime.getLiveAdapter()).resolves.toBeNull();
     expect(createServices).not.toHaveBeenCalled();
+  });
+
+  it("accepts stored credential status without env credentials while preserving every other gate", async () => {
+    const createServices = vi.fn(services);
+    const h = setup({
+      env: { LIVE_TRADING_ENABLED: "true" },
+      armed: true,
+      storedCredentials: true,
+      createServices,
+    });
+
+    await expect(h.runtime.getLiveAdapter()).resolves.not.toBeNull();
+    expect(createServices).toHaveBeenCalledTimes(1);
   });
 
   it("explicit arming approval constructs and starts one shared lifecycle", async () => {

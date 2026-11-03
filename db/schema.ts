@@ -73,6 +73,18 @@ export const liveControls = mysqlTable("live_controls", {
   updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
 });
 
+export const binanceCredentials = mysqlTable("binance_credentials", {
+  id: int("id").primaryKey().default(1),
+  exchange: varchar("exchange", { length: 16 }).notNull().default("BINANCE"),
+  environment: varchar("environment", { length: 16 }).notNull().default("MAINNET"),
+  ciphertext: text("ciphertext").notNull(),
+  iv: varchar("iv", { length: 32 }).notNull(),
+  tag: varchar("tag", { length: 32 }).notNull(),
+  keyVersion: int("key_version").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow().onUpdateNow(),
+});
+
 export const positions = mysqlTable("positions", {
   id: varchar("id", { length: 36 }).primaryKey(),
   signalId: varchar("signal_id", { length: 160 }),

@@ -6,7 +6,14 @@ import { binance } from "../services/binance";
 import { alignedCorrelation } from "../services/risk";
 import { log } from "../lib/logger";
 import { BinanceSignedClient } from "./binanceSigned";
-import { createLiveAdapter, createLiveAdmissionGuard, type ServerEnvironment } from "./liveConfig";
+import { binanceCredentialStore } from "../credentials/binanceCredentialStore";
+import {
+  createLiveAdapter,
+  createLiveAdmissionGuard,
+  createStoredLiveAdapter,
+  type LiveCredentials,
+  type ServerEnvironment,
+} from "./liveConfig";
 import { DrizzleLiveOrderStore } from "./drizzleLiveOrderStore";
 import { createMainnetLiveExecutionAdapter } from "./liveExecution";
 import {
@@ -108,6 +115,18 @@ function defaultSocket(url: string): UserDataSocket {
     set onerror(handler: UserDataSocket["onerror"]) { socket.onerror = handler; },
     close: () => socket.close(),
   };
+}
+
+export async function createBinanceProductionLiveServicesFromStore(
+  options: ProductionServicesOptions,
+  loadStored: () => Promise<LiveCredentials | null> = () => binanceCredentialStore.load(),
+): Promise<ProductionLiveServices> {
+  const client = options.client ?? await createStoredLiveAdapter(
+    options.env,
+    loadStored,
+    (credentials) => new BinanceSignedClient(credentials),
+  );
+  return createBinanceProductionLiveServices({ ...options, client });
 }
 
 export function createBinanceProductionLiveServices(options: ProductionServicesOptions): ProductionLiveServices {

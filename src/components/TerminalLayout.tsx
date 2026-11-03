@@ -7,7 +7,6 @@ import {
 import { toast } from "sonner";
 import { trpc } from "@/providers/trpc";
 import { formatCompact, formatPercent, formatPrice, formatTime } from "@/lib/format";
-import AdminAccess from "@/components/AdminAccess";
 import { executionEngineActive } from "@/lib/executionStatus";
 
 const navItems = [
@@ -155,7 +154,6 @@ export default function TerminalLayout() {
       </aside>
 
       <main className="min-w-0 pb-20 lg:ml-[264px] lg:pb-0">
-        <AdminAccess />
         {dashboard.isLoading ? (
           <div className="p-4 sm:p-6">
             <div className="terminal-label mb-4">INITIALIZING TRADING LOOP</div>

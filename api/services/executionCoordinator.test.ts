@@ -111,6 +111,7 @@ function adapter(overrides: Partial<ExecutionAdapter> = {}): ExecutionAdapter {
   return {
     open: vi.fn(async () => ({ ok: true as const, positionId: "paper-position", reason: "模拟开仓成交" })),
     close: vi.fn(async () => ({ ok: true as const, reason: "人工平仓", pnl: 1, unsettled: false as const, alreadyClosed: false as const })),
+    tightenStop: vi.fn(async () => ({ ok: true as const, changed: false as const, reason: "测试不改单" })),
     manage: vi.fn(async () => undefined),
     emergency: vi.fn(async () => ({ ok: true, paused: true as const, settled: [], unsettled: [] })),
     account: vi.fn(async () => account),

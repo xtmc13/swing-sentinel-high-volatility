@@ -23,6 +23,7 @@ import {
   getAccountSnapshotWithPositions,
   manageOpenPositions,
   openPaperPosition,
+  tightenPaperPositionStop,
 } from "./paper";
 import {
   evaluateMomentumExit,
@@ -54,6 +55,9 @@ export type OpenExecutionResult =
   | { ok: false; reason: string };
 export type CloseExecutionResult = Awaited<ReturnType<typeof closePaperPosition>>
   | { ok: true; reason: string; pnl: number; unsettled: true; alreadyClosed: false };
+export type StopTightenResult =
+  | { ok: true; changed: boolean; reason: string }
+  | { ok: false; changed: false; reason: string };
 export type EmergencyExecutionResult = Awaited<ReturnType<typeof emergencyStop>>;
 
 export interface ExecutionSnapshot {
@@ -68,6 +72,7 @@ export interface ExecutionAdapter {
     options?: { manualCanary?: boolean },
   ): Promise<OpenExecutionResult>;
   close(positionId: string, reason?: string): Promise<CloseExecutionResult>;
+  tightenStop(positionId: string, stopPrice: number, reason: string): Promise<StopTightenResult>;
   manage(): Promise<void>;
   emergency(): Promise<EmergencyExecutionResult>;
   account(): Promise<AccountSnapshot>;
@@ -110,6 +115,7 @@ export interface ExecutionCoordinatorDependencies {
 export const paperExecutionAdapter: ExecutionAdapter = {
   open: openPaperPosition,
   close: closePaperPosition,
+  tightenStop: tightenPaperPositionStop,
   manage: manageOpenPositions,
   emergency: emergencyStop,
   account: getAccountSnapshot,

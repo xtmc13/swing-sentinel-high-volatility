@@ -196,6 +196,31 @@ describe("signed LIVE account and position management", () => {
     expect(await h.store.getPosition(seed.id)).toMatchObject({ quantity: "1" });
   });
 
+  it("tightens through tick normalization and persists only after NEW confirmation", async () => {
+    const h = harness("110.004");
+    await h.open();
+    h.protect();
+
+    await expect(h.adapter.tightenStop(seed.id, 104.004, "衰竭收紧")).resolves.toMatchObject({ ok: true, changed: true });
+
+    expect(h.placed.at(-1)).toMatchObject({ type: "STOP_MARKET", stopPrice: "104", reduceOnly: true });
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ stopPrice: "104" });
+  });
+
+  it("skips equal, looser, mark-crossing and exit-pending stop changes without exchange requests", async () => {
+    const h = harness("110.004");
+    await h.open();
+    h.protect();
+
+    await expect(h.adapter.tightenStop(seed.id, 95, "相同")).resolves.toMatchObject({ ok: true, changed: false });
+    await expect(h.adapter.tightenStop(seed.id, 94, "宽松")).resolves.toMatchObject({ ok: true, changed: false });
+    await expect(h.adapter.tightenStop(seed.id, 111, "越价")).resolves.toMatchObject({ ok: true, changed: false });
+    await h.store.updatePosition(seed.id, { exitPending: true });
+    await expect(h.adapter.tightenStop(seed.id, 104, "退出中")).resolves.toMatchObject({ ok: true, changed: false });
+
+    expect(h.placed.filter((order) => order.type === "STOP_MARKET")).toHaveLength(0);
+  });
+
   it("persists a trailing stop only after the exchange confirms its NEW replacement", async () => {
     const h = harness("110.004");
     await h.open();

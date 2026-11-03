@@ -215,6 +215,21 @@ describeDatabase("Task 4 真实数据库原子执行", () => {
     }
   });
 
+  it("Paper 收紧使用数据库条件更新且绝不把止损改宽松", async () => {
+    await seedState("BTCUSDT");
+    const paperService = service(independentDb(), new FakeMarket());
+    const opened = await paperService.openPaperPosition(opportunity("BTCUSDT"));
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+
+    await expect(paperService.tightenPaperPositionStop(opened.positionId, 99, "衰竭收紧")).resolves.toMatchObject({ ok: true, changed: true });
+    await expect(paperService.tightenPaperPositionStop(opened.positionId, 98.5, "宽松")).resolves.toMatchObject({ ok: true, changed: false });
+    await expect(paperService.tightenPaperPositionStop(opened.positionId, 99, "相同")).resolves.toMatchObject({ ok: true, changed: false });
+
+    const row = (await connection.getDb().select().from(schema.positions).where(eq(schema.positions.id, opened.positionId)))[0];
+    expect(row.stopPrice).toBe(99);
+  });
+
   it("跨独立连接重复平仓只有一笔 CLOSE、一笔 closedTrade 和一次账户结算", async () => {
     await seedState("BTCUSDT");
     const opener = service(independentDb(), new FakeMarket());

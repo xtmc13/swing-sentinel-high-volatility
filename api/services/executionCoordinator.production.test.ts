@@ -66,6 +66,7 @@ function adapter(positionRows: PositionView[]): ExecutionAdapter {
   return {
     open: vi.fn(async () => ({ ok: false as const, reason: "测试不下单" })),
     close: vi.fn(async () => ({ ok: false as const, reason: "测试不平仓", unsettled: true as const, alreadyClosed: false as const })),
+    tightenStop: vi.fn(async () => ({ ok: true as const, changed: false as const, reason: "测试不改单" })),
     manage: vi.fn(async () => undefined),
     emergency: vi.fn(async () => ({ ok: true, paused: true as const, settled: [], unsettled: [] })),
     account: vi.fn(async () => account),

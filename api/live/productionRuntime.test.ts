@@ -15,6 +15,7 @@ function adapter(): ExecutionAdapter {
   return {
     open: async () => ({ ok: false, reason: "fake adapter" }),
     close: async () => ({ ok: false, reason: "fake adapter", unsettled: false, alreadyClosed: true, pnl: undefined }),
+    tightenStop: async () => ({ ok: true, changed: false, reason: "fake adapter" }),
     manage: async () => undefined,
     emergency: async () => ({ ok: true, paused: true, settled: [], unsettled: [] }),
     account: async () => (await snapshot()).account,

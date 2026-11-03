@@ -100,7 +100,7 @@ export interface FillApplication {
 }
 
 export type LivePositionUpdate = Partial<Pick<LivePosition,
-  "markPrice" | "liquidationPrice" | "isolatedWallet" | "stopPrice">>;
+  "markPrice" | "liquidationPrice" | "isolatedWallet" | "stopPrice" | "exitPending">>;
 
 export interface LiveOrderStore {
   insertOrder(order: LiveOrder): Promise<void>;

@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, gt, lt, sql } from "drizzle-orm";
 import { getDb } from "../queries/connection";
 import {
   simulationAccounts,
@@ -515,6 +515,31 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
     return result;
   }
 
+  async function tightenPaperPositionStop(positionId: string, stopPrice: number, reason: string) {
+    if (!Number.isFinite(stopPrice) || stopPrice <= 0) {
+      return { ok: false as const, changed: false as const, reason: "收紧止损价格无效" };
+    }
+    const db = dbFor();
+    const row = (await db.select().from(positions).where(eq(positions.id, positionId)).limit(1))[0];
+    if (!row || row.status !== "OPEN" || row.exitPending) {
+      return { ok: true as const, changed: false as const, reason: "持仓不存在、已关闭或正在退出" };
+    }
+    const monotonic = row.side === "LONG" ? lt(positions.stopPrice, stopPrice) : gt(positions.stopPrice, stopPrice);
+    const updated = await db.update(positions).set({ stopPrice }).where(and(
+      eq(positions.id, positionId),
+      eq(positions.status, "OPEN"),
+      eq(positions.exitPending, false),
+      monotonic,
+    ));
+    const header = Array.isArray(updated) ? updated[0] : updated;
+    const changed = Number((header as { affectedRows?: number } | null)?.affectedRows ?? 0) === 1;
+    return {
+      ok: true as const,
+      changed,
+      reason: changed ? `${reason}：模拟止损已收紧` : "止损相同、宽松或持仓已变化",
+    };
+  }
+
   async function manageOpenPositions() {
     const settings = await getSettings();
     const db = dbFor();
@@ -646,13 +671,14 @@ export function createPaperService(dependencies: PaperServiceDependencies = {}) 
     return { ok: unsettled.length === 0, paused: true, settled, unsettled };
   }
 
-  return { openPaperPosition, closePaperPosition, manageOpenPositions, emergencyStop, resetPaperSimulation };
+  return { openPaperPosition, closePaperPosition, tightenPaperPositionStop, manageOpenPositions, emergencyStop, resetPaperSimulation };
 }
 
 const defaultService = createPaperService();
 
 export const openPaperPosition = defaultService.openPaperPosition;
 export const closePaperPosition = defaultService.closePaperPosition;
+export const tightenPaperPositionStop = defaultService.tightenPaperPositionStop;
 export const manageOpenPositions = defaultService.manageOpenPositions;
 export const emergencyStop = defaultService.emergencyStop;
 export const resetPaperSimulation = defaultService.resetPaperSimulation;

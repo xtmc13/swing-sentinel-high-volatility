@@ -136,6 +136,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   private readonly now: () => number;
   private readonly id: () => string;
   private readonly replacementCounts = new Map<string, number>();
+  private readonly protectionTails = new Map<string, Promise<void>>();
   private readonly entryMetadata = new Map<string,
     Pick<LivePositionSeed, "signalId" | "strategyType" | "breakoutPrice">>();
   private readonly dependencies: MainnetLiveExecutionDependencies;
@@ -339,15 +340,51 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
         continue;
       }
       if (compareDecimals(String(management.stopPrice), position.stopPrice) === 0) continue;
-      if (!position.tickSize) throw new Error(`${position.symbol} 缺少持久化 tickSize`);
-      const stopPrice = normalizeDirectionalPrice(
-        String(management.stopPrice), position.tickSize, position.side,
-      );
-      await this.updateTrailingProtection(position, stopPrice);
+      await this.tightenStop(position.id, management.stopPrice, "常规移动止损");
     }
   }
 
-  private async updateTrailingProtection(position: LivePosition, stopPrice: DecimalString): Promise<void> {
+  private async serializeProtection<T>(positionId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.protectionTails.get(positionId) ?? Promise.resolve();
+    let release!: () => void;
+    const tail = new Promise<void>((resolve) => { release = resolve; });
+    this.protectionTails.set(positionId, tail);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.protectionTails.get(positionId) === tail) this.protectionTails.delete(positionId);
+    }
+  }
+
+  async tightenStop(positionId: string, stopPrice: number, reason: string) {
+    return this.serializeProtection(positionId, async () => {
+      if (!Number.isFinite(stopPrice) || stopPrice <= 0) return { ok: false as const, changed: false as const, reason: "收紧止损价格无效" };
+      const stored = await this.dependencies.store.getPosition(positionId);
+      if (!stored || stored.status !== "OPEN" || stored.exitPending) {
+        return { ok: true as const, changed: false as const, reason: "持仓不存在、已关闭或正在退出" };
+      }
+      if (!stored.tickSize) return { ok: false as const, changed: false as const, reason: `${stored.symbol} 缺少持久化 tickSize` };
+      const [position] = await this.refreshPositions([stored]);
+      const normalized = normalizeDirectionalPrice(String(stopPrice), position.tickSize!, position.side);
+      const tighter = position.side === "LONG"
+        ? compareDecimals(normalized, position.stopPrice) > 0
+        : compareDecimals(normalized, position.stopPrice) < 0;
+      const clearOfMark = position.side === "LONG"
+        ? compareDecimals(normalized, position.markPrice) < 0
+        : compareDecimals(normalized, position.markPrice) > 0;
+      if (!tighter || !clearOfMark) {
+        return { ok: true as const, changed: false as const, reason: "止损相同、宽松或越过有效标记价" };
+      }
+      const updated = await this.updateTrailingProtection(position, normalized);
+      return updated
+        ? { ok: true as const, changed: true as const, reason: `${reason}：STOP_MARKET 已确认` }
+        : { ok: false as const, changed: false as const, reason: `${reason}：止损未一致确认，已尝试保护性退出` };
+    });
+  }
+
+  private async updateTrailingProtection(position: LivePosition, stopPrice: DecimalString): Promise<boolean> {
     try {
       let protection = (await this.dependencies.store.listActiveProtectionOrders())
         .find((order) => order.intentId === position.id);
@@ -362,6 +399,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       }
       const persisted = await this.dependencies.store.updatePosition(position.id, { stopPrice });
       if (!persisted) throw new Error("STOP_MARKET 已确认但持仓持久化失败");
+      return true;
     } catch (error) {
       this.dependencies.alert?.(
         `${position.symbol} 移动止损未一致确认，保留原持久止损并尝试 reduceOnly 退出：${error instanceof Error ? error.message : String(error)}`,
@@ -376,6 +414,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
           `${position.symbol} reduceOnly 退出提交失败：${exitError instanceof Error ? exitError.message : String(exitError)}`,
         );
       }
+      return false;
     }
   }
 

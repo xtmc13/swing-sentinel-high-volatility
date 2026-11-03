@@ -19,6 +19,7 @@ import {
   type LiveOrderStore,
   type LivePosition,
   type LivePositionSeed,
+  type LivePositionUpdate,
 } from "./orderStateMachine";
 
 type Reader = LiveDatabase | LiveTransaction;
@@ -366,7 +367,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
 
   async updatePosition(
     positionId: string,
-    patch: Partial<Pick<LivePosition, "markPrice" | "liquidationPrice" | "isolatedWallet" | "stopPrice">>,
+    patch: LivePositionUpdate,
   ): Promise<LivePosition | null> {
     return this.db.transaction(async (tx) => {
       const current = await readPosition(tx, positionId, true);
@@ -375,6 +376,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
         markPrice: patch.markPrice ?? current.markPrice,
         liquidationPrice: patch.liquidationPrice ?? current.liquidationPrice,
         isolatedWallet: patch.isolatedWallet ?? current.isolatedWallet,
+        exitPending: patch.exitPending ?? current.exitPending ?? false,
       }).where(eq(livePositions.id, positionId));
       if (patch.stopPrice !== undefined) {
         await tx.update(liveIntents).set({ stopPrice: patch.stopPrice }).where(eq(liveIntents.id, positionId));

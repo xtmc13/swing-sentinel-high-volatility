@@ -22,6 +22,7 @@ function adapter(label: string): ExecutionAdapter {
   return {
     open: async () => ({ ok: false, reason: "test only" }),
     close: async () => ({ ok: false, reason: "test only", unsettled: false, alreadyClosed: true, pnl: undefined }),
+    tightenStop: async () => ({ ok: true, changed: false, reason: "test only" }),
     manage: async () => undefined,
     emergency: async () => ({ ok: true, paused: true, settled: [], unsettled: [] }),
     account: async () => (await snapshot()).account,

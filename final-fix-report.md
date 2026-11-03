@@ -115,3 +115,25 @@ Test resources were cleaned afterward: `swing_sentinel_final_fix1_test`, `swing_
 - Permission-restricted real read-only account/positionRisk/listenKey/income verification remains unexecuted.
 - A real minimal-whitelist canary, native fill/protection/cancel/close/restart reconciliation, and the subsequent observation period remain unexecuted and require separate explicit user authorization.
 - Automatic LIVE trading must remain off until those gates pass and the user explicitly enables one whitelisted symbol.
+
+## Final re-review residual fixes
+
+### Trailing-stop atomicity and reconciliation
+
+- RED: the real replacement regression observed the new stop persisted before transport; cancel-timeout and replacement-UNKNOWN cases persisted `104.5` while protection was unresolved; post-NEW DB failure escaped without fallback. Restart reconciliation accepted a remote stop at `94` while the persisted stop was `95`.
+- GREEN: a trailing stop is persisted only after a matching NEW native replacement. Missing/non-NEW/UNKNOWN replacement, cancel timeout, and DB failure retain the old stored stop, emit an alert, and attempt reduceOnly exit. Reconciliation now requires native stop quantity and price to match persisted protection.
+- Proof: `api/live/liveExecution.management.test.ts` (7 passed) and `api/live/reconciliation.test.ts` (24 passed).
+
+### Canary minimum exchange-safe quantity
+
+- RED: production composition transported the normal risk quantity `0.4` for both normal and manual canary orders.
+- GREEN: manualCanary is carried into final sizing. Canary quantity is exactly `max(minQty, ceil(minNotional/entryPrice))` rounded upward to step; it is rejected if above the approved risk/margin quantity. Portfolio admission uses the actual canary reserved risk. Production-composition evidence: normal `0.4`, canary `0.05`, over-risk canary rejected without another transport.
+- Proof: `api/live/productionServices.canary.integration.test.ts` RED→GREEN against the real persistence path and fake exchange.
+
+### Residual verification and commit
+
+- Implementation commit: `5fa2445` (`fix: align trailing protection and canary sizing`).
+- Serialized full suite with three independent disposable DBs: **56 files, 511 passed, 0 failed**.
+- `npm run check`, `npm run lint`, `npm run build`, and `git diff --check`: exit 0.
+- Disposable DBs and test-only user were dropped again; verification queries returned no rows.
+- No real exchange calls, credentials, orders, subagents, push, or preview services were used.

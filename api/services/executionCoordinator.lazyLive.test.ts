@@ -84,8 +84,20 @@ describe("lazy production live adapter", () => {
     const h = setup({ executionMode: "LIVE_MAINNET", getLiveAdapter: async () => null });
 
     const dashboard = await h.coordinator.dashboard();
-    expect(dashboard.account.valuationValid).toBe(false);
-    expect(dashboard.account.cash).not.toBe(100);
+    expect(dashboard.account).toEqual({
+      equity: 0,
+      cash: 0,
+      availableMargin: 0,
+      usedMargin: 0,
+      unrealizedPnl: 0,
+      realizedPnl: 0,
+      todayPnl: 0,
+      todayPnlPct: 0,
+      dayStartEquity: 0,
+      valuationValid: false,
+      valuationIssues: ["LIVE_MAINNET adapter 尚未配置"],
+      dailyLocked: true,
+    });
     expect(dashboard.status.adapterConfigured).toBe(false);
     expect(dashboard.status.canSubmit).toBe(false);
   });

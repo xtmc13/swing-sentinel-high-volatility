@@ -461,15 +461,15 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   async snapshot(): Promise<ExecutionSnapshot> {
     const [account, positions] = await Promise.all([
       this.account().catch((): AccountSnapshot => ({
-        equity: Number.NaN,
-        cash: Number.NaN,
-        availableMargin: Number.NaN,
-        usedMargin: Number.NaN,
-        unrealizedPnl: Number.NaN,
-        realizedPnl: Number.NaN,
-        todayPnl: Number.NaN,
-        todayPnlPct: Number.NaN,
-        dayStartEquity: Number.NaN,
+        equity: 0,
+        cash: 0,
+        availableMargin: 0,
+        usedMargin: 0,
+        unrealizedPnl: 0,
+        realizedPnl: 0,
+        todayPnl: 0,
+        todayPnlPct: 0,
+        dayStartEquity: 0,
         valuationValid: false,
         valuationIssues: ["签名 LIVE 账户或持仓估值不可用"],
         dailyLocked: true,
@@ -486,9 +486,9 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   private positionView(position: LivePosition, signedValuation: boolean): PositionView {
     const quantity = Number(position.quantity);
     const entryPrice = Number(position.entryPrice);
-    const markPrice = signedValuation ? Number(position.markPrice) : Number.NaN;
+    const markPrice = signedValuation ? Number(position.markPrice) : 0;
     const direction = position.side === "LONG" ? 1 : -1;
-    const unrealizedPnl = signedValuation ? direction * quantity * (markPrice - entryPrice) : Number.NaN;
+    const unrealizedPnl = signedValuation ? direction * quantity * (markPrice - entryPrice) : 0;
     const margin = Number(position.isolatedWallet);
     const initialStop = position.initialStopPrice == null ? Number.NaN : Number(position.initialStopPrice);
     const initialRisk = Math.abs(Number(position.initialQuantity) * (entryPrice - initialStop));
@@ -513,11 +513,11 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       leverage: Number(position.leverage),
       margin,
       unrealizedPnl,
-      unrealizedPct: valuationValid && margin > 0 ? unrealizedPnl / margin * 100 : Number.NaN,
-      realizedPnl: Number.NaN,
+      unrealizedPct: valuationValid && margin > 0 ? unrealizedPnl / margin * 100 : 0,
+      realizedPnl: 0,
       openedAt: new Date(position.openedAt).toISOString(),
       holdingMinutes: Math.max(0, (this.now() - position.openedAt) / 60_000),
-      rMultiple: valuationValid && initialRisk > 0 ? unrealizedPnl / initialRisk : Number.NaN,
+      rMultiple: valuationValid && initialRisk > 0 ? unrealizedPnl / initialRisk : 0,
       valuationValid,
     };
   }

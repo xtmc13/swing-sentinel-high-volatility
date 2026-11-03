@@ -125,7 +125,7 @@ describe("signed LIVE account and position management", () => {
     expect(timeout.placed.at(-1)).toMatchObject({ type: "MARKET", reduceOnly: true });
   });
 
-  it("returns an unavailable LIVE snapshot instead of stale marks or zero PnL when signed REST fails", async () => {
+  it("returns zero display values without clearing unavailable flags when signed REST fails", async () => {
     const h = harness();
     await h.open();
     h.gateway.account = async () => { throw new Error("offline"); };
@@ -133,11 +133,37 @@ describe("signed LIVE account and position management", () => {
 
     const snapshot = await h.adapter.snapshot();
 
-    expect(snapshot.account).toMatchObject({ valuationValid: false, dailyLocked: true });
-    expect(snapshot.account.equity).toBeNaN();
-    expect(snapshot.account.unrealizedPnl).toBeNaN();
-    expect(snapshot.positions[0]).toMatchObject({ valuationValid: false, unrealizedPnl: Number.NaN });
-    expect(snapshot.positions[0]?.markPrice).toBeNaN();
+    expect(snapshot.account).toEqual({
+      equity: 0,
+      cash: 0,
+      availableMargin: 0,
+      usedMargin: 0,
+      unrealizedPnl: 0,
+      realizedPnl: 0,
+      todayPnl: 0,
+      todayPnlPct: 0,
+      dayStartEquity: 0,
+      valuationValid: false,
+      valuationIssues: ["签名 LIVE 账户或持仓估值不可用"],
+      dailyLocked: true,
+    });
+    expect(snapshot.positions[0]).toMatchObject({
+      qty: 1,
+      initialQty: 1,
+      entryPrice: 100,
+      markPrice: 0,
+      stopPrice: 95,
+      targetPrice: 111,
+      liquidationPrice: 50,
+      leverage: 5,
+      margin: 0,
+      unrealizedPnl: 0,
+      unrealizedPct: 0,
+      realizedPnl: 0,
+      rMultiple: 0,
+      valuationValid: false,
+    });
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ quantity: "1" });
   });
 
   it("persists a trailing stop only after the exchange confirms its NEW replacement", async () => {

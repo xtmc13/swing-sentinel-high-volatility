@@ -503,17 +503,19 @@ describe("三态引擎编排", () => {
     expect(h.opened).toHaveLength(2);
   });
 
-  it("EXTREME 立即阻断新开仓", async () => {
+  it("EXTREME 保留衰竭诊断但立即阻断新开仓", async () => {
     const h = harness({
       settings: { autoTrade: true },
       states: { BTCUSDT: state("BTCUSDT", "EXTREME") },
     });
     await h.engine.tick();
     expect(h.opened).toHaveLength(0);
-    expect(h.analyses()).toBe(0);
+    expect(h.analyses()).toBe(1);
+    expect(h.engine.opportunities).toHaveLength(1);
+    expect(h.engine.opportunities[0]).toMatchObject({ status: "BLOCKED" });
   });
 
-  it("断流转为 EXTREME 并保证零新开仓", async () => {
+  it("断流转为 EXTREME 只保留阻断诊断并保证零新开仓", async () => {
     const quality = { ...validQuality, valid: false, reasons: ["WebSocket断开"] };
     const h = harness({
       settings: { autoTrade: true },
@@ -524,7 +526,8 @@ describe("三态引擎编排", () => {
     await h.engine.scan(true);
     expect(h.opened).toHaveLength(0);
     expect(h.states.get("BTCUSDT")?.mode).toBe("EXTREME");
-    expect(h.engine.opportunities).toHaveLength(0);
+    expect(h.engine.opportunities).toHaveLength(1);
+    expect(h.engine.opportunities[0]?.status).toBe("BLOCKED");
   });
 
   it("恢复只清理积压机会，随后必须重新扫描生成新信号才可开仓", async () => {

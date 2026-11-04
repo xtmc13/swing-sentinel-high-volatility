@@ -478,8 +478,7 @@ export class TradingEngine {
       const generation = this.generation;
       const signalCandidates = candidates.filter((item) => {
         const current = this.states.get(item.symbol);
-        return current && current.mode !== "EXTREME" && !this.failedRiskSymbols.has(item.symbol)
-          && this.symbolQuality(item.symbol).valid;
+        return current && !this.failedRiskSymbols.has(item.symbol);
       });
       const results = await mapWithConcurrency(signalCandidates, this.deps.concurrency, async (item) => {
         const current = this.states.get(item.symbol)!;
@@ -494,7 +493,13 @@ export class TradingEngine {
       const opportunities: Opportunity[] = [];
       for (const [index, result] of results.entries()) {
         if (result.status === "fulfilled") {
-          opportunities.push(result.value);
+          const symbol = signalCandidates[index].symbol;
+          const diagnosticOnly = this.states.get(symbol)?.mode === "EXTREME" || !this.symbolQuality(symbol).valid;
+          opportunities.push(diagnosticOnly ? {
+            ...result.value,
+            status: "BLOCKED",
+            reasons: [...result.value.reasons, "风险状态或行情质量不合格，仅供衰竭诊断"],
+          } : result.value);
         } else {
           const symbol = signalCandidates[index].symbol;
           log.error("opportunity analysis failed", { symbol, error: String(result.reason) });

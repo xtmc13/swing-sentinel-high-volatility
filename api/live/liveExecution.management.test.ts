@@ -142,6 +142,27 @@ describe("signed LIVE account and position management", () => {
     });
   });
 
+  it("uses Binance account-wide totals instead of dropping non-USDT wallet balances", async () => {
+    const h = harness();
+    h.gateway.account = async () => ({
+      assets: [
+        { asset: "USDT", walletBalance: "0", availableBalance: "0" },
+        { asset: "USDC", walletBalance: "0.00009177", availableBalance: "0.00009174" },
+      ],
+      totalWalletBalance: "0.00009174",
+      totalMarginBalance: "0.00009174",
+      availableBalance: "0.00009174",
+    });
+    h.gateway.positionRisk = async () => [];
+
+    await expect(h.adapter.account()).resolves.toMatchObject({
+      equity: 0.00009174,
+      cash: 0.00009174,
+      availableMargin: 0.00009174,
+      valuationValid: true,
+    });
+  });
+
   it("rejects an invalid signed equity instead of treating it as a real zero", async () => {
     const h = harness();
     h.gateway.account = async () => ({ assets: [{ asset: "USDT", walletBalance: "unavailable", availableBalance: "unavailable" }] });

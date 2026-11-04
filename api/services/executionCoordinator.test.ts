@@ -645,6 +645,21 @@ describe("ExecutionCoordinator", () => {
     expect(failed.live.open).not.toHaveBeenCalled();
   });
 
+  it("未armed也执行只读预检并展示真实原因，但仍禁止提交", async () => {
+    const h = setup({
+      settings: { executionMode: "LIVE_MAINNET", autoTrade: false },
+      env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key", BINANCE_MAINNET_API_SECRET: "fake-secret" },
+      armed: false,
+      preflight: { ready: false, reasons: ["账户必须启用 one-way 模式"], checkedAt: new Date(1_800_000_001_000).toISOString() },
+    });
+
+    const status = await h.coordinator.status();
+
+    expect(h.runLivePreflight).toHaveBeenCalledTimes(1);
+    expect(status.preflight.reasons).toContain("账户必须启用 one-way 模式");
+    expect(status.canSubmit).toBe(false);
+  });
+
   it("armed 只在环境总开关和完整预检通过后持久化，disarm 不依赖预检", async () => {
     const blocked = setup({
       settings: { executionMode: "LIVE_MAINNET" },
@@ -662,7 +677,7 @@ describe("ExecutionCoordinator", () => {
     await expect(h.coordinator.setArmed(true)).resolves.toMatchObject({ armed: true });
     expect(h.setLiveControls).toHaveBeenCalledWith({ armed: true });
     await expect(h.coordinator.setArmed(false)).resolves.toMatchObject({ armed: false });
-    expect(h.runLivePreflight).toHaveBeenCalledTimes(2);
+    expect(h.runLivePreflight).toHaveBeenCalledTimes(3);
   });
 
   it("状态复用 MAINNET 凭据公共配置且只报告布尔值", async () => {

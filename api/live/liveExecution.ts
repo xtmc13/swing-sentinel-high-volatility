@@ -478,12 +478,12 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     }
     let equity: number;
     try {
-      equity = Number(addDecimals(asset.walletBalance, unrealizedPnl));
+      equity = Number(response.totalMarginBalance ?? addDecimals(asset.walletBalance, unrealizedPnl));
     } catch {
       return unavailableAccount();
     }
-    const availableMargin = Number(asset.availableBalance);
-    const cash = Number(asset.walletBalance);
+    const availableMargin = Number(response.availableBalance ?? asset.availableBalance);
+    const cash = Number(response.totalWalletBalance ?? asset.walletBalance);
     const unrealized = Number(unrealizedPnl);
     const margin = Number(usedMargin);
     if (![equity, availableMargin, cash, unrealized, margin].every(Number.isFinite)) {

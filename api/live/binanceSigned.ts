@@ -43,6 +43,9 @@ export interface BinanceAccountAsset {
 
 export interface BinanceAccountResponse {
   assets: BinanceAccountAsset[];
+  totalWalletBalance?: DecimalString;
+  totalMarginBalance?: DecimalString;
+  availableBalance?: DecimalString;
   [key: string]: unknown;
 }
 

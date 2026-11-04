@@ -1,6 +1,10 @@
 export function formatNumber(value: number, digits = 2) {
   const normalized = Number.isFinite(value) ? value : 0;
-  return normalized.toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  const precision = normalized !== 0 && Math.abs(normalized) < 0.01 && digits > 0 ? 8 : digits;
+  return normalized.toLocaleString("zh-CN", {
+    minimumFractionDigits: precision === 8 ? 0 : digits,
+    maximumFractionDigits: precision,
+  });
 }
 
 export function formatSignedNumber(value: number, valid = true, digits = 2) {

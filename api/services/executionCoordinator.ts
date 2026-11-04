@@ -585,12 +585,12 @@ export class ExecutionCoordinator {
 
   private statusPreflight(
     settings: TradingSettings,
-    controls: LiveControls,
+    _controls: LiveControls,
     adapterConfigured: boolean,
     credentialsConfigured: boolean,
   ): Promise<LiveReadiness> {
     const env = this.dependencies.env ?? process.env;
-    const basicGates = settings.executionMode === "LIVE_MAINNET" && controls.armed
+    const basicGates = settings.executionMode === "LIVE_MAINNET"
       && adapterConfigured && liveTradingEnabled(env) && credentialsConfigured;
     if (basicGates) return this.currentPreflight();
     return Promise.resolve({

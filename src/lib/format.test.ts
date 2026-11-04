@@ -26,6 +26,12 @@ describe("不可用数值的固定零值展示", () => {
     expect(formatTime("invalid")).toBe("0");
   });
 
+  it("小额非零真实余额不能四舍五入成零", () => {
+    expect(formatNumber(0.00009174)).toBe("0.00009174");
+    expect(formatNumber(-0.00009174)).toBe("-0.00009174");
+    expect(formatNumber(0)).toBe("0.00");
+  });
+
   it("保留可用数值的展示语义", () => {
     expect(formatMissedMessages(0)).toBe("0 条");
     expect(formatMissedMessages(3)).toBe("3 条");

@@ -31,6 +31,7 @@ import {
 import {
   OrderStateMachine,
   type LiveFill,
+  type LiveOrder,
   type LiveOrderStore,
   type LivePosition,
   type LivePositionSeed,
@@ -410,16 +411,39 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     });
   }
 
+  private assertPositionIdentity(position: LivePosition): void {
+    if (!this.dependencies.accountMode
+      || position.accountModeFingerprint !== this.dependencies.accountMode.fingerprint) {
+      throw new Error(`${position.symbol} 持仓 account mode fingerprint 与当前模式不一致`);
+    }
+  }
+
+  private protectionOwnedBy(position: LivePosition, order: LiveOrder): boolean {
+    return order.intentId === position.id && order.symbol === position.symbol
+      && order.positionSide === position.positionSide
+      && order.accountModeFingerprint === position.accountModeFingerprint
+      && order.entrySemantics === "REDUCE" && order.type === "STOP_MARKET";
+  }
+
+  private async currentProtection(position: LivePosition): Promise<LiveOrder | undefined> {
+    const protections = (await this.dependencies.store.listActiveProtectionOrders())
+      .filter((order) => order.intentId === position.id);
+    if (protections.some((order) => !this.protectionOwnedBy(position, order))) {
+      throw new Error("STOP_MARKET ownership, positionSide, fingerprint, or entrySemantics mismatch");
+    }
+    return protections[0];
+  }
+
   private async updateTrailingProtection(position: LivePosition, stopPrice: DecimalString): Promise<boolean | null> {
     try {
-      let protection = (await this.dependencies.store.listActiveProtectionOrders())
-        .find((order) => order.intentId === position.id);
+      this.assertPositionIdentity(position);
+      let protection = await this.currentProtection(position);
       if (!protection) await this.machine.protectPosition(position.id);
-      protection = (await this.dependencies.store.listActiveProtectionOrders())
-        .find((order) => order.intentId === position.id);
+      protection = await this.currentProtection(position);
       if (!protection || protection.status !== "NEW") throw new Error("现有 STOP_MARKET 未确认");
       const latest = await this.dependencies.store.getPosition(position.id);
       if (!latest || latest.status !== "OPEN" || latest.exitPending) return null;
+      this.assertPositionIdentity(latest);
       const tighterThanPosition = latest.side === "LONG"
         ? compareDecimals(stopPrice, latest.stopPrice) > 0
         : compareDecimals(stopPrice, latest.stopPrice) < 0;
@@ -537,8 +561,11 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     const refreshed: LivePosition[] = [];
     for (const position of positions) {
       if (!this.dependencies.accountMode
-        || (position.positionSide !== "LONG" && position.positionSide !== "SHORT")) {
-        throw new Error(`${position.symbol} 缺少持仓或账户模式身份`);
+        || position.accountModeFingerprint !== this.dependencies.accountMode.fingerprint) {
+        throw new Error(`${position.symbol} 持仓 account mode fingerprint 与当前模式不一致`);
+      }
+      if (position.positionSide !== "LONG" && position.positionSide !== "SHORT") {
+        throw new Error(`${position.symbol} 缺少持仓 positionSide 身份`);
       }
       const expectedPositionSide = this.dependencies.accountMode.dualSide ? position.positionSide : "BOTH";
       const matches = remotePositions.filter((candidate) => candidate.symbol === position.symbol

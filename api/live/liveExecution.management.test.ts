@@ -409,4 +409,62 @@ describe("signed LIVE account and position management", () => {
     expect(positions).toMatchObject([{ side: "LONG", markPrice: 0, valuationValid: false }]);
     expect(await h.store.getPosition(seed.id)).toMatchObject({ quantity: "1", markPrice: "100" });
   });
+
+  it("stale-fingerprint restart management performs zero protection or close transport", async () => {
+    const staleMode = { dualSide: false, fingerprint: "1".repeat(64) } as const;
+    const h = harness("110", NOW - 60_000, staleMode);
+    await h.open();
+    h.protect();
+    const cancellations: string[] = [];
+    const cancelOrder = h.gateway.cancelOrder;
+    h.gateway.cancelOrder = async (request) => {
+      cancellations.push(request.origClientOrderId ?? "missing");
+      return cancelOrder(request);
+    };
+    const restarted = new MainnetLiveExecutionAdapter({
+      store: h.store,
+      gateway: h.gateway,
+      workerId: "worker-restarted",
+      now: () => NOW,
+      getSettings: async () => ({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET", leverageMode: "FIXED", fixedLeverage: 5 }),
+      accounting: { listLedgerEntries: async () => [] },
+      dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) },
+      alert: (message) => h.alerts.push(message),
+      assertCurrentAdmission: async () => undefined,
+      accountMode: ACCOUNT_MODE,
+      createIntent: async () => { throw new Error("not used"); },
+      claimIntent: async () => { throw new Error("not used"); },
+      pauseAutoTrade: async () => undefined,
+      prepareIntent: () => { throw new Error("not used"); },
+      finalGate: () => { throw new Error("not used"); },
+    });
+
+    await expect(restarted.manage()).rejects.toThrow("fingerprint");
+    await expect(restarted.tightenStop(seed.id, 104, "重启后收紧")).rejects.toThrow("fingerprint");
+
+    expect(cancellations).toHaveLength(0);
+    expect(h.placed).toHaveLength(0);
+  });
+
+  it.each([
+    { name: "legacy-null fingerprint", patch: { accountModeFingerprint: null } },
+    { name: "wrong semantics", patch: { entrySemantics: "ENTRY" } },
+    { name: "legacy-null semantics", patch: { entrySemantics: null } },
+  ] as const)("live trailing-stop discovery freezes and alerts for $name", async ({ patch }) => {
+    const h = harness("110");
+    await h.open();
+    h.protect();
+    const cancellations: string[] = [];
+    const cancelOrder = h.gateway.cancelOrder;
+    h.gateway.cancelOrder = async (request) => {
+      cancellations.push(request.origClientOrderId ?? "missing");
+      return cancelOrder(request);
+    };
+    await h.store.transitionOrder("protect-intent-live", ["NEW"], patch);
+
+    await expect(h.adapter.tightenStop(seed.id, 104, "身份校验")).resolves.toMatchObject({ ok: false, changed: false });
+
+    expect(h.alerts.length).toBeGreaterThan(0);
+    expect(cancellations).toHaveLength(0);
+  });
 });

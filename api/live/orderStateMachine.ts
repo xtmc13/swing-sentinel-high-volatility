@@ -522,9 +522,8 @@ export class OrderStateMachine {
 
   private async cancelResidualProtection(position: LivePosition): Promise<string[]> {
     const unresolved: string[] = [];
-    const protections = (await this.store.listOrders()).filter((order) => order.intentId === position.id
-      && order.symbol === position.symbol && order.positionSide === position.positionSide
-      && order.entrySemantics === "REDUCE" && order.type === "STOP_MARKET" && WORKING_STATUSES.has(order.status));
+    const protections = (await this.store.listOrders()).filter((order) => this.protectionOwnedBy(position, order)
+      && WORKING_STATUSES.has(order.status));
     for (const protection of protections) {
       try {
         if (protection.status !== "PENDING_SEND") {
@@ -670,14 +669,25 @@ export class OrderStateMachine {
     return terminal;
   }
 
-  private async closeQuantity(position: LivePosition): Promise<DecimalString> {
+  private assertPositionIdentity(position: LivePosition): void {
     if (!this.accountMode || position.accountModeFingerprint !== this.accountMode.fingerprint) {
       throw new Error("Position account mode fingerprint mismatch");
     }
     if (position.positionSide !== "LONG" && position.positionSide !== "SHORT") {
       throw new Error("Position positionSide is required");
     }
-    if (!this.accountMode.dualSide) return position.quantity;
+  }
+
+  private protectionOwnedBy(position: LivePosition, order: LiveOrder): boolean {
+    return order.intentId === position.id && order.symbol === position.symbol
+      && order.positionSide === position.positionSide
+      && order.accountModeFingerprint === position.accountModeFingerprint
+      && order.entrySemantics === "REDUCE" && order.type === "STOP_MARKET";
+  }
+
+  private async closeQuantity(position: LivePosition): Promise<DecimalString> {
+    this.assertPositionIdentity(position);
+    if (!this.accountMode!.dualSide) return position.quantity;
     if (!this.gateway.positionRisk) throw new Error("Dual close requires signed positionRisk");
     const matches = (await this.gateway.positionRisk(position.symbol)).filter((candidate) =>
       candidate.symbol === position.symbol && candidate.positionSide === position.positionSide);
@@ -691,7 +701,7 @@ export class OrderStateMachine {
   async closePosition(positionId: string): Promise<LiveOrder | null> {
     const position = await this.store.getPosition(positionId);
     if (!position || position.status !== "OPEN" || compareDecimals(position.quantity, "0") <= 0) return null;
-    const quantity = await this.closeQuantity(position);
+    this.assertPositionIdentity(position);
     let clientOrderId = `close-${positionId}`;
     const reuse = async (id: string) => {
       const existing = await this.store.getOrder(id);
@@ -704,10 +714,14 @@ export class OrderStateMachine {
       }
       return existing.status === "PENDING_SEND" ? this.submit(id) : existing;
     };
-    const closeOrders = (await this.store.listOrders()).filter((order) => order.intentId === positionId
-      && order.type === "MARKET" && order.entrySemantics === "REDUCE"
-      && new RegExp(`^close-${positionId}(?:-retry-\\d+)?$`).test(order.clientOrderId));
-    let latest = closeOrders.at(-1);
+    const closeOrders = (await this.store.listOrders()).flatMap((order) => {
+      const match = new RegExp(`^close-${positionId}(?:-retry-(\\d+))?$`).exec(order.clientOrderId);
+      if (order.intentId !== positionId || order.type !== "MARKET" || order.entrySemantics !== "REDUCE" || !match) {
+        return [];
+      }
+      return [{ order, sequence: match[1] === undefined ? 0 : Number(match[1]) }];
+    }).sort((left, right) => left.sequence - right.sequence || left.order.id.localeCompare(right.order.id));
+    let latest = closeOrders.at(-1)?.order;
     if (latest) {
       let reused = await reuse(latest.clientOrderId);
       if (reused && ["UNKNOWN", "RECONCILING"].includes(reused.status)) {
@@ -716,12 +730,13 @@ export class OrderStateMachine {
       if (!reused || reused.status !== "CANCEL") return reused;
       latest = reused;
       const cancelled = reused;
-      const retry = closeOrders.filter((order) => order.clientOrderId === cancelled.clientOrderId
+      const retry = closeOrders.filter(({ order }) => order.clientOrderId === cancelled.clientOrderId
         ? cancelled.status === "CANCEL" : order.status === "CANCEL").length;
       clientOrderId = `close-${positionId}-retry-${retry}`;
       const raced = await reuse(clientOrderId);
       if (raced) return raced;
     }
+    const quantity = await this.closeQuantity(position);
     if (compareDecimals(quantity, "0") <= 0) {
       if (latest?.status === "CANCEL") return latest;
       throw new Error("Target remote position is already zero; reconciliation required");
@@ -814,6 +829,15 @@ export class OrderStateMachine {
     if (!["NEW", "PARTIALLY_FILLED"].includes(order.status)) {
       throw new Error(`${order.status} order requires reconciliation before replacement`);
     }
+    if (!this.accountMode || order.accountModeFingerprint !== this.accountMode.fingerprint) {
+      throw new Error("Replacement account mode fingerprint mismatch");
+    }
+    if (order.type === "STOP_MARKET") {
+      const position = await this.store.getPosition(order.intentId);
+      if (!position || position.status !== "OPEN" || !this.protectionOwnedBy(position, order)) {
+        throw new Error("STOP_MARKET replacement ownership or fingerprint mismatch");
+      }
+    }
     const replacementClientOrderId = `replace-${order.clientOrderId}`;
     let replacing = await this.store.transitionOrder(order.clientOrderId, [order.status], { status: "REPLACE" });
     if (!replacing) {
@@ -884,9 +908,14 @@ export class OrderStateMachine {
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const latest = await this.store.getPosition(position.id);
         if (!latest || latest.status !== "OPEN") return;
+        this.assertPositionIdentity(latest);
         const orders = await this.store.listOrders();
-        const protection = orders.find((order) => order.intentId === latest.id
+        const protections = orders.filter((order) => order.intentId === latest.id
           && order.type === "STOP_MARKET" && WORKING_STATUSES.has(order.status));
+        if (protections.some((order) => !this.protectionOwnedBy(latest, order))) {
+          throw new Error("STOP_MARKET ownership, positionSide, fingerprint, or entrySemantics mismatch");
+        }
+        const protection = protections[0];
         if (protection && ["SUBMITTING", "RECONCILING", "REPLACE"].includes(protection.status)) return;
         if (protection?.status === "UNKNOWN") throw new Error("STOP_MARKET requires reconciliation");
         if (protection?.status === "PENDING_SEND") {
@@ -915,8 +944,8 @@ export class OrderStateMachine {
       throw new Error("STOP_MARKET position version kept changing");
     } catch (error) {
       const orders = await this.store.listOrders();
-      const protectionInFlight = orders.some((order) => order.intentId === position.id
-        && order.type === "STOP_MARKET" && WORKING_STATUSES.has(order.status) && order.status !== "UNKNOWN");
+      const protectionInFlight = orders.some((order) => this.protectionOwnedBy(position, order)
+        && WORKING_STATUSES.has(order.status) && order.status !== "UNKNOWN");
       if (protectionInFlight) return;
       await this.alert(`${position.symbol} 交易所保护单失败：${error instanceof Error ? error.message : String(error)}`);
       await this.closePosition(position.id);

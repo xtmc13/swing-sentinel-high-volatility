@@ -98,7 +98,8 @@ class FakeGateway implements LiveOrderGateway {
     return this.trades;
   }
 
-  async positionRisk(): Promise<import("./binanceSigned").BinancePositionRisk[]> {
+  async positionRisk(_symbol?: string): Promise<import("./binanceSigned").BinancePositionRisk[]> {
+    void _symbol;
     return this.remotePositions.map((position) => ({ ...position }));
   }
 
@@ -1130,5 +1131,71 @@ describe("fill-driven live order state machine", () => {
       status: "NEW",
     });
     expect(h.gateway.placed.filter((order) => order.type === "MARKET")).toHaveLength(1);
+  });
+
+  it("reconciles an existing UNKNOWN close without calling an unavailable positionRisk endpoint", async () => {
+    const h = await openPosition(DUAL_MODE, "SHORT", "2");
+    h.gateway.failPlaceType = "MARKET";
+    expect(await h.machine.closePosition(seed.id)).toMatchObject({ status: "UNKNOWN" });
+    h.gateway.failPlaceType = null;
+    h.gateway.positionRisk = async () => { throw new Error("positionRisk offline"); };
+    const restarted = new OrderStateMachine(h.store, h.gateway, { accountMode: DUAL_MODE });
+
+    await expect(restarted.closePosition(seed.id)).resolves.toMatchObject({
+      clientOrderId: `close-${seed.id}`, status: "NEW",
+    });
+
+    expect(h.gateway.queries).toEqual([`close-${seed.id}`]);
+    expect(h.gateway.placed.filter((order) => order.type === "MARKET")).toHaveLength(1);
+  });
+
+  it("reads a remotely changed quantity only after UNKNOWN reconciliation confirms CANCEL", async () => {
+    const h = await openPosition(DUAL_MODE, "LONG", "3");
+    h.gateway.failPlaceType = "MARKET";
+    expect(await h.machine.closePosition(seed.id)).toMatchObject({ status: "UNKNOWN" });
+    h.gateway.failPlaceType = null;
+    const remote = h.gateway.exchangeOrders.get(`close-${seed.id}`)!;
+    h.gateway.exchangeOrders.set(remote.clientOrderId, { ...remote, status: "CANCELED", executedQty: "0" });
+    const calls: string[] = [];
+    const queryOrder = h.gateway.queryOrder.bind(h.gateway);
+    h.gateway.queryOrder = async (request) => {
+      calls.push("queryOrder");
+      h.gateway.remotePositions = [{ ...h.gateway.remotePositions[0], positionAmt: "1.5" }];
+      return queryOrder(request);
+    };
+    const positionRisk = h.gateway.positionRisk.bind(h.gateway);
+    h.gateway.positionRisk = async (symbol) => {
+      calls.push("positionRisk");
+      return positionRisk(symbol);
+    };
+    const restarted = new OrderStateMachine(h.store, h.gateway, { accountMode: DUAL_MODE });
+
+    const retry = await restarted.closePosition(seed.id);
+
+    expect(retry).toMatchObject({ clientOrderId: `close-${seed.id}-retry-1`, originalQuantity: "1.5" });
+    expect(calls).toEqual(["queryOrder", "positionRisk"]);
+  });
+
+  it("rejects a stale-fingerprint protection replacement before cancelling its parent", async () => {
+    const h = await openPosition(ONE_WAY_MODE, "LONG", "1");
+    await h.store.transitionOrder(`protect-${seed.id}`, ["NEW"], { accountModeFingerprint: DUAL_FINGERPRINT });
+
+    await expect(h.machine.replaceOrder(`protect-${seed.id}`, "98")).rejects.toThrow("fingerprint");
+
+    expect(h.gateway.cancelled).toHaveLength(0);
+  });
+
+  it.each([
+    { name: "legacy-null fingerprint", patch: { accountModeFingerprint: null } },
+    { name: "wrong semantics", patch: { entrySemantics: "ENTRY" } },
+    { name: "legacy-null semantics", patch: { entrySemantics: null } },
+  ] as const)("alerts and refuses $name during protection discovery", async ({ patch }) => {
+    const h = await openPosition(ONE_WAY_MODE, "LONG", "1");
+    await h.store.transitionOrder(`protect-${seed.id}`, ["NEW"], patch);
+
+    await h.machine.protectPosition(seed.id);
+
+    expect(h.alerts.join("\n")).toContain("保护单失败");
+    expect(h.gateway.cancelled).toHaveLength(0);
   });
 });

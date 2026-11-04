@@ -821,4 +821,84 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
     expect(await restarted.getPosition(id)).toMatchObject({ status: "CLOSED", quantity: "0" });
     expect((await db.select().from(schema.liveIntents).where(eq(schema.liveIntents.id, id)))[0]?.status).toBe("FILLED");
   });
+
+  it("独立连接重启按 retry 序号恢复最新 UNKNOWN，而不依赖 DB 返回顺序", async () => {
+    if (!db) throw new Error("database required");
+    const { DrizzleLiveOrderStore } = await import("./drizzleLiveOrderStore");
+    const { OrderStateMachine } = await import("./orderStateMachine");
+    const database = independentDb();
+    const store = new DrizzleLiveOrderStore(database);
+    const fingerprint = "2".repeat(64);
+    const id = crypto.randomUUID();
+    const input = {
+      ...intentInput(id, "durable-close-ordering"), positionSide: "LONG" as const,
+      entrySemantics: "ENTRY" as const, accountModeFingerprint: fingerprint,
+    };
+    await createApprovedIntent(database, input);
+    const seed = {
+      id, symbol: input.symbol, side: input.side, positionSide: input.positionSide,
+      entrySemantics: input.entrySemantics, accountModeFingerprint: fingerprint,
+      stopPrice: input.stopPrice, liquidationPrice: input.liquidationPrice, leverage: String(input.leverage),
+      maintenanceBracket: 1, maintMarginRatio: "0.01", cumMaintenance: "0",
+    };
+    await store.insertOrder({
+      id: "ordering-entry", intentId: id, clientOrderId: "ordering-entry", exchangeOrderId: "990",
+      symbol: input.symbol, side: input.side, positionSide: "LONG", entrySemantics: "ENTRY",
+      accountModeFingerprint: fingerprint, type: "LIMIT", status: "NEW", price: "100", stopPrice: null,
+      originalQuantity: "2", executedQuantity: "0", averagePrice: "0", commission: "0",
+      reduceOnly: false, createdAt: NOW,
+    });
+    await store.applyFill("ordering-entry", {
+      exchangeTradeId: "ordering-entry-fill", exchangeOrderId: "990", symbol: input.symbol, side: "BUY",
+      positionSide: "LONG", price: "100", quantity: "2", commission: "0", commissionAsset: "USDT",
+      realizedPnl: "0", isMaker: false, executedAt: NOW,
+    }, seed);
+    for (const close of [
+      { rowId: "z-close-base", suffix: "", status: "CANCEL" as const, exchangeOrderId: "991" },
+      { rowId: "z-close-retry-1", suffix: "-retry-1", status: "CANCEL" as const, exchangeOrderId: "992" },
+      { rowId: "a-close-retry-2", suffix: "-retry-2", status: "UNKNOWN" as const, exchangeOrderId: "993" },
+    ]) {
+      await store.insertOrder({
+        id: close.rowId, intentId: id, clientOrderId: `close-${id}${close.suffix}`,
+        exchangeOrderId: close.exchangeOrderId, symbol: input.symbol, side: input.side, positionSide: "LONG",
+        entrySemantics: "REDUCE", accountModeFingerprint: fingerprint, type: "MARKET", status: close.status,
+        price: "0", stopPrice: null, originalQuantity: "2", executedQuantity: "0", averagePrice: "0",
+        commission: "0", reduceOnly: true, createdAt: NOW + 1,
+      });
+    }
+    const restartedStore = new DrizzleLiveOrderStore(independentDb());
+    const listOrders = restartedStore.listOrders.bind(restartedStore);
+    restartedStore.listOrders = async () => {
+      const rows = await listOrders();
+      return [...rows.filter((order) => order.clientOrderId === `close-${id}-retry-2`),
+        ...rows.filter((order) => order.clientOrderId !== `close-${id}-retry-2`)];
+    };
+    const queries: string[] = [];
+    const placed: string[] = [];
+    let positionRiskCalls = 0;
+    const machine = new OrderStateMachine(restartedStore, {
+      placeOrder: async () => { placed.push("unexpected"); throw new Error("must reuse recovered close"); },
+      cancelOrder: async () => { throw new Error("not used"); },
+      queryOrder: async (request) => {
+        queries.push(request.origClientOrderId ?? "missing");
+        return {
+          symbol: input.symbol, orderId: 993, clientOrderId: request.origClientOrderId ?? "missing",
+          price: "0", origQty: "2", executedQty: "0", status: "NEW", side: "SELL", positionSide: "LONG", type: "MARKET",
+        };
+      },
+      userTrades: async () => [],
+      positionRisk: async () => {
+        positionRiskCalls += 1;
+        return [{ symbol: input.symbol, positionSide: "LONG" as const, positionAmt: "2", entryPrice: "100",
+          markPrice: "100", liquidationPrice: "50", leverage: "5", marginType: "isolated", isolatedWallet: "40" }];
+      },
+    }, { accountMode: { dualSide: true, fingerprint } });
+
+    const recovered = await machine.closePosition(id);
+
+    expect(recovered).toMatchObject({ clientOrderId: `close-${id}-retry-2`, status: "NEW" });
+    expect(queries).toEqual([`close-${id}-retry-2`]);
+    expect(placed).toHaveLength(0);
+    expect(positionRiskCalls).toBe(0);
+  });
 });

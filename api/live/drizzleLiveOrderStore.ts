@@ -1,6 +1,6 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { liveFills, liveIntents, liveOrders, livePositions, tradingSettings } from "@db/schema";
-import type { Side } from "@contracts/trading";
+import type { EntrySemantics, PositionSide, Side } from "@contracts/trading";
 import type { AssertCurrentLiveAdmission } from "./liveConfig";
 import { databaseNow, liveSubmissionPermitted, lockLiveControls, type LiveDatabase, type LiveTransaction } from "./livePersistence";
 import {
@@ -46,6 +46,9 @@ function orderFromRows(row: OrderRow, fills: FillRow[]): LiveOrder {
     exchangeOrderId: row.exchangeOrderId,
     symbol: row.symbol,
     side: row.side as Side,
+    positionSide: row.positionSide as PositionSide | null,
+    entrySemantics: row.entrySemantics as EntrySemantics | null,
+    accountModeFingerprint: row.accountModeFingerprint,
     type: row.type as LiveOrder["type"],
     status: row.status as LiveOrderStatus,
     price: row.price,
@@ -71,6 +74,9 @@ function positionFromRow(row: PositionRow, stopPrice: string): LivePosition {
     exitPending: row.exitPending,
     symbol: row.symbol,
     side: row.side as Side,
+    positionSide: row.positionSide as PositionSide | null,
+    entrySemantics: row.entrySemantics as EntrySemantics | null,
+    accountModeFingerprint: row.accountModeFingerprint,
     status: row.status as LivePosition["status"],
     initialQuantity: decimal(row.initialQuantity),
     quantity: decimal(row.quantity),
@@ -135,6 +141,9 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       exchangeOrderId: order.exchangeOrderId,
       symbol: order.symbol,
       side: order.side,
+      positionSide: order.positionSide ?? null,
+      entrySemantics: order.entrySemantics ?? null,
+      accountModeFingerprint: order.accountModeFingerprint ?? null,
       type: order.type,
       status: order.status,
       price: order.price,
@@ -212,6 +221,9 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
           exchangeOrderId: replacement.exchangeOrderId,
           symbol: replacement.symbol,
           side: replacement.side,
+          positionSide: replacement.positionSide ?? null,
+          entrySemantics: replacement.entrySemantics ?? null,
+          accountModeFingerprint: replacement.accountModeFingerprint ?? null,
           type: replacement.type,
           status: replacement.status,
           price: replacement.price,
@@ -326,6 +338,9 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
         exitPending: next.position.exitPending ?? false,
         symbol: next.position.symbol,
         side: next.position.side,
+        positionSide: next.position.positionSide ?? null,
+        entrySemantics: next.position.entrySemantics ?? null,
+        accountModeFingerprint: next.position.accountModeFingerprint ?? null,
         status: next.position.status,
         initialQuantity: next.position.initialQuantity,
         quantity: next.position.quantity,

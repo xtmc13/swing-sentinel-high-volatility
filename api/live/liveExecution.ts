@@ -35,6 +35,7 @@ import {
   type LivePosition,
   type LivePositionSeed,
 } from "./orderStateMachine";
+import type { OrderWireAccountMode } from "./orderWire";
 import type {
   CloseExecutionResult,
   EmergencyExecutionResult,
@@ -59,6 +60,7 @@ export interface MainnetLiveExecutionDependencies {
   userTradesPageLimit?: number;
   workerId: string;
   assertCurrentAdmission: AssertCurrentLiveAdmission;
+  accountMode?: OrderWireAccountMode;
   createIntent: (
     input: CreateLiveIntentInput,
     options: CreateLiveIntentOptions,
@@ -175,6 +177,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
         alert: dependencies.alert,
         id: this.id,
         assertCurrentAdmission: dependencies.assertCurrentAdmission,
+        accountMode: dependencies.accountMode,
       },
     );
   }
@@ -247,6 +250,9 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       exchangeOrderId: null,
       symbol: input.symbol,
       side: input.side,
+      positionSide: input.positionSide,
+      entrySemantics: input.entrySemantics,
+      accountModeFingerprint: input.accountModeFingerprint,
       type: "LIMIT",
       status: "PENDING_SEND",
       price: input.limitPrice,

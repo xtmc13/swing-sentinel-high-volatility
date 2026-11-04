@@ -2,12 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import { liveControls, liveFills, liveIntents, liveOrders, livePositions, tradingSettings } from "@db/schema";
 import { DrizzleLiveOrderStore } from "./drizzleLiveOrderStore";
 import type { LiveDatabase } from "./livePersistence";
+import type { LiveOrder } from "./orderStateMachine";
 
 const openedAt = new Date(1_793_600_000_000);
 const positionRow = {
   id: "intent-1",
   symbol: "BTCUSDT",
   side: "LONG",
+  positionSide: "LONG",
+  entrySemantics: "ENTRY",
+  accountModeFingerprint: "0".repeat(64),
   status: "OPEN",
   initialQuantity: "2",
   quantity: "2",
@@ -37,7 +41,59 @@ describe("durable live position recovery", () => {
     } as unknown as LiveDatabase;
     const store = new DrizzleLiveOrderStore(db);
 
-    expect(await store.getPosition("intent-1")).toMatchObject({ stopPrice: "99", initialStopPrice: null });
+    expect(await store.getPosition("intent-1")).toMatchObject({
+      stopPrice: "99",
+      initialStopPrice: null,
+      positionSide: "LONG",
+      entrySemantics: "ENTRY",
+      accountModeFingerprint: "0".repeat(64),
+    });
+  });
+
+  it("round-trips wire identity through order persistence", async () => {
+    let persisted: Record<string, unknown> | undefined;
+    const db = {
+      insert: () => ({
+        values: async (values: Record<string, unknown>) => { persisted = values; },
+      }),
+      select: () => ({
+        from: (table: unknown) => ({
+          where: () => table === liveOrders
+            ? { limit: async () => persisted ? [persisted] : [] }
+            : Promise.resolve([]),
+        }),
+      }),
+    } as unknown as LiveDatabase;
+    const store = new DrizzleLiveOrderStore(db);
+    const order: LiveOrder = {
+      id: "identified-row",
+      intentId: "intent-1",
+      clientOrderId: "identified-order",
+      exchangeOrderId: null,
+      symbol: "BTCUSDT",
+      side: "LONG",
+      positionSide: "LONG",
+      entrySemantics: "ENTRY",
+      accountModeFingerprint: "0".repeat(64),
+      type: "LIMIT",
+      status: "PENDING_SEND",
+      price: "100",
+      stopPrice: null,
+      originalQuantity: "1",
+      executedQuantity: "0",
+      averagePrice: "0",
+      commission: "0",
+      reduceOnly: false,
+      createdAt: openedAt.getTime(),
+    };
+
+    await store.insertOrder(order);
+
+    expect(await store.getOrder(order.clientOrderId)).toMatchObject({
+      positionSide: "LONG",
+      entrySemantics: "ENTRY",
+      accountModeFingerprint: "0".repeat(64),
+    });
   });
 
   it("uses the same persisted stop when listing open positions", async () => {

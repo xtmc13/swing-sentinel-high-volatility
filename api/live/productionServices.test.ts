@@ -10,6 +10,8 @@ import { createProductionLiveRuntime } from "./productionRuntime";
 import type { LiveFill, LiveOrder, LivePositionSeed } from "./orderStateMachine";
 import type { UserDataSocket } from "./userDataStream";
 
+const ACCOUNT_MODE = { dualSide: false, fingerprint: "0".repeat(64) } as const;
+
 class FakeSocket implements UserDataSocket {
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onclose: (() => void) | null = null;
@@ -145,13 +147,15 @@ describe("production service composition with fake exchange", () => {
     }));
     const orders = new InMemoryLiveOrderStore({ emergencyGeneration: 0, autoTrade: true });
     const seed: LivePositionSeed = {
-      id: "intent-open", symbol: "BTCUSDT", side: "LONG", stopPrice: "99",
+      id: "intent-open", symbol: "BTCUSDT", side: "LONG", positionSide: "LONG", entrySemantics: "ENTRY",
+      accountModeFingerprint: ACCOUNT_MODE.fingerprint, stopPrice: "99",
       liquidationPrice: "40", leverage: "2", maintenanceBracket: 1,
       maintMarginRatio: "0.01", cumMaintenance: "0",
     };
     const order: LiveOrder = {
       id: "order-row", intentId: seed.id, clientOrderId: "entry-open", exchangeOrderId: "1",
-      symbol: seed.symbol, side: seed.side, type: "LIMIT", status: "NEW", price: "100",
+      symbol: seed.symbol, side: seed.side, positionSide: seed.positionSide, entrySemantics: "ENTRY",
+      accountModeFingerprint: seed.accountModeFingerprint, type: "LIMIT", status: "NEW", price: "100",
       stopPrice: null, originalQuantity: "1", executedQuantity: "0", averagePrice: "0",
       commission: "0", reduceOnly: false, createdAt: now(),
     };
@@ -173,7 +177,7 @@ describe("production service composition with fake exchange", () => {
       client, orderStore: orders, reconciliationStore: new InMemoryReconciliationStore(),
       accountingStore: new InMemoryAccountingStore(),
       dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) }, socketFactory: () => socket,
-      now, reconciliationIntervalMs: 60_000, pauseAutoTrade,
+      now, reconciliationIntervalMs: 60_000, pauseAutoTrade, accountMode: ACCOUNT_MODE,
     });
     const runtime = createProductionLiveRuntime({
       env: { LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake", BINANCE_MAINNET_API_SECRET: "fake" },

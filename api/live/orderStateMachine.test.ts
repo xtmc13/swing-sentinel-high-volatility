@@ -105,6 +105,9 @@ const seed: LivePositionSeed = {
   id: "intent-1",
   symbol: "BTCUSDT",
   side: "LONG",
+  positionSide: "LONG",
+  entrySemantics: "ENTRY",
+  accountModeFingerprint: ONE_WAY_FINGERPRINT,
   stopPrice: "99",
   liquidationPrice: "50",
   leverage: "5",
@@ -113,7 +116,11 @@ const seed: LivePositionSeed = {
   cumMaintenance: "0",
 };
 
-function entry(store: InMemoryLiveOrderStore, quantity = "3"): LiveOrder {
+function entry(
+  store: InMemoryLiveOrderStore,
+  quantity = "3",
+  accountMode: OrderWireAccountMode = ONE_WAY_MODE,
+): LiveOrder {
   const order: LiveOrder = {
     id: "entry-row-1",
     intentId: seed.id,
@@ -121,6 +128,9 @@ function entry(store: InMemoryLiveOrderStore, quantity = "3"): LiveOrder {
     exchangeOrderId: null,
     symbol: seed.symbol,
     side: seed.side,
+    positionSide: seed.positionSide,
+    entrySemantics: "ENTRY",
+    accountModeFingerprint: accountMode.fingerprint,
     type: "LIMIT",
     status: "PENDING_SEND",
     price: "100",
@@ -154,15 +164,25 @@ function fill(overrides: Partial<LiveFill> = {}): LiveFill {
   };
 }
 
-function setup() {
+function setup(accountMode: OrderWireAccountMode = ONE_WAY_MODE) {
   const store = new InMemoryLiveOrderStore();
   const gateway = new FakeGateway();
   const alerts: string[] = [];
   const machine = new OrderStateMachine(store, gateway, {
     alert: (message) => alerts.push(message),
     assertCurrentAdmission: async () => undefined,
+    accountMode,
   });
   return { store, gateway, alerts, machine };
+}
+
+async function openPosition(accountMode: OrderWireAccountMode) {
+  const context = setup(accountMode);
+  const positionSeed = { ...seed, accountModeFingerprint: accountMode.fingerprint };
+  entry(context.store, "1", accountMode);
+  await context.machine.submit("entry-1");
+  await context.machine.handleFill("entry-1", fill(), positionSeed);
+  return { ...context, positionSeed };
 }
 
 describe("Binance order wire identity", () => {
@@ -272,6 +292,85 @@ describe("Binance order wire identity", () => {
   });
 });
 
+describe("account-mode derived position orders", () => {
+  it.each([
+    { name: "one-way", accountMode: ONE_WAY_MODE },
+    { name: "dual", accountMode: DUAL_MODE },
+  ])("creates automatic $name protection from the authoritative position identity", async ({ accountMode }) => {
+    const { store, gateway } = await openPosition(accountMode);
+
+    const wire = gateway.placed.find((order) => order.type === "STOP_MARKET");
+    expect(wire).toMatchObject({
+      side: "SELL",
+      positionSide: accountMode.dualSide ? "LONG" : "BOTH",
+      quantity: "1",
+      stopPrice: "99",
+    });
+    expect(Object.hasOwn(wire!, "reduceOnly")).toBe(!accountMode.dualSide);
+    expect(wire?.reduceOnly).toBe(accountMode.dualSide ? undefined : true);
+    expect(await store.getOrder(wire!.newClientOrderId!)).toMatchObject({
+      positionSide: "LONG",
+      entrySemantics: "REDUCE",
+      accountModeFingerprint: accountMode.fingerprint,
+      reduceOnly: true,
+    });
+  });
+
+  it.each([
+    { name: "one-way", accountMode: ONE_WAY_MODE },
+    { name: "dual", accountMode: DUAL_MODE },
+  ])("closes a $name position with its persisted identity and current-mode validation", async ({ accountMode }) => {
+    const { gateway, machine, positionSeed } = await openPosition(accountMode);
+
+    const closed = await machine.closePosition(positionSeed.id);
+
+    expect(closed).toMatchObject({ entrySemantics: "REDUCE", positionSide: "LONG", reduceOnly: true });
+    const wire = gateway.placed.find((order) => order.type === "MARKET");
+    expect(wire).toMatchObject({
+      side: "SELL",
+      positionSide: accountMode.dualSide ? "LONG" : "BOTH",
+      quantity: "1",
+      newClientOrderId: `close-${positionSeed.id}`,
+    });
+    expect(Object.hasOwn(wire!, "reduceOnly")).toBe(!accountMode.dualSide);
+    expect(wire?.reduceOnly).toBe(accountMode.dualSide ? undefined : true);
+  });
+
+  it.each([
+    { name: "missing identity and account mode", accountMode: undefined, identified: false },
+    { name: "missing identity", accountMode: ONE_WAY_MODE, identified: false },
+    { name: "missing account mode", accountMode: undefined, identified: true },
+  ])("rejects a new order with $name before transport", async ({ accountMode, identified }) => {
+    const store = new InMemoryLiveOrderStore();
+    const gateway = new FakeGateway();
+    const machine = new OrderStateMachine(store, gateway, { accountMode });
+    store.addOrder({
+      id: "unidentified-row",
+      intentId: seed.id,
+      clientOrderId: "unidentified",
+      exchangeOrderId: null,
+      symbol: seed.symbol,
+      side: "LONG",
+      positionSide: identified ? "LONG" : undefined,
+      entrySemantics: identified ? "ENTRY" : undefined,
+      accountModeFingerprint: identified ? ONE_WAY_FINGERPRINT : undefined,
+      type: "MARKET",
+      status: "PENDING_SEND",
+      price: "0",
+      stopPrice: null,
+      originalQuantity: "1",
+      executedQuantity: "0",
+      averagePrice: "0",
+      commission: "0",
+      reduceOnly: false,
+      createdAt: 1,
+    });
+
+    await expect(machine.submit("unidentified")).resolves.toMatchObject({ status: "UNKNOWN" });
+    expect(gateway.placed).toHaveLength(0);
+  });
+});
+
 describe("fill-driven live order state machine", () => {
   it("acknowledgement does not open a position; partial, out-of-order and duplicate fills aggregate exactly", async () => {
     const { store, gateway, machine } = setup();
@@ -377,7 +476,7 @@ describe("fill-driven live order state machine", () => {
     entry(store);
     await machine.submit("entry-1");
     await machine.handleFill("entry-1", fill(), seed);
-    const other = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined });
+    const other = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined, accountMode: ONE_WAY_MODE });
 
     await Promise.all([
       machine.replaceOrder("entry-1", "101"),
@@ -433,7 +532,7 @@ describe("fill-driven live order state machine", () => {
     const replacement = await machine.replaceOrder("entry-1", "101");
     await store.transitionOrder(replacement.clientOrderId, ["NEW"], { status: "PENDING_SEND" });
     const transition = store.transitionOrder.bind(store);
-    const otherWorker = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined });
+    const otherWorker = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined, accountMode: ONE_WAY_MODE });
     store.transitionOrder = async (clientOrderId, expectedStatuses, patch) => {
       if (clientOrderId === replacement.clientOrderId && patch.status === "CANCEL"
         && expectedStatuses.includes("PENDING_SEND")) {
@@ -457,7 +556,7 @@ describe("fill-driven live order state machine", () => {
     const replacement = await machine.replaceOrder("entry-1", "101");
     await store.transitionOrder(replacement.clientOrderId, ["NEW"], { status: "PENDING_SEND" });
     const transition = store.transitionOrder.bind(store);
-    const otherWorker = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined });
+    const otherWorker = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined, accountMode: ONE_WAY_MODE });
     store.transitionOrder = async (clientOrderId, expectedStatuses, patch) => {
       if (clientOrderId === replacement.clientOrderId && patch.status === "CANCEL"
         && expectedStatuses.includes("PENDING_SEND")) {
@@ -686,8 +785,8 @@ describe("fill-driven live order state machine", () => {
     const { store, gateway, alerts, machine } = setup();
     entry(store);
     await machine.submit("entry-1");
-    const first = new OrderStateMachine(store, gateway, { alert: (message) => alerts.push(message) });
-    const second = new OrderStateMachine(store, gateway, { alert: (message) => alerts.push(message) });
+    const first = new OrderStateMachine(store, gateway, { alert: (message) => alerts.push(message), accountMode: ONE_WAY_MODE });
+    const second = new OrderStateMachine(store, gateway, { alert: (message) => alerts.push(message), accountMode: ONE_WAY_MODE });
 
     await Promise.all([
       first.handleFill("entry-1", fill({ exchangeTradeId: "worker-a" }), seed),
@@ -709,6 +808,7 @@ describe("fill-driven live order state machine", () => {
       id: "protection-row",
       clientOrderId: `protect-${seed.id}`,
       type: "STOP_MARKET",
+      entrySemantics: "REDUCE",
       price: "99",
       stopPrice: "99",
       originalQuantity: "1",
@@ -756,8 +856,8 @@ describe("fill-driven live order state machine", () => {
   it("duplicate workers cannot submit the same persisted order twice", async () => {
     const { store, gateway } = setup();
     entry(store);
-    const first = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined });
-    const second = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined });
+    const first = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined, accountMode: ONE_WAY_MODE });
+    const second = new OrderStateMachine(store, gateway, { assertCurrentAdmission: async () => undefined, accountMode: ONE_WAY_MODE });
 
     await Promise.all([first.submit("entry-1"), second.submit("entry-1")]);
     expect(gateway.placed).toHaveLength(1);

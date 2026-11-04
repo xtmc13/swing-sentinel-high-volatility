@@ -113,11 +113,16 @@ const opportunity: Opportunity = {
   createdAt: new Date(1).toISOString(),
 };
 
+const ACCOUNT_MODE = { dualSide: false, fingerprint: "0".repeat(64) } as const;
+
 function seedFor(input: CreateLiveIntentInput): LivePositionSeed {
   return {
     id: input.id,
     symbol: input.symbol,
     side: input.side,
+    positionSide: input.positionSide,
+    entrySemantics: input.entrySemantics,
+    accountModeFingerprint: input.accountModeFingerprint,
     stopPrice: input.stopPrice,
     liquidationPrice: input.liquidationPrice,
     leverage: String(input.leverage),
@@ -179,6 +184,7 @@ function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTra
     gateway,
     userTradesPageLimit: 2,
     workerId: "worker-a",
+    accountMode: ACCOUNT_MODE,
     createIntent,
     claimIntent,
     pauseAutoTrade,
@@ -186,6 +192,9 @@ function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTra
       signalId: signal.signalId,
       symbol: signal.symbol,
       side: signal.side,
+      positionSide: signal.side,
+      entrySemantics: "ENTRY",
+      accountModeFingerprint: ACCOUNT_MODE.fingerprint,
       quantity: "2",
       limitPrice: options.limitPrice ?? "100",
       tickSize: "0.01",
@@ -223,7 +232,8 @@ function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTra
     marginType: "isolated",
     isolatedWallet: position.isolatedWallet === "0" ? "40" : position.isolatedWallet,
   }));
-  return { store, gateway, created, claims, createIntent, claimIntent, pauseAutoTrade, assertCurrentAdmission, adapter, finalMode: () => finalMode };
+  return { store, gateway, created, claims, createIntent, claimIntent, pauseAutoTrade, assertCurrentAdmission, adapter,
+    accountMode: ACCOUNT_MODE, finalMode: () => finalMode };
 }
 
 function useMomentumClaimDatabase(store: InMemoryLiveOrderStore, positionId: string) {

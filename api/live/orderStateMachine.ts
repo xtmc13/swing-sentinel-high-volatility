@@ -61,6 +61,9 @@ export interface LivePositionSeed {
   exitPending?: boolean;
   symbol: string;
   side: Side;
+  positionSide?: PositionSide | null;
+  entrySemantics?: EntrySemantics | null;
+  accountModeFingerprint?: string | null;
   stopPrice: DecimalString;
   initialStopPrice?: DecimalString | null;
   tickSize?: DecimalString | null;
@@ -649,6 +652,9 @@ export class OrderStateMachine {
       exchangeOrderId: null,
       symbol: position.symbol,
       side: position.side,
+      positionSide: position.positionSide,
+      entrySemantics: "REDUCE",
+      accountModeFingerprint: position.accountModeFingerprint,
       type: "MARKET",
       status: "PENDING_SEND",
       price: "0",
@@ -844,6 +850,9 @@ export class OrderStateMachine {
       exchangeOrderId: null,
       symbol: position.symbol,
       side: position.side,
+      positionSide: position.positionSide,
+      entrySemantics: "REDUCE",
+      accountModeFingerprint: position.accountModeFingerprint,
       type: "STOP_MARKET",
       status: "PENDING_SEND",
       price: position.stopPrice,
@@ -858,26 +867,8 @@ export class OrderStateMachine {
   }
 
   private requestFor(order: LiveOrder): PlaceOrderRequest {
-    if (this.accountMode) return buildOrderWire(order, this.accountMode);
-    if (order.positionSide != null || order.entrySemantics != null || order.accountModeFingerprint != null) {
-      throw new Error("Account mode is required for an identified live order");
-    }
-    return {
-      symbol: order.symbol,
-      side: this.orderSide(order),
-      type: order.type,
-      quantity: order.originalQuantity,
-      price: order.type === "MARKET" ? undefined : order.price,
-      stopPrice: order.stopPrice ?? undefined,
-      timeInForce: order.type === "LIMIT" ? "IOC" : undefined,
-      reduceOnly: order.reduceOnly || undefined,
-      newClientOrderId: order.clientOrderId,
-    };
-  }
-
-  private orderSide(order: LiveOrder): "BUY" | "SELL" {
-    const entryBuy = order.side === "LONG";
-    return (order.reduceOnly ? !entryBuy : entryBuy) ? "BUY" : "SELL";
+    if (!this.accountMode) throw new Error("Account mode is required for new order submission");
+    return buildOrderWire(order, this.accountMode);
   }
 
   private statusFromExchange(status: string): LiveOrderStatus {

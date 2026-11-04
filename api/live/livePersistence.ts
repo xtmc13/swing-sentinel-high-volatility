@@ -2,7 +2,7 @@ import { and, eq, gt, inArray, isNull, lte, ne, notInArray, or, sql } from "driz
 import type { MySql2Database } from "drizzle-orm/mysql2";
 import { liveControls, liveIntents, liveOrders, tradingSettings, volatilityStates } from "@db/schema";
 import type { AssertCurrentLiveAdmission } from "./liveConfig";
-import type { Side, StrategyType, VolatilityMode } from "@contracts/trading";
+import type { EntrySemantics, PositionSide, Side, StrategyType, VolatilityMode } from "@contracts/trading";
 import {
   addDecimals,
   compareDecimals,
@@ -24,6 +24,9 @@ export interface CreateLiveIntentInput {
   breakoutPrice?: DecimalString;
   symbol: string;
   side: Side;
+  positionSide?: PositionSide | null;
+  entrySemantics?: EntrySemantics | null;
+  accountModeFingerprint?: string | null;
   quantity: DecimalString;
   limitPrice: DecimalString;
   tickSize: DecimalString;
@@ -223,6 +226,9 @@ export async function createLiveIntent(
         breakoutPrice: input.breakoutPrice ?? null,
         symbol: input.symbol,
         side: input.side,
+        positionSide: input.positionSide ?? null,
+        entrySemantics: input.entrySemantics ?? null,
+        accountModeFingerprint: input.accountModeFingerprint ?? null,
         quantity: approval.quantity,
         limitPrice: input.limitPrice,
         stopPrice: input.stopPrice,

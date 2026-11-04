@@ -5,8 +5,10 @@ import { MainnetLiveExecutionAdapter } from "./liveExecution";
 import { InMemoryLiveOrderStore, type LivePositionSeed } from "./orderStateMachine";
 
 const NOW = 1_800_000_000_000;
+const ACCOUNT_MODE = { dualSide: false, fingerprint: "0".repeat(64) } as const;
 const seed: LivePositionSeed = {
   id: "intent-live", signalId: "signal-live", strategyType: "SWING", symbol: "BTCUSDT", side: "LONG",
+  positionSide: "LONG", entrySemantics: "ENTRY", accountModeFingerprint: ACCOUNT_MODE.fingerprint,
   stopPrice: "95", liquidationPrice: "50", leverage: "5", maintenanceBracket: 1,
   maintMarginRatio: "0.01", cumMaintenance: "0", tickSize: "0.01",
 };
@@ -62,6 +64,7 @@ function harness(mark = "100", openedAt = NOW - 60_000) {
     },
     alert: (message) => alerts.push(message),
     assertCurrentAdmission: async () => undefined,
+    accountMode: ACCOUNT_MODE,
     createIntent: async () => { throw new Error("not used"); },
     claimIntent: async () => { throw new Error("not used"); },
     pauseAutoTrade: async () => undefined,
@@ -74,7 +77,8 @@ function harness(mark = "100", openedAt = NOW - 60_000) {
     protect: () => {
       store.addOrder({
         id: "protection-row", intentId: seed.id, clientOrderId: "protect-intent-live", exchangeOrderId: "2",
-        symbol: seed.symbol, side: seed.side, type: "STOP_MARKET", status: "NEW", price: "95",
+        symbol: seed.symbol, side: seed.side, positionSide: seed.positionSide, entrySemantics: "REDUCE",
+        accountModeFingerprint: seed.accountModeFingerprint, type: "STOP_MARKET", status: "NEW", price: "95",
         stopPrice: "95", originalQuantity: "1", executedQuantity: "0", averagePrice: "0", commission: "0",
         reduceOnly: true, createdAt: openedAt,
       });
@@ -82,7 +86,8 @@ function harness(mark = "100", openedAt = NOW - 60_000) {
     open: async () => {
       store.addOrder({
         id: "entry-row", intentId: seed.id, clientOrderId: "entry-live", exchangeOrderId: "1",
-        symbol: seed.symbol, side: seed.side, type: "LIMIT", status: "FILLED", price: "100",
+        symbol: seed.symbol, side: seed.side, positionSide: seed.positionSide, entrySemantics: "ENTRY",
+        accountModeFingerprint: seed.accountModeFingerprint, type: "LIMIT", status: "FILLED", price: "100",
         stopPrice: null, originalQuantity: "1", executedQuantity: "0", averagePrice: "0", commission: "0",
         reduceOnly: false, createdAt: openedAt,
       });
@@ -253,6 +258,7 @@ describe("signed LIVE account and position management", () => {
       now: () => NOW,
       alert: (message) => h.alerts.push(message),
       assertCurrentAdmission: async () => undefined,
+      accountMode: ACCOUNT_MODE,
       createIntent: async () => { throw new Error("not used"); },
       claimIntent: async () => { throw new Error("not used"); },
       pauseAutoTrade: async () => undefined,

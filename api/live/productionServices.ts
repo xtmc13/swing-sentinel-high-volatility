@@ -54,6 +54,7 @@ import {
   type LiveAccountingStore,
 } from "./accounting";
 import type { LiveOrderStore, LivePositionSeed } from "./orderStateMachine";
+import type { OrderWireAccountMode } from "./orderWire";
 import { UserDataStream, type UserDataSocket } from "./userDataStream";
 import type { ProductionLiveServices } from "./productionRuntime";
 
@@ -72,6 +73,7 @@ export interface ProductionServicesOptions {
   now?: () => number;
   reconciliationIntervalMs?: number;
   pauseAutoTrade?: () => Promise<void>;
+  accountMode?: OrderWireAccountMode;
 }
 
 interface FreshPreflight {
@@ -161,6 +163,9 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       breakoutPrice: intent.breakoutPrice ?? undefined,
       symbol: intent.symbol,
       side: intent.side === "SHORT" ? "SHORT" : "LONG",
+      positionSide: intent.positionSide === "SHORT" ? "SHORT" : intent.positionSide === "LONG" ? "LONG" : null,
+      entrySemantics: intent.entrySemantics === "REDUCE" ? "REDUCE" : intent.entrySemantics === "ENTRY" ? "ENTRY" : null,
+      accountModeFingerprint: intent.accountModeFingerprint,
       stopPrice: intent.stopPrice,
       tickSize: intent.tickSize,
       liquidationPrice: intent.liquidationPrice,
@@ -181,6 +186,7 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     getSettings,
     workerId: options.workerId ?? `live-${process.pid}`,
     pauseAutoTrade: options.pauseAutoTrade,
+    accountMode: options.accountMode,
     assertCurrentAdmission: async () => {
       if (!admission.allowed) throw new Error("私有流或对账已冻结主网新开仓");
       await assertCurrentAdmission();
@@ -202,6 +208,9 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         signalId: opportunity.signalId,
         symbol: opportunity.symbol,
         side: opportunity.side,
+        positionSide: opportunity.side,
+        entrySemantics: "ENTRY",
+        accountModeFingerprint: options.accountMode?.fingerprint ?? null,
         quantity: "0",
         limitPrice,
         tickSize: cached.result.filters.tickSize,

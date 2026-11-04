@@ -154,7 +154,10 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
       await server.query("CREATE DATABASE swing_sentinel_task3_migration_test");
       migrationDb = drizzle(migrationUrl.toString(), { mode: "planetscale", schema });
       await migrateLegacySchema(migrationDb);
-      await migrationDb.execute(sql`INSERT INTO trading_settings (id, leverage_mode) VALUES (1, 'SYMBOL_MAX')`);
+      await migrationDb.execute(sql`
+        INSERT INTO trading_settings (id, execution_mode, leverage_mode)
+        VALUES (1, 'LIVE_MAINNET', 'SYMBOL_MAX'), (2, 'PAPER', 'SYMBOL_MAX')
+      `);
       await migrationDb.execute(sql`
         INSERT INTO live_intents
           (id, signal_id, symbol, side, status, quantity, limit_price, stop_price, liquidation_price,
@@ -168,7 +171,8 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
            executed_quantity, reduce_only)
         VALUES
           ('legacy-entry', 'legacy-intent', 'legacy-entry-client', 'BTCUSDT', 'LONG', 'LIMIT', 'NEW', 100, 2, 0, false),
-          ('legacy-reduce', 'legacy-intent', 'legacy-reduce-client', 'BTCUSDT', 'LONG', 'MARKET', 'NEW', 100, 1, 0, true)
+          ('legacy-reduce', 'legacy-intent', 'legacy-reduce-client', 'BTCUSDT', 'LONG', 'MARKET', 'NEW', 100, 1, 0, true),
+          ('legacy-orphan', 'missing-intent', 'legacy-orphan-client', 'BTCUSDT', 'SHORT', 'LIMIT', 'NEW', 100, 1, 0, false)
       `);
       await migrationDb.execute(sql`
         INSERT INTO live_positions
@@ -181,27 +185,42 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
       `);
 
       await migrate(migrationDb, { migrationsFolder });
-      expect((await migrationDb.select().from(schema.tradingSettings))[0]?.leverageMode).toBe("ACCOUNT_CONFIGURED");
+      const migratedSettings = await migrationDb.select().from(schema.tradingSettings);
+      expect(migratedSettings.find((row) => row.id === 1)?.leverageMode).toBe("ACCOUNT_CONFIGURED");
+      expect(migratedSettings.find((row) => row.id === 2)).toMatchObject({
+        executionMode: "PAPER", leverageMode: "SYMBOL_MAX",
+      });
       expect((await migrationDb.select().from(schema.liveIntents))[0]).toMatchObject({
         id: "legacy-intent", positionSide: "LONG", marginType: null, entrySemantics: "ENTRY",
         effectiveLeverage: 5, maintenanceBracket: null, maintMarginRatio: null, cumMaintenance: null,
         liquidationPriceSource: "LEGACY_UNKNOWN", accountModeFingerprint: null, compatibilityFrozen: true,
       });
       const legacyOrders = await migrationDb.select().from(schema.liveOrders);
-      expect(legacyOrders).toMatchObject([
-        { id: "legacy-entry", positionSide: "LONG", entrySemantics: "ENTRY", effectiveLeverage: 5,
-          liquidationPriceSource: "LEGACY_UNKNOWN", compatibilityFrozen: true },
-        { id: "legacy-reduce", positionSide: "LONG", entrySemantics: "REDUCE", effectiveLeverage: 5,
-          liquidationPriceSource: "LEGACY_UNKNOWN", compatibilityFrozen: true },
-      ]);
+      const legacyOrderFields = {
+        marginType: null, maintenanceBracket: null, maintMarginRatio: null, cumMaintenance: null,
+        liquidationPriceSource: "LEGACY_UNKNOWN", accountModeFingerprint: null, compatibilityFrozen: true,
+      };
+      expect(legacyOrders.find((row) => row.id === "legacy-entry")).toMatchObject({
+        positionSide: "LONG", entrySemantics: "ENTRY", effectiveLeverage: 5, ...legacyOrderFields,
+      });
+      expect(legacyOrders.find((row) => row.id === "legacy-reduce")).toMatchObject({
+        positionSide: "LONG", entrySemantics: "REDUCE", effectiveLeverage: 5, ...legacyOrderFields,
+      });
+      expect(legacyOrders.find((row) => row.id === "legacy-orphan")).toMatchObject({
+        positionSide: "SHORT", entrySemantics: "ENTRY", effectiveLeverage: null, ...legacyOrderFields,
+      });
       const legacyPositions = await migrationDb.select().from(schema.livePositions);
       expect(legacyPositions.find((row) => row.id === "legacy-open")).toMatchObject({
-        positionSide: "LONG", marginType: null, effectiveLeverage: 5,
-        maintenanceBracket: 1, liquidationPriceSource: "LEGACY_UNKNOWN", compatibilityFrozen: true,
+        positionSide: "LONG", marginType: null, entrySemantics: "ENTRY", effectiveLeverage: 5,
+        maintenanceBracket: 1, maintMarginRatio: "0.010000000000000000000000000000",
+        cumMaintenance: "0.000000000000000000000000000000", liquidationPriceSource: "LEGACY_UNKNOWN",
+        accountModeFingerprint: null, compatibilityFrozen: true,
       });
       expect(legacyPositions.find((row) => row.id === "legacy-closed")).toMatchObject({
-        positionSide: "SHORT", marginType: null, effectiveLeverage: 5,
-        maintenanceBracket: 1, liquidationPriceSource: "LEGACY_UNKNOWN", compatibilityFrozen: false,
+        positionSide: "SHORT", marginType: null, entrySemantics: "ENTRY", effectiveLeverage: 5,
+        maintenanceBracket: 1, maintMarginRatio: "0.010000000000000000000000000000",
+        cumMaintenance: "0.000000000000000000000000000000", liquidationPriceSource: "LEGACY_UNKNOWN",
+        accountModeFingerprint: null, compatibilityFrozen: false,
       });
 
       const fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -230,15 +249,18 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
       });
       expect(await migrationDb.select().from(schema.liveIntents).where(eq(schema.liveIntents.id, "new-intent")))
         .toMatchObject([{ positionSide: "SHORT", marginType: "CROSS", entrySemantics: "ENTRY",
-          effectiveLeverage: 150, maintenanceBracket: 2, liquidationPriceSource: "PRETRADE_ESTIMATE",
+          effectiveLeverage: 150, maintenanceBracket: 2, maintMarginRatio: "0.020000000000000000000000000000",
+          cumMaintenance: "10.000000000000000000000000000000", liquidationPriceSource: "PRETRADE_ESTIMATE",
           accountModeFingerprint: fingerprint, compatibilityFrozen: false }]);
       expect(await migrationDb.select().from(schema.liveOrders).where(eq(schema.liveOrders.id, "new-order")))
         .toMatchObject([{ positionSide: "SHORT", marginType: "CROSS", entrySemantics: "REDUCE",
-          effectiveLeverage: 150, maintenanceBracket: 2, liquidationPriceSource: "EXCHANGE",
+          effectiveLeverage: 150, maintenanceBracket: 2, maintMarginRatio: "0.020000000000000000000000000000",
+          cumMaintenance: "10.000000000000000000000000000000", liquidationPriceSource: "EXCHANGE",
           accountModeFingerprint: fingerprint, compatibilityFrozen: false }]);
       expect(await migrationDb.select().from(schema.livePositions).where(eq(schema.livePositions.id, "new-position")))
         .toMatchObject([{ positionSide: "SHORT", marginType: "CROSS", entrySemantics: "ENTRY",
-          effectiveLeverage: 150, maintenanceBracket: 2, liquidationPriceSource: "EXCHANGE",
+          effectiveLeverage: 150, maintenanceBracket: 2, maintMarginRatio: "0.020000000000000000000000000000",
+          cumMaintenance: "10.000000000000000000000000000000", liquidationPriceSource: "EXCHANGE",
           accountModeFingerprint: fingerprint, compatibilityFrozen: false }]);
     } finally {
       if (migrationDb) await migrationDb.$client.end();

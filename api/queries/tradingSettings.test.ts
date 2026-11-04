@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS } from "@contracts/trading";
+import { DEFAULT_SETTINGS, type PositionView } from "@contracts/trading";
 import { tradingSettings } from "@db/schema";
 import { settingsInput } from "../tradingRouter";
 import { settingsFromRow } from "./trading";
@@ -51,5 +51,27 @@ describe("交易设置持久化契约", () => {
   it("PAPER 新默认值显式保留 SYMBOL_MAX", () => {
     expect(DEFAULT_SETTINGS.executionMode).toBe("PAPER");
     expect(DEFAULT_SETTINGS.leverageMode).toBe("SYMBOL_MAX");
+  });
+
+  it("PositionView 暴露完整持仓兼容状态", () => {
+    const state: Pick<PositionView,
+      "entrySemantics" | "maintenanceBracket" | "maintMarginRatio" | "cumMaintenance"
+      | "accountModeFingerprint" | "compatibilityFrozen"> = {
+      entrySemantics: "ENTRY",
+      maintenanceBracket: 2,
+      maintMarginRatio: "0.02",
+      cumMaintenance: "10",
+      accountModeFingerprint: "0123456789abcdef",
+      compatibilityFrozen: false,
+    };
+
+    expect(state).toEqual({
+      entrySemantics: "ENTRY",
+      maintenanceBracket: 2,
+      maintMarginRatio: "0.02",
+      cumMaintenance: "10",
+      accountModeFingerprint: "0123456789abcdef",
+      compatibilityFrozen: false,
+    });
   });
 });

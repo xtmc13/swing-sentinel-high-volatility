@@ -58,4 +58,5 @@ SET
 --> statement-breakpoint
 UPDATE `trading_settings`
 SET `leverage_mode` = 'ACCOUNT_CONFIGURED'
-WHERE `leverage_mode` = 'SYMBOL_MAX';
+WHERE `execution_mode` = 'LIVE_MAINNET'
+  AND `leverage_mode` = 'SYMBOL_MAX';

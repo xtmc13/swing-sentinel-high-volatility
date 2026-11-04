@@ -286,7 +286,13 @@ export interface PositionView {
   side: Side;
   positionSide?: PositionSide | null;
   marginType?: MarginType | null;
+  entrySemantics?: EntrySemantics | null;
   effectiveLeverage?: number | null;
+  maintenanceBracket?: number | null;
+  maintMarginRatio?: string | null;
+  cumMaintenance?: string | null;
+  accountModeFingerprint?: string | null;
+  compatibilityFrozen?: boolean;
   qty: number;
   initialQty: number;
   entryPrice: number;

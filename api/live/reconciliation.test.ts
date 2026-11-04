@@ -20,6 +20,9 @@ function order(status: LiveOrderStatus, suffix = "1"): LiveOrder {
     exchangeOrderId: status === "PENDING_SEND" || status === "SUBMITTING" ? null : `90${suffix}`,
     symbol: "BTCUSDT",
     side: "LONG",
+    positionSide: "LONG",
+    entrySemantics: "ENTRY",
+    accountModeFingerprint: "0".repeat(64),
     type: "LIMIT",
     status,
     price: "100",
@@ -71,6 +74,9 @@ const seed: LivePositionSeed = {
   id: "intent-1",
   symbol: "BTCUSDT",
   side: "LONG",
+  positionSide: "LONG",
+  entrySemantics: "ENTRY",
+  accountModeFingerprint: "0".repeat(64),
   stopPrice: "95",
   liquidationPrice: "80",
   leverage: "2",
@@ -475,7 +481,7 @@ describe("exchange and database comparison", () => {
 
   it("compares SHORT positions using their signed exchange quantity", async () => {
     const h = await harness({ positions: [position("-2")] });
-    const shortOrder = { ...order("FILLED"), side: "SHORT" as const };
+    const shortOrder = { ...order("FILLED"), side: "SHORT" as const, positionSide: "SHORT" as const };
     h.orders.addOrder(shortOrder);
     await h.orders.applyFill("order-1", {
       exchangeTradeId: "1",
@@ -489,7 +495,7 @@ describe("exchange and database comparison", () => {
       realizedPnl: "0",
       isMaker: false,
       executedAt: 100,
-    }, { ...seed, side: "SHORT" });
+    }, { ...seed, side: "SHORT", positionSide: "SHORT" });
 
     const result = await h.service.reconcile();
 

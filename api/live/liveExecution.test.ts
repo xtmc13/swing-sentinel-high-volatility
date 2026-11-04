@@ -224,6 +224,7 @@ function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTra
   });
   gateway.positionRisk = async () => (await store.listOpenPositions()).map((position) => ({
     symbol: position.symbol,
+    positionSide: "BOTH",
     positionAmt: position.side === "SHORT" ? `-${position.quantity}` : position.quantity,
     entryPrice: position.entryPrice,
     markPrice: position.markPrice,
@@ -398,6 +399,9 @@ describe("mainnet live execution adapter", () => {
       exchangeOrderId: "901",
       symbol: "BTCUSDT",
       side: "LONG",
+      positionSide: "LONG",
+      entrySemantics: "ENTRY",
+      accountModeFingerprint: ACCOUNT_MODE.fingerprint,
       type: "LIMIT",
       status: "UNKNOWN",
       price: "100",
@@ -418,6 +422,7 @@ describe("mainnet live execution adapter", () => {
       executedQty: "1.5",
       status: "FILLED",
       side: "BUY",
+      positionSide: "BOTH",
       type: "LIMIT",
     });
     const fromIds: Array<number | undefined> = [];
@@ -429,6 +434,7 @@ describe("mainnet live execution adapter", () => {
         id,
         orderId: 901,
         side: "BUY",
+        positionSide: "BOTH",
         price: "100",
         qty: "0.5",
         realizedPnl: "0",
@@ -444,6 +450,9 @@ describe("mainnet live execution adapter", () => {
       id: "recovery-intent",
       symbol: "BTCUSDT",
       side: "LONG",
+      positionSide: "LONG",
+      entrySemantics: "ENTRY",
+      accountModeFingerprint: ACCOUNT_MODE.fingerprint,
       stopPrice: "95",
       liquidationPrice: "50",
       leverage: "5",
@@ -612,6 +621,7 @@ describe("mainnet live execution adapter", () => {
       exchangeOrderId: "500",
       symbol: "BTCUSDT",
       side: "BUY",
+      positionSide: "BOTH",
       price: "100",
       quantity: "2",
       commission: "0.1",
@@ -645,6 +655,7 @@ describe("mainnet live execution adapter", () => {
       exchangeOrderId: "500",
       symbol: "BTCUSDT",
       side: "BUY",
+      positionSide: "BOTH",
       price: "100",
       quantity: "2",
       commission: "0.1",
@@ -752,6 +763,7 @@ describe("mainnet live execution adapter", () => {
       exchangeOrderId: "500",
       symbol: "BTCUSDT",
       side: "BUY",
+      positionSide: "BOTH",
       price: "100",
       quantity: "2",
       commission: "0.1",
@@ -833,6 +845,7 @@ describe("mainnet live execution adapter", () => {
     const positionId = h.created[0].id;
     await h.adapter.handleFill(`${positionId}-entry`, {
       exchangeTradeId: "cancel-close-fill", exchangeOrderId: "500", symbol: "BTCUSDT", side: "BUY",
+      positionSide: "BOTH",
       price: "100", quantity: "2", commission: "0.1", commissionAsset: "USDT", realizedPnl: "0", isMaker: false, executedAt: 10,
     }, seedFor(h.created[0]));
     const placeOrder = h.gateway.placeOrder;
@@ -856,6 +869,7 @@ describe("mainnet live execution adapter", () => {
       exchangeOrderId: "500",
       symbol: "BTCUSDT",
       side: "BUY",
+      positionSide: "BOTH",
       price: "100",
       quantity: "2",
       commission: "0.1",
@@ -885,6 +899,7 @@ describe("mainnet live execution adapter", () => {
     const positionId = h.created[0].id;
     await h.adapter.handleFill(`${positionId}-entry`, {
       exchangeTradeId: "exhaustion-recovery-fill", exchangeOrderId: "500", symbol: "BTCUSDT", side: "BUY",
+      positionSide: "BOTH",
       price: "100", quantity: "2", commission: "0.1", commissionAsset: "USDT", realizedPnl: "0", isMaker: false, executedAt: 10,
     }, seedFor(h.created[0]));
     const claimPosition = useMomentumClaimDatabase(h.store, positionId);

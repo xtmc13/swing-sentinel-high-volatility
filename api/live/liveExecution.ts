@@ -302,7 +302,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   async replaceOrder(clientOrderId: string, newLimitPrice: DecimalString) {
     const order = await this.dependencies.store.getOrder(clientOrderId);
     if (!order) throw new Error("Live order not found");
-    if (order.type === "LIMIT" && !order.reduceOnly) {
+    if (order.type === "LIMIT" && order.entrySemantics === "ENTRY") {
       if (!order.maxEntryPrice) throw new Error("缺少持久化动量限价");
       try {
         if (exceedsDirectionalLimit(decimal(newLimitPrice), order.maxEntryPrice, order.side)) {
@@ -316,7 +316,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       if (attempts === undefined) {
         const orders = await this.dependencies.store.listOrders();
         attempts = orders.filter((candidate) => candidate.intentId === order.intentId
-          && candidate.type === "LIMIT" && !candidate.reduceOnly
+          && candidate.type === "LIMIT" && candidate.entrySemantics === "ENTRY"
           && candidate.clientOrderId !== `${order.intentId}-entry`).length;
       }
       if (attempts >= DEFAULT_MOMENTUM_CONFIG.maxReplacements) throw new Error("动量入场最多改单 1 次");
@@ -334,12 +334,12 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     if (order.status === "UNKNOWN" || order.status === "CANCEL") {
       return {
         ok: false,
-        reason: `reduceOnly 平仓结果 ${order.status}，必须对账或受控重试`,
+        reason: `REDUCE 平仓结果 ${order.status}，必须对账或受控重试`,
         unsettled: true,
         alreadyClosed: false,
       };
     }
-    return { ok: true, reason: `${reason}：reduceOnly 已提交，等待实际成交`, pnl: Number.NaN, unsettled: true, alreadyClosed: false };
+    return { ok: true, reason: `${reason}：REDUCE 已提交，等待实际成交`, pnl: Number.NaN, unsettled: true, alreadyClosed: false };
   }
 
   async manage(): Promise<void> {
@@ -438,16 +438,16 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       return true;
     } catch (error) {
       this.dependencies.alert?.(
-        `${position.symbol} 移动止损未一致确认，保留原持久止损并尝试 reduceOnly 退出：${error instanceof Error ? error.message : String(error)}`,
+        `${position.symbol} 移动止损未一致确认，保留原持久止损并尝试 REDUCE 退出：${error instanceof Error ? error.message : String(error)}`,
       );
       try {
         const exit = await this.machine.closePosition(position.id);
         if (!exit || exit.status === "UNKNOWN") {
-          this.dependencies.alert?.(`${position.symbol} 移动止损失败后的 reduceOnly 退出仍未确认`);
+          this.dependencies.alert?.(`${position.symbol} 移动止损失败后的 REDUCE 退出仍未确认`);
         }
       } catch (exitError) {
         this.dependencies.alert?.(
-          `${position.symbol} reduceOnly 退出提交失败：${exitError instanceof Error ? exitError.message : String(exitError)}`,
+          `${position.symbol} REDUCE 退出提交失败：${exitError instanceof Error ? exitError.message : String(exitError)}`,
         );
       }
       return false;
@@ -536,9 +536,15 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
     ]);
     const refreshed: LivePosition[] = [];
     for (const position of positions) {
-      const remote = remotePositions.find((candidate) => candidate.symbol === position.symbol
-        && compareDecimals(candidate.positionAmt, "0") !== 0);
-      if (!remote) throw new Error(`${position.symbol} 缺少签名持仓标记`);
+      if (!this.dependencies.accountMode
+        || (position.positionSide !== "LONG" && position.positionSide !== "SHORT")) {
+        throw new Error(`${position.symbol} 缺少持仓或账户模式身份`);
+      }
+      const expectedPositionSide = this.dependencies.accountMode.dualSide ? position.positionSide : "BOTH";
+      const matches = remotePositions.filter((candidate) => candidate.symbol === position.symbol
+        && candidate.positionSide === expectedPositionSide && compareDecimals(candidate.positionAmt, "0") !== 0);
+      if (matches.length !== 1) throw new Error(`${position.symbol} ${expectedPositionSide} 签名 positionSide 持仓缺失或不唯一`);
+      const remote = matches[0];
       const expectedQuantity = position.side === "SHORT"
         ? `-${decimal(position.quantity)}` : decimal(position.quantity);
       if (compareDecimals(expectedQuantity, remote.positionAmt) !== 0) {

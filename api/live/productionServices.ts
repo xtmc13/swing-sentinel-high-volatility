@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { liveIntents, livePositions, tradingSettings } from "@db/schema";
 import type { Opportunity } from "@contracts/trading";
@@ -128,7 +129,19 @@ export async function createBinanceProductionLiveServicesFromStore(
     loadStored,
     (credentials) => new BinanceSignedClient(credentials),
   );
-  return createBinanceProductionLiveServices({ ...options, client });
+  let accountMode = options.accountMode;
+  if (!accountMode) {
+    const [positionSide, multiAssetsMargin] = await Promise.all([client.positionSide(), client.multiAssetsMargin()]);
+    if (typeof positionSide.dualSidePosition !== "boolean" || typeof multiAssetsMargin.multiAssetsMargin !== "boolean") {
+      throw new Error("Signed account mode response is incomplete");
+    }
+    const mode = { dualSide: positionSide.dualSidePosition, multiAssets: multiAssetsMargin.multiAssetsMargin };
+    accountMode = {
+      dualSide: mode.dualSide,
+      fingerprint: createHash("sha256").update(JSON.stringify(mode)).digest("hex"),
+    };
+  }
+  return createBinanceProductionLiveServices({ ...options, client, accountMode });
 }
 
 export function createBinanceProductionLiveServices(options: ProductionServicesOptions): ProductionLiveServices {

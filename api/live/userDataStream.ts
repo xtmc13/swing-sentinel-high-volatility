@@ -284,6 +284,7 @@ export class UserDataStream {
         exchangeOrderId: requiredString(update.i, "order ID"),
         symbol: requiredString(update.s, "symbol"),
         side: requiredString(update.S, "side") === "SELL" ? "SELL" : "BUY",
+        positionSide: update.ps === "LONG" || update.ps === "SHORT" || update.ps === "BOTH" ? update.ps : undefined,
         price: decimal(requiredString(update.L, "last price")),
         quantity: lastQuantity,
         commission: decimal(requiredString(update.n ?? "0", "commission")),

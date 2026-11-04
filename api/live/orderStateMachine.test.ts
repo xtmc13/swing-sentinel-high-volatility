@@ -46,6 +46,7 @@ class FakeGateway implements LiveOrderGateway {
   readonly queries: string[] = [];
   readonly exchangeOrders = new Map<string, BinanceOpenOrder>();
   readonly trades: BinanceUserTrade[] = [];
+  remotePositions: import("./binanceSigned").BinancePositionRisk[] = [];
   failPlaceType: string | null = null;
   failCancel = false;
   failNextEntryAfterAccept = false;
@@ -64,6 +65,7 @@ class FakeGateway implements LiveOrderGateway {
       executedQty: "0",
       status: "NEW",
       side: request.side,
+      positionSide: request.positionSide,
       type: request.type,
       reduceOnly: request.reduceOnly,
     };
@@ -96,6 +98,10 @@ class FakeGateway implements LiveOrderGateway {
     return this.trades;
   }
 
+  async positionRisk(): Promise<import("./binanceSigned").BinancePositionRisk[]> {
+    return this.remotePositions.map((position) => ({ ...position }));
+  }
+
   account(): Promise<never> {
     throw new Error("not used");
   }
@@ -120,6 +126,7 @@ function entry(
   store: InMemoryLiveOrderStore,
   quantity = "3",
   accountMode: OrderWireAccountMode = ONE_WAY_MODE,
+  side: "LONG" | "SHORT" = seed.side,
 ): LiveOrder {
   const order: LiveOrder = {
     id: "entry-row-1",
@@ -127,8 +134,8 @@ function entry(
     clientOrderId: "entry-1",
     exchangeOrderId: null,
     symbol: seed.symbol,
-    side: seed.side,
-    positionSide: seed.positionSide,
+    side,
+    positionSide: side,
     entrySemantics: "ENTRY",
     accountModeFingerprint: accountMode.fingerprint,
     type: "LIMIT",
@@ -147,12 +154,17 @@ function entry(
   return order;
 }
 
-function fill(overrides: Partial<LiveFill> = {}): LiveFill {
+type IdentifiedFill = LiveFill & { positionSide: "BOTH" | "LONG" | "SHORT" };
+
+function fill(
+  overrides: Partial<LiveFill> & { positionSide?: "BOTH" | "LONG" | "SHORT" } = {},
+): IdentifiedFill {
   return {
     exchangeTradeId: "trade-1",
     exchangeOrderId: "100",
     symbol: seed.symbol,
     side: "BUY",
+    positionSide: "BOTH",
     price: "100",
     quantity: "1",
     commission: "0.1",
@@ -176,12 +188,36 @@ function setup(accountMode: OrderWireAccountMode = ONE_WAY_MODE) {
   return { store, gateway, alerts, machine };
 }
 
-async function openPosition(accountMode: OrderWireAccountMode) {
+async function openPosition(
+  accountMode: OrderWireAccountMode,
+  side: "LONG" | "SHORT" = "LONG",
+  quantity = "1",
+) {
   const context = setup(accountMode);
-  const positionSeed = { ...seed, accountModeFingerprint: accountMode.fingerprint };
-  entry(context.store, "1", accountMode);
+  const positionSeed = {
+    ...seed,
+    side,
+    positionSide: side,
+    accountModeFingerprint: accountMode.fingerprint,
+  };
+  entry(context.store, quantity, accountMode, side);
   await context.machine.submit("entry-1");
-  await context.machine.handleFill("entry-1", fill(), positionSeed);
+  await context.machine.handleFill("entry-1", fill({
+    side: side === "LONG" ? "BUY" : "SELL",
+    positionSide: accountMode.dualSide ? side : "BOTH",
+    quantity,
+  }), positionSeed);
+  context.gateway.remotePositions = [{
+    symbol: seed.symbol,
+    positionSide: accountMode.dualSide ? side : "BOTH",
+    positionAmt: side === "SHORT" ? `-${quantity}` : quantity,
+    entryPrice: "100",
+    markPrice: "100",
+    liquidationPrice: "50",
+    leverage: "5",
+    marginType: "isolated",
+    isolatedWallet: "20",
+  }];
   return { ...context, positionSeed };
 }
 
@@ -495,11 +531,11 @@ describe("fill-driven live order state machine", () => {
     await machine.handleFill("entry-1", fill({ exchangeTradeId: "1" }), seed);
     gateway.trades.push(
       {
-        symbol: seed.symbol, id: 1, orderId: 100, side: "BUY", price: "100", qty: "1",
+        symbol: seed.symbol, id: 1, orderId: 100, side: "BUY", positionSide: "BOTH", price: "100", qty: "1",
         realizedPnl: "0", commission: "0.1", commissionAsset: "USDT", time: 2, buyer: true, maker: false,
       },
       {
-        symbol: seed.symbol, id: 2, orderId: 100, side: "BUY", price: "100", qty: "1",
+        symbol: seed.symbol, id: 2, orderId: 100, side: "BUY", positionSide: "BOTH", price: "100", qty: "1",
         realizedPnl: "0", commission: "0.1", commissionAsset: "USDT", time: 3, buyer: true, maker: false,
       },
     );
@@ -694,6 +730,7 @@ describe("fill-driven live order state machine", () => {
       id: 777,
       orderId: exchange.orderId,
       side: "BUY",
+      positionSide: "BOTH",
       price: "100",
       qty: "1",
       realizedPnl: "0",
@@ -909,5 +946,189 @@ describe("fill-driven live order state machine", () => {
       realizedPnl: "1",
     }), seed);
     expect(await store.getPosition(seed.id)).toMatchObject({ status: "CLOSED", quantity: "0" });
+  });
+
+  it.each([
+    { mode: "one-way", accountMode: ONE_WAY_MODE, side: "LONG", entrySide: "BUY", closeSide: "SELL" },
+    { mode: "one-way", accountMode: ONE_WAY_MODE, side: "SHORT", entrySide: "SELL", closeSide: "BUY" },
+    { mode: "dual", accountMode: DUAL_MODE, side: "LONG", entrySide: "BUY", closeSide: "SELL" },
+    { mode: "dual", accountMode: DUAL_MODE, side: "SHORT", entrySide: "SELL", closeSide: "BUY" },
+  ] as const)("uses EntrySemantics for $mode $side fills instead of remote reduceOnly", async ({ accountMode, side, closeSide }) => {
+    const h = await openPosition(accountMode, side, "2");
+    const close = await h.machine.closePosition(seed.id);
+    await h.store.transitionOrder(close!.clientOrderId, ["NEW"], { reduceOnly: false });
+
+    await h.machine.handleFill(close!.clientOrderId, fill({
+      exchangeTradeId: `close-${accountMode.dualSide}-${side}`,
+      exchangeOrderId: String(h.gateway.exchangeOrders.get(close!.clientOrderId)!.orderId),
+      side: closeSide,
+      positionSide: accountMode.dualSide ? side : "BOTH",
+      quantity: "2",
+    }), h.positionSeed);
+
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ status: "CLOSED", quantity: "0" });
+  });
+
+  it.each(["LONG", "SHORT"] as const)("rejects a dual %s entry fill carrying the opposite positionSide", async (side) => {
+    const { store, machine } = setup(DUAL_MODE);
+    entry(store, "2", DUAL_MODE, side);
+    await machine.submit("entry-1");
+
+    await expect(machine.handleFill("entry-1", fill({
+      side: side === "LONG" ? "BUY" : "SELL",
+      positionSide: side === "LONG" ? "SHORT" : "LONG",
+    }), { ...seed, side, positionSide: side, accountModeFingerprint: DUAL_FINGERPRINT }))
+      .rejects.toThrow("positionSide");
+
+    expect((await store.getOrder("entry-1"))?.executedQuantity).toBe("0");
+    expect(await store.getPosition(seed.id)).toBeNull();
+  });
+
+  it.each(["LONG", "SHORT", undefined] as const)("rejects a one-way entry fill with positionSide %s instead of BOTH", async (positionSide) => {
+    const { store, machine } = setup(ONE_WAY_MODE);
+    entry(store, "2", ONE_WAY_MODE, "LONG");
+    await machine.submit("entry-1");
+
+    await expect(machine.handleFill("entry-1", fill({ positionSide }), seed)).rejects.toThrow("positionSide");
+
+    expect((await store.getOrder("entry-1"))?.executedQuantity).toBe("0");
+    expect(await store.getPosition(seed.id)).toBeNull();
+  });
+
+  it("keeps partial dual closes open and cancels only the closed side's residual protection", async () => {
+    const h = await openPosition(DUAL_MODE, "LONG", "3");
+    const close = await h.machine.closePosition(seed.id);
+    const exchangeOrderId = String(h.gateway.exchangeOrders.get(close!.clientOrderId)!.orderId);
+    await h.machine.handleFill(close!.clientOrderId, fill({
+      exchangeTradeId: "dual-close-partial", exchangeOrderId, side: "SELL", positionSide: "LONG", quantity: "1",
+    }), h.positionSeed);
+
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ status: "OPEN", quantity: "2" });
+    expect(await h.store.getOrder(`protect-${seed.id}`)).toMatchObject({ status: "NEW" });
+
+    await h.machine.handleFill(close!.clientOrderId, fill({
+      exchangeTradeId: "dual-close-final", exchangeOrderId, side: "SELL", positionSide: "LONG", quantity: "2",
+    }), h.positionSeed);
+
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ status: "CLOSED", quantity: "0" });
+    expect(await h.store.getOrder(`protect-${seed.id}`)).toMatchObject({ status: "CANCEL" });
+    expect(h.gateway.cancelled.map((order) => order.origClientOrderId)).toContain(`protect-${seed.id}`);
+  });
+
+  it("re-reads the target side after a partial CANCEL and restart without touching an opposite external position", async () => {
+    const h = await openPosition(DUAL_MODE, "LONG", "3");
+    const first = await h.machine.closePosition(seed.id);
+    const exchangeOrderId = String(h.gateway.exchangeOrders.get(first!.clientOrderId)!.orderId);
+    await h.machine.handleFill(first!.clientOrderId, fill({
+      exchangeTradeId: "close-before-cancel", exchangeOrderId, side: "SELL", positionSide: "LONG", quantity: "1",
+    }), h.positionSeed);
+    await h.store.transitionOrder(first!.clientOrderId, ["PARTIALLY_FILLED"], { status: "CANCEL" });
+    const externalSeed: LivePositionSeed = {
+      ...h.positionSeed, id: "external-opposite-position", side: "SHORT", positionSide: "SHORT",
+    };
+    h.store.addOrder({
+      ...(await h.store.getOrder("entry-1"))!, id: "external-entry-row", intentId: externalSeed.id,
+      clientOrderId: "external-entry", exchangeOrderId: "777", side: "SHORT", positionSide: "SHORT",
+      originalQuantity: "9", executedQuantity: "0", averagePrice: "0", commission: "0", status: "FILLED",
+    });
+    await h.store.applyFill("external-entry-row", fill({
+      exchangeTradeId: "external-entry-fill", exchangeOrderId: "777", side: "SELL", positionSide: "SHORT", quantity: "9",
+    }), externalSeed);
+    h.gateway.remotePositions = [
+      { ...h.gateway.remotePositions[0], positionAmt: "1.5" },
+      { ...h.gateway.remotePositions[0], positionSide: "SHORT", positionAmt: "-9" },
+    ];
+    const restarted = new OrderStateMachine(h.store, h.gateway, { accountMode: DUAL_MODE });
+
+    const retry = await restarted.closePosition(seed.id);
+
+    expect(retry).toMatchObject({ clientOrderId: `close-${seed.id}-retry-1`, originalQuantity: "1.5" });
+    expect(h.gateway.placed.at(-1)).toMatchObject({
+      type: "MARKET", side: "SELL", positionSide: "LONG", quantity: "1.5",
+      newClientOrderId: `close-${seed.id}-retry-1`,
+    });
+    expect(h.gateway.placed.at(-1)).not.toHaveProperty("reduceOnly");
+    expect(await h.store.getPosition(externalSeed.id)).toMatchObject({ status: "OPEN", side: "SHORT", quantity: "9" });
+  });
+
+  it("rejects an opposite positionSide recovered from REST without closing the local position", async () => {
+    const h = await openPosition(DUAL_MODE, "LONG", "1");
+    h.gateway.failPlaceType = "MARKET";
+    expect(await h.machine.closePosition(seed.id)).toMatchObject({ status: "UNKNOWN" });
+    h.gateway.failPlaceType = null;
+    const remote = h.gateway.exchangeOrders.get(`close-${seed.id}`)!;
+    h.gateway.exchangeOrders.set(remote.clientOrderId, { ...remote, status: "FILLED", executedQty: "1" });
+    h.gateway.trades.push({
+      symbol: seed.symbol, id: 889, orderId: remote.orderId, side: "SELL", positionSide: "SHORT",
+      price: "100", qty: "1", realizedPnl: "1", commission: "0.1", commissionAsset: "USDT",
+      time: 4, buyer: false, maker: false,
+    });
+    const restarted = new OrderStateMachine(h.store, h.gateway, { accountMode: DUAL_MODE });
+
+    await expect(restarted.closePosition(seed.id)).rejects.toThrow("positionSide");
+
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ status: "OPEN", quantity: "1" });
+    expect(await h.store.getOrder(`protect-${seed.id}`)).toMatchObject({ status: "NEW" });
+  });
+
+  it("reconciles an UNKNOWN dual close after restart and leaves opposite-side protection untouched", async () => {
+    const h = await openPosition(DUAL_MODE, "LONG", "1");
+    h.store.addOrder({
+      ...(await h.store.getOrder(`protect-${seed.id}`))!,
+      id: "opposite-protection",
+      intentId: "external-opposite-position",
+      clientOrderId: "protect-external-opposite-position",
+      positionSide: "SHORT",
+      status: "NEW",
+    });
+    h.gateway.failPlaceType = "MARKET";
+    expect(await h.machine.closePosition(seed.id)).toMatchObject({ status: "UNKNOWN" });
+    h.gateway.failPlaceType = null;
+    const remote = h.gateway.exchangeOrders.get(`close-${seed.id}`)!;
+    h.gateway.exchangeOrders.set(remote.clientOrderId, { ...remote, status: "FILLED", executedQty: "1" });
+    h.gateway.trades.push({
+      symbol: seed.symbol, id: 888, orderId: remote.orderId, side: "SELL", positionSide: "LONG",
+      price: "100", qty: "1", realizedPnl: "1", commission: "0.1", commissionAsset: "USDT",
+      time: 4, buyer: false, maker: false,
+    });
+    const restarted = new OrderStateMachine(h.store, h.gateway, { accountMode: DUAL_MODE });
+
+    const recovered = await restarted.closePosition(seed.id);
+
+    expect(recovered).toMatchObject({ status: "FILLED", executedQuantity: "1" });
+    expect(h.gateway.placed.filter((order) => order.type === "MARKET")).toHaveLength(1);
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ status: "CLOSED", quantity: "0" });
+    expect(await h.store.getOrder(`protect-${seed.id}`)).toMatchObject({ status: "CANCEL" });
+    expect(await h.store.getOrder("protect-external-opposite-position")).toMatchObject({ status: "NEW" });
+  });
+
+  it("uses the first controlled retry after UNKNOWN reconciles to CANCEL", async () => {
+    const h = await openPosition(DUAL_MODE, "LONG", "2");
+    h.gateway.failPlaceType = "MARKET";
+    expect(await h.machine.closePosition(seed.id)).toMatchObject({ status: "UNKNOWN" });
+    h.gateway.failPlaceType = null;
+    const remote = h.gateway.exchangeOrders.get(`close-${seed.id}`)!;
+    h.gateway.exchangeOrders.set(remote.clientOrderId, { ...remote, status: "CANCELED", executedQty: "0" });
+    h.gateway.remotePositions = [{ ...h.gateway.remotePositions[0], positionAmt: "1.5" }];
+    const restarted = new OrderStateMachine(h.store, h.gateway, { accountMode: DUAL_MODE });
+
+    const retry = await restarted.closePosition(seed.id);
+
+    expect(retry).toMatchObject({
+      clientOrderId: `close-${seed.id}-retry-1`, status: "NEW", originalQuantity: "1.5",
+    });
+    expect(h.gateway.placed.filter((order) => order.type === "MARKET")).toHaveLength(2);
+  });
+
+  it("reuses an active dual close after restart without submitting a duplicate", async () => {
+    const h = await openPosition(DUAL_MODE, "SHORT", "2");
+    const first = await h.machine.closePosition(seed.id);
+    const restarted = new OrderStateMachine(h.store, h.gateway, { accountMode: DUAL_MODE });
+
+    await expect(restarted.closePosition(seed.id)).resolves.toMatchObject({
+      clientOrderId: first!.clientOrderId,
+      status: "NEW",
+    });
+    expect(h.gateway.placed.filter((order) => order.type === "MARKET")).toHaveLength(1);
   });
 });

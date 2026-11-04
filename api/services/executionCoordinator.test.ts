@@ -131,8 +131,8 @@ function setup(options: {
   armed?: boolean;
   preflight?: { ready: boolean; reasons: string[]; checkedAt: string | null };
   operations?: {
-    orders: { id: string; intentId: string; clientOrderId: string; exchangeOrderId: string | null; symbol: string; side: "LONG" | "SHORT"; type: "LIMIT" | "MARKET" | "STOP_MARKET"; status: string; price: string; originalQuantity: string; executedQuantity: string; averagePrice: string; commission: string; reduceOnly: boolean; createdAt: string }[];
-    protectionOrders: { id: string; intentId: string; clientOrderId: string; exchangeOrderId: string | null; symbol: string; side: "LONG" | "SHORT"; type: "LIMIT" | "MARKET" | "STOP_MARKET"; status: string; price: string; originalQuantity: string; executedQuantity: string; averagePrice: string; commission: string; reduceOnly: boolean; createdAt: string }[];
+    orders: { id: string; intentId: string; clientOrderId: string; exchangeOrderId: string | null; symbol: string; side: "LONG" | "SHORT"; type: "LIMIT" | "MARKET" | "STOP_MARKET"; status: string; price: string; originalQuantity: string; executedQuantity: string; averagePrice: string; commission: string; entrySemantics?: "ENTRY" | "REDUCE"; reduceOnly: boolean; createdAt: string }[];
+    protectionOrders: { id: string; intentId: string; clientOrderId: string; exchangeOrderId: string | null; symbol: string; side: "LONG" | "SHORT"; type: "LIMIT" | "MARKET" | "STOP_MARKET"; status: string; price: string; originalQuantity: string; executedQuantity: string; averagePrice: string; commission: string; entrySemantics?: "ENTRY" | "REDUCE"; reduceOnly: boolean; createdAt: string }[];
     unsettledIntents: { id: string; symbol: string; status: string }[];
     reconciliationIssues: { id: string; category: string; severity: "INFO" | "WARN" | "ERROR" | "CRITICAL"; status: "OPEN" | "ACKNOWLEDGED" | "RESOLVED"; symbol: string | null; message: string; detectedAt: string }[];
     reconciliationSummary: { openIssues: number; severeIssues: number; lastDetectedAt: number | null };
@@ -167,7 +167,7 @@ function setup(options: {
     id: "confirmed-stop", intentId: position.id, clientOrderId: "confirmed-stop", exchangeOrderId: "1",
     symbol: position.symbol, side: "SHORT" as const, type: "STOP_MARKET" as const, status: "NEW",
     price: "99", originalQuantity: "1", executedQuantity: "0", averagePrice: "0", commission: "0",
-    reduceOnly: true, createdAt: new Date(1_800_000_000_000).toISOString(),
+    entrySemantics: "REDUCE" as const, reduceOnly: true, createdAt: new Date(1_800_000_000_000).toISOString(),
   };
   const coordinator = createExecutionCoordinator({
     paper,
@@ -716,12 +716,12 @@ describe("ExecutionCoordinator", () => {
   });
 
   it.each([
-    { status: "PENDING_SEND", reduceOnly: true },
-    { status: "SUBMITTING", reduceOnly: true },
-    { status: "UNKNOWN", reduceOnly: true },
-    { status: "RECONCILING", reduceOnly: true },
-    { status: "NEW", reduceOnly: false },
-  ])("未确认或非 reduceOnly 止损不算保护：%j", async ({ status: orderStatus, reduceOnly }) => {
+    { status: "PENDING_SEND", entrySemantics: "REDUCE" },
+    { status: "SUBMITTING", entrySemantics: "REDUCE" },
+    { status: "UNKNOWN", entrySemantics: "REDUCE" },
+    { status: "RECONCILING", entrySemantics: "REDUCE" },
+    { status: "NEW", entrySemantics: "ENTRY" },
+  ] as const)("未确认或非 REDUCE 止损不算保护：%j", async ({ status: orderStatus, entrySemantics }) => {
     const h = setup({
       settings: { executionMode: "LIVE_MAINNET" },
       operations: {
@@ -733,7 +733,7 @@ describe("ExecutionCoordinator", () => {
           id: "stop-1", intentId: position.id, clientOrderId: "stop-1", exchangeOrderId: null,
           symbol: position.symbol, side: "SHORT", type: "STOP_MARKET", status: orderStatus,
           price: "99", originalQuantity: "1", executedQuantity: "0", averagePrice: "0",
-          commission: "0", reduceOnly, createdAt: new Date(1_800_000_000_000).toISOString(),
+          commission: "0", entrySemantics, reduceOnly: true, createdAt: new Date(1_800_000_000_000).toISOString(),
         }],
       },
     });

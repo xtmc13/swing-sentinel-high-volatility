@@ -125,6 +125,7 @@ describeDatabase("production canary sizing", () => {
         ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET", leverageMode: "FIXED", fixedLeverage: 2,
       }),
       client,
+      accountMode: { dualSide: false, fingerprint: "0".repeat(64) },
       socketFactory: () => socket,
       now: () => NOW,
       reconciliationIntervalMs: 60_000,

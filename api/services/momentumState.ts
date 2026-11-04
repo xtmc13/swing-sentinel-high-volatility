@@ -169,7 +169,7 @@ export class DrizzleMomentumStateStore implements MomentumStateStore {
           status: liveOrders.status,
         }).from(liveOrders).where(and(
           eq(liveOrders.intentId, positionId),
-          eq(liveOrders.reduceOnly, true),
+          eq(liveOrders.entrySemantics, "REDUCE"),
           eq(liveOrders.type, "MARKET"),
         ));
         const claimExpired = row.exitPending && (row.exitClaimId === null

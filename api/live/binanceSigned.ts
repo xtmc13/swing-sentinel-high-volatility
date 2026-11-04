@@ -187,6 +187,7 @@ export interface LiveOrderGateway {
   cancelOrder(request: CancelOrderRequest): Promise<unknown>;
   queryOrder(request: CancelOrderRequest): Promise<BinanceOpenOrder | null>;
   userTrades(params: UserTradesParams): Promise<BinanceUserTrade[]>;
+  positionRisk?(symbol?: string): Promise<BinancePositionRisk[]>;
 }
 
 export class BinanceSignedClient {

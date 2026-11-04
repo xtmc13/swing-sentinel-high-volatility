@@ -13,13 +13,19 @@ const seed: LivePositionSeed = {
   maintMarginRatio: "0.01", cumMaintenance: "0", tickSize: "0.01",
 };
 
-function harness(mark = "100", openedAt = NOW - 60_000) {
+function harness(
+  mark = "100",
+  openedAt = NOW - 60_000,
+  accountMode: typeof ACCOUNT_MODE | { dualSide: true; fingerprint: string } = ACCOUNT_MODE,
+) {
   const store = new InMemoryLiveOrderStore();
   const placed: PlaceOrderRequest[] = [];
   const alerts: string[] = [];
+  const positionSeed = { ...seed, accountModeFingerprint: accountMode.fingerprint };
   let remoteMark = mark;
   const remote: BinancePositionRisk = {
-    symbol: "BTCUSDT", positionAmt: "1", entryPrice: "100", markPrice: remoteMark,
+    symbol: "BTCUSDT", positionSide: accountMode.dualSide ? "LONG" : "BOTH",
+    positionAmt: "1", entryPrice: "100", markPrice: remoteMark,
     liquidationPrice: "50", leverage: "5", marginType: "isolated", isolatedWallet: "20",
   };
   const gateway = {
@@ -30,7 +36,7 @@ function harness(mark = "100", openedAt = NOW - 60_000) {
       return {
         symbol: request.symbol, orderId: 100 + placed.length, clientOrderId: request.newClientOrderId ?? "order",
         price: request.price ?? "0", origQty: request.quantity, executedQty: "0", status: "NEW",
-        side: request.side, type: request.type, reduceOnly: request.reduceOnly,
+        side: request.side, positionSide: request.positionSide, type: request.type, reduceOnly: request.reduceOnly,
       };
     },
     cancelOrder: async (request: { symbol: string; origClientOrderId?: string }) => ({
@@ -64,7 +70,7 @@ function harness(mark = "100", openedAt = NOW - 60_000) {
     },
     alert: (message) => alerts.push(message),
     assertCurrentAdmission: async () => undefined,
-    accountMode: ACCOUNT_MODE,
+    accountMode,
     createIntent: async () => { throw new Error("not used"); },
     claimIntent: async () => { throw new Error("not used"); },
     pauseAutoTrade: async () => undefined,
@@ -72,29 +78,29 @@ function harness(mark = "100", openedAt = NOW - 60_000) {
     finalGate: () => { throw new Error("not used"); },
   });
   return {
-    adapter, store, placed, remote, gateway, alerts,
+    adapter, store, placed, remote, gateway, alerts, positionSeed,
     setMark: (value: string) => { remoteMark = value; },
     protect: () => {
       store.addOrder({
-        id: "protection-row", intentId: seed.id, clientOrderId: "protect-intent-live", exchangeOrderId: "2",
-        symbol: seed.symbol, side: seed.side, positionSide: seed.positionSide, entrySemantics: "REDUCE",
-        accountModeFingerprint: seed.accountModeFingerprint, type: "STOP_MARKET", status: "NEW", price: "95",
+        id: "protection-row", intentId: positionSeed.id, clientOrderId: "protect-intent-live", exchangeOrderId: "2",
+        symbol: positionSeed.symbol, side: positionSeed.side, positionSide: positionSeed.positionSide, entrySemantics: "REDUCE",
+        accountModeFingerprint: positionSeed.accountModeFingerprint, type: "STOP_MARKET", status: "NEW", price: "95",
         stopPrice: "95", originalQuantity: "1", executedQuantity: "0", averagePrice: "0", commission: "0",
         reduceOnly: true, createdAt: openedAt,
       });
     },
     open: async () => {
       store.addOrder({
-        id: "entry-row", intentId: seed.id, clientOrderId: "entry-live", exchangeOrderId: "1",
-        symbol: seed.symbol, side: seed.side, positionSide: seed.positionSide, entrySemantics: "ENTRY",
-        accountModeFingerprint: seed.accountModeFingerprint, type: "LIMIT", status: "FILLED", price: "100",
+        id: "entry-row", intentId: positionSeed.id, clientOrderId: "entry-live", exchangeOrderId: "1",
+        symbol: positionSeed.symbol, side: positionSeed.side, positionSide: positionSeed.positionSide, entrySemantics: "ENTRY",
+        accountModeFingerprint: positionSeed.accountModeFingerprint, type: "LIMIT", status: "FILLED", price: "100",
         stopPrice: null, originalQuantity: "1", executedQuantity: "0", averagePrice: "0", commission: "0",
         reduceOnly: false, createdAt: openedAt,
       });
       await store.applyFill("entry-row", {
         exchangeTradeId: "trade-1", exchangeOrderId: "1", symbol: "BTCUSDT", side: "BUY", price: "100",
         quantity: "1", commission: "0", commissionAsset: "USDT", realizedPnl: "0", isMaker: false, executedAt: openedAt,
-      }, seed);
+      }, positionSeed);
     },
   };
 }
@@ -371,5 +377,36 @@ describe("signed LIVE account and position management", () => {
     expect(h.placed.some((order) => order.type === "STOP_MARKET" && order.stopPrice === "104.5")).toBe(true);
     expect(h.alerts.length).toBeGreaterThan(0);
     expect(h.placed.at(-1)).toMatchObject({ type: "MARKET", reduceOnly: true, side: "SELL" });
+  });
+
+  it("selects the dual LONG REST position instead of an opposite external SHORT position", async () => {
+    const h = harness("100", NOW - 60_000, { dualSide: true, fingerprint: "1".repeat(64) });
+    await h.open();
+    h.gateway.positionRisk = async () => [
+      { ...h.remote, positionSide: "SHORT", positionAmt: "-9", markPrice: "999" },
+      { ...h.remote, positionSide: "LONG", positionAmt: "1", markPrice: "101" },
+    ];
+
+    const positions = await h.adapter.positions();
+
+    expect(positions).toMatchObject([{ side: "LONG", qty: 1, markPrice: 101, valuationValid: true }]);
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ side: "LONG", quantity: "1", markPrice: "101" });
+  });
+
+  it.each([
+    { mode: "one-way", accountMode: ACCOUNT_MODE, positionSide: "LONG" },
+    { mode: "one-way", accountMode: ACCOUNT_MODE, positionSide: undefined },
+    { mode: "dual", accountMode: { dualSide: true, fingerprint: "1".repeat(64) }, positionSide: "BOTH" },
+    { mode: "dual", accountMode: { dualSide: true, fingerprint: "1".repeat(64) }, positionSide: "SHORT" },
+    { mode: "dual", accountMode: { dualSide: true, fingerprint: "1".repeat(64) }, positionSide: undefined },
+  ] as const)("rejects $mode REST positionSide $positionSide for a managed LONG position", async ({ accountMode, positionSide }) => {
+    const h = harness("100", NOW - 60_000, accountMode);
+    await h.open();
+    h.gateway.positionRisk = async () => [{ ...h.remote, positionSide, positionAmt: "1", markPrice: "101" }];
+
+    const positions = await h.adapter.positions();
+
+    expect(positions).toMatchObject([{ side: "LONG", markPrice: 0, valuationValid: false }]);
+    expect(await h.store.getPosition(seed.id)).toMatchObject({ quantity: "1", markPrice: "100" });
   });
 });

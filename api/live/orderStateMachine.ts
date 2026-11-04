@@ -90,6 +90,7 @@ export interface LiveFill {
   exchangeOrderId: string;
   symbol: string;
   side: "BUY" | "SELL";
+  positionSide?: PositionSide | "BOTH";
   price: DecimalString;
   quantity: DecimalString;
   commission: DecimalString;
@@ -151,20 +152,32 @@ function copyPosition(position: LivePosition | null): LivePosition | null {
   return position ? { ...position } : null;
 }
 
+function isReduceOrder(order: LiveOrder): boolean {
+  if (order.entrySemantics === "REDUCE") return true;
+  if (order.entrySemantics === "ENTRY") return false;
+  throw new Error("Order entrySemantics is required");
+}
+
 export function applyNewFill(
   currentOrder: LiveOrder,
   currentPosition: LivePosition | null,
   fill: LiveFill,
   seed: LivePositionSeed,
 ): { order: LiveOrder; position: LivePosition } {
-  if (seed.id !== currentOrder.intentId || seed.symbol !== currentOrder.symbol || seed.side !== currentOrder.side) {
+  if (seed.id !== currentOrder.intentId || seed.symbol !== currentOrder.symbol || seed.side !== currentOrder.side
+    || seed.positionSide !== currentOrder.positionSide
+    || seed.accountModeFingerprint !== currentOrder.accountModeFingerprint) {
     throw new Error("Fill intent ownership mismatch");
   }
   if (fill.symbol !== currentOrder.symbol) throw new Error("Fill symbol mismatch");
   if (currentOrder.exchangeOrderId !== null && fill.exchangeOrderId !== currentOrder.exchangeOrderId) {
     throw new Error("Fill exchange order mismatch");
   }
-  const expectedSide = (currentOrder.reduceOnly ? currentOrder.side === "SHORT" : currentOrder.side === "LONG")
+  const reducing = isReduceOrder(currentOrder);
+  if (currentOrder.positionSide !== "LONG" && currentOrder.positionSide !== "SHORT") {
+    throw new Error("Order positionSide is required");
+  }
+  const expectedSide = (reducing ? currentOrder.positionSide === "SHORT" : currentOrder.positionSide === "LONG")
     ? "BUY" : "SELL";
   if (fill.side !== expectedSide) throw new Error("Fill side mismatch");
   if (fill.commissionAsset !== "USDT") throw new Error("Non-USDT commission requires reconciliation");
@@ -188,10 +201,10 @@ export function applyNewFill(
     commission: addDecimals(currentOrder.commission, fill.commission),
   };
 
-  if (currentOrder.reduceOnly) {
-    if (!currentPosition || currentPosition.status !== "OPEN") throw new Error("Reduce-only fill has no open position");
+  if (reducing) {
+    if (!currentPosition || currentPosition.status !== "OPEN") throw new Error("Reduce fill has no open position");
     const quantity = subtractDecimals(currentPosition.quantity, fill.quantity);
-    if (compareDecimals(quantity, "0") < 0) throw new Error("Reduce-only fill exceeds live position");
+    if (compareDecimals(quantity, "0") < 0) throw new Error("Reduce fill exceeds live position");
     return {
       order,
       position: {
@@ -282,8 +295,8 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
   }
 
   async listActiveProtectionOrders(): Promise<LiveOrder[]> {
-    return [...this.orders.values()].filter((order) => order.type === "STOP_MARKET" && order.reduceOnly
-      && ["NEW", "PARTIALLY_FILLED"].includes(order.status)).map(copyOrder);
+    return [...this.orders.values()].filter((order) => order.type === "STOP_MARKET"
+      && order.entrySemantics === "REDUCE" && ["NEW", "PARTIALLY_FILLED"].includes(order.status)).map(copyOrder);
   }
 
   async transitionOrder(
@@ -485,13 +498,49 @@ export class OrderStateMachine {
 
   private async applyFillAndProtect(clientOrderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication> {
     const order = await this.requireOrder(clientOrderId);
+    if (!this.accountMode || order.accountModeFingerprint !== this.accountMode.fingerprint) {
+      throw new Error("Fill account mode fingerprint mismatch");
+    }
+    const expectedPositionSide = this.accountMode.dualSide ? order.positionSide : "BOTH";
+    if (!expectedPositionSide || fill.positionSide !== expectedPositionSide) {
+      throw new Error("Fill positionSide mismatch");
+    }
     const result = await this.store.applyFill(order.id, fill, seed);
-    const unresolved = result.inserted && order.status === "CANCEL"
-      ? await this.invalidateReplacement(order) : null;
-    if (result.inserted && result.position?.status === "OPEN" && !order.reduceOnly) {
+    const unresolved: string[] = [];
+    if (result.inserted && order.status === "CANCEL") {
+      const issue = await this.invalidateReplacement(order);
+      if (issue) unresolved.push(issue);
+    }
+    if (result.inserted && result.position?.status === "OPEN" && order.entrySemantics === "ENTRY") {
       await this.ensureProtection(result.position);
     }
-    return unresolved ? { ...result, unresolved: [unresolved] } : result;
+    if (result.position?.status === "CLOSED" && order.entrySemantics === "REDUCE") {
+      unresolved.push(...await this.cancelResidualProtection(result.position));
+    }
+    return unresolved.length > 0 ? { ...result, unresolved } : result;
+  }
+
+  private async cancelResidualProtection(position: LivePosition): Promise<string[]> {
+    const unresolved: string[] = [];
+    const protections = (await this.store.listOrders()).filter((order) => order.intentId === position.id
+      && order.symbol === position.symbol && order.positionSide === position.positionSide
+      && order.entrySemantics === "REDUCE" && order.type === "STOP_MARKET" && WORKING_STATUSES.has(order.status));
+    for (const protection of protections) {
+      try {
+        if (protection.status !== "PENDING_SEND") {
+          await this.gateway.cancelOrder({ symbol: protection.symbol, origClientOrderId: protection.clientOrderId });
+        }
+        const cancelled = await this.store.transitionOrder(protection.clientOrderId, [protection.status], { status: "CANCEL" });
+        if (!cancelled) throw new Error("protection state changed during cleanup");
+      } catch (error) {
+        const message = `${position.symbol} ${position.positionSide} 残留保护单 ${protection.clientOrderId} 清理失败：${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        await this.alert(message);
+        unresolved.push(message);
+      }
+    }
+    return unresolved;
   }
 
   private async invalidateReplacement(parent: LiveOrder): Promise<string | null> {
@@ -603,6 +652,7 @@ export class OrderStateMachine {
         exchangeOrderId: String(trade.orderId),
         symbol: trade.symbol,
         side: trade.side === "SELL" ? "SELL" : "BUY",
+        positionSide: trade.positionSide,
         price: trade.price,
         quantity: trade.qty,
         commission: trade.commission,
@@ -620,30 +670,61 @@ export class OrderStateMachine {
     return terminal;
   }
 
+  private async closeQuantity(position: LivePosition): Promise<DecimalString> {
+    if (!this.accountMode || position.accountModeFingerprint !== this.accountMode.fingerprint) {
+      throw new Error("Position account mode fingerprint mismatch");
+    }
+    if (position.positionSide !== "LONG" && position.positionSide !== "SHORT") {
+      throw new Error("Position positionSide is required");
+    }
+    if (!this.accountMode.dualSide) return position.quantity;
+    if (!this.gateway.positionRisk) throw new Error("Dual close requires signed positionRisk");
+    const matches = (await this.gateway.positionRisk(position.symbol)).filter((candidate) =>
+      candidate.symbol === position.symbol && candidate.positionSide === position.positionSide);
+    if (matches.length !== 1) throw new Error(`${position.symbol} ${position.positionSide} remote position is not unique`);
+    const signed = decimal(matches[0].positionAmt);
+    const quantity = position.positionSide === "SHORT" ? subtractDecimals("0", signed) : signed;
+    if (compareDecimals(quantity, "0") < 0) throw new Error("Remote position direction mismatch");
+    return quantity;
+  }
+
   async closePosition(positionId: string): Promise<LiveOrder | null> {
     const position = await this.store.getPosition(positionId);
     if (!position || position.status !== "OPEN" || compareDecimals(position.quantity, "0") <= 0) return null;
+    const quantity = await this.closeQuantity(position);
     let clientOrderId = `close-${positionId}`;
     const reuse = async (id: string) => {
       const existing = await this.store.getOrder(id);
       if (!existing) return null;
       if (existing.intentId !== positionId || existing.symbol !== position.symbol
-        || existing.type !== "MARKET" || !existing.reduceOnly) {
+        || existing.positionSide !== position.positionSide
+        || existing.accountModeFingerprint !== position.accountModeFingerprint
+        || existing.type !== "MARKET" || existing.entrySemantics !== "REDUCE") {
         throw new Error("Deterministic close order ownership mismatch");
       }
       return existing.status === "PENDING_SEND" ? this.submit(id) : existing;
     };
     const closeOrders = (await this.store.listOrders()).filter((order) => order.intentId === positionId
-      && order.type === "MARKET" && order.reduceOnly
+      && order.type === "MARKET" && order.entrySemantics === "REDUCE"
       && new RegExp(`^close-${positionId}(?:-retry-\\d+)?$`).test(order.clientOrderId));
-    const latest = closeOrders.at(-1);
+    let latest = closeOrders.at(-1);
     if (latest) {
-      const reused = await reuse(latest.clientOrderId);
-      if (latest.status !== "CANCEL") return reused;
-      const retry = closeOrders.filter((order) => order.status === "CANCEL").length;
+      let reused = await reuse(latest.clientOrderId);
+      if (reused && ["UNKNOWN", "RECONCILING"].includes(reused.status)) {
+        reused = await this.reconcile(reused, position);
+      }
+      if (!reused || reused.status !== "CANCEL") return reused;
+      latest = reused;
+      const cancelled = reused;
+      const retry = closeOrders.filter((order) => order.clientOrderId === cancelled.clientOrderId
+        ? cancelled.status === "CANCEL" : order.status === "CANCEL").length;
       clientOrderId = `close-${positionId}-retry-${retry}`;
       const raced = await reuse(clientOrderId);
       if (raced) return raced;
+    }
+    if (compareDecimals(quantity, "0") <= 0) {
+      if (latest?.status === "CANCEL") return latest;
+      throw new Error("Target remote position is already zero; reconciliation required");
     }
     const order: LiveOrder = {
       id: this.id(),
@@ -659,7 +740,7 @@ export class OrderStateMachine {
       status: "PENDING_SEND",
       price: "0",
       stopPrice: null,
-      originalQuantity: position.quantity,
+      originalQuantity: quantity,
       executedQuantity: "0",
       averagePrice: "0",
       commission: "0",
@@ -703,9 +784,9 @@ export class OrderStateMachine {
       try {
         const close = await this.closePosition(position.id);
         if (!close || close.status === "UNKNOWN") {
-          unsettled.push({ positionId: position.id, symbol: position.symbol, reason: "reduceOnly 平仓提交未确认" });
+          unsettled.push({ positionId: position.id, symbol: position.symbol, reason: "REDUCE 平仓提交未确认" });
         } else {
-          unsettled.push({ positionId: position.id, symbol: position.symbol, reason: "reduceOnly 平仓已提交，等待实际成交" });
+          unsettled.push({ positionId: position.id, symbol: position.symbol, reason: "REDUCE 平仓已提交，等待实际成交" });
         }
       } catch (error) {
         unsettled.push({
@@ -719,7 +800,7 @@ export class OrderStateMachine {
   }
 
   private async submitReplacement(order: LiveOrder): Promise<LiveOrder> {
-    if (order.type !== "LIMIT" || order.reduceOnly) return this.submit(order.clientOrderId);
+    if (order.type !== "LIMIT" || order.entrySemantics !== "ENTRY") return this.submit(order.clientOrderId);
     if (order.admissionGeneration === undefined) {
       return await this.store.transitionOrder(order.clientOrderId, ["PENDING_SEND"], { status: "CANCEL" }) ?? order;
     }

@@ -201,4 +201,60 @@ describe("production service composition with fake exchange", () => {
       await runtime.stop();
     }
   });
+
+  it("discovers the production account mode before dual-side exit submission", async () => {
+    const now = () => 1_800_000_000_000;
+    const { client, placeOrder } = fakeClient(now);
+    vi.spyOn(client, "positionSide").mockResolvedValue({ dualSidePosition: true });
+    vi.spyOn(client, "positionRisk").mockResolvedValue([{
+      symbol: "BTCUSDT", positionSide: "LONG", positionAmt: "1", entryPrice: "100", markPrice: "100",
+      liquidationPrice: "40", leverage: "2", marginType: "isolated", isolatedWallet: "50",
+    }]);
+    placeOrder.mockImplementation(async (request) => ({
+      symbol: request.symbol, orderId: 100, clientOrderId: request.newClientOrderId ?? "fake-close",
+      price: request.price ?? "0", origQty: request.quantity, executedQty: "0", positionSide: request.positionSide,
+      status: "NEW", side: request.side, type: request.type, reduceOnly: request.reduceOnly,
+    }));
+    const { createHash } = await import("node:crypto");
+    const fingerprint = createHash("sha256")
+      .update(JSON.stringify({ dualSide: true, multiAssets: false })).digest("hex");
+    const orders = new InMemoryLiveOrderStore();
+    const seed: LivePositionSeed = {
+      id: "dual-intent", symbol: "BTCUSDT", side: "LONG", positionSide: "LONG", entrySemantics: "ENTRY",
+      accountModeFingerprint: fingerprint, stopPrice: "99", liquidationPrice: "40", leverage: "2",
+      maintenanceBracket: 1, maintMarginRatio: "0.01", cumMaintenance: "0",
+    };
+    const order: LiveOrder = {
+      id: "dual-entry-row", intentId: seed.id, clientOrderId: "dual-entry", exchangeOrderId: "1",
+      symbol: seed.symbol, side: seed.side, positionSide: seed.positionSide, entrySemantics: "ENTRY",
+      accountModeFingerprint: fingerprint, type: "LIMIT", status: "FILLED", price: "100", stopPrice: null,
+      originalQuantity: "1", executedQuantity: "0", averagePrice: "0", commission: "0", reduceOnly: false,
+      createdAt: now(),
+    };
+    await orders.insertOrder(order);
+    await orders.applyFill(order.id, {
+      exchangeTradeId: "dual-entry-fill", exchangeOrderId: "1", symbol: seed.symbol, side: "BUY",
+      price: "100", quantity: "1", commission: "0", commissionAsset: "USDT", realizedPnl: "0",
+      isMaker: false, executedAt: now(),
+    }, seed);
+    const { createBinanceProductionLiveServicesFromStore } = await import("./productionServices");
+    const services = await createBinanceProductionLiveServicesFromStore({
+      env: {
+        LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key",
+        BINANCE_MAINNET_API_SECRET: "fake-secret", BINANCE_MAINNET_ALLOWED_SYMBOLS: "BTCUSDT",
+      },
+      db: {} as LiveDatabase, client, orderStore: orders,
+      reconciliationStore: new InMemoryReconciliationStore(), accountingStore: new InMemoryAccountingStore(),
+      dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) },
+      now,
+    });
+
+    await expect(services.adapter.close(seed.id, "dual account-mode discovery")).resolves.toMatchObject({ ok: true });
+
+    expect(placeOrder).toHaveBeenCalledWith(expect.objectContaining({
+      side: "SELL", positionSide: "LONG", quantity: "1", newClientOrderId: `close-${seed.id}`,
+    }));
+    expect(placeOrder.mock.calls[0]?.[0]).not.toHaveProperty("reduceOnly");
+    expect(await orders.getOrder(`close-${seed.id}`)).toMatchObject({ accountModeFingerprint: fingerprint });
+  });
 });

@@ -24,6 +24,7 @@ export function withFullUserTradePagination(gateway: LiveOrderGateway, limit = 1
     cancelOrder: (request) => gateway.cancelOrder(request),
     queryOrder: (request) => gateway.queryOrder(request),
     userTrades: (params) => fetchAllUserTrades(gateway, params, limit),
+    positionRisk: gateway.positionRisk ? (symbol) => gateway.positionRisk!(symbol) : undefined,
   };
 }
 

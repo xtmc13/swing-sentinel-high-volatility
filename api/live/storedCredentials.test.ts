@@ -19,6 +19,8 @@ vi.mock("./binanceSigned", async (importOriginal) => {
     ...original,
     BinanceSignedClient: class {
       constructor(credentials: LiveCredentials) { clientConstruction.credentials.push(credentials); }
+      async positionSide() { return { dualSidePosition: false }; }
+      async multiAssetsMargin() { return { multiAssetsMargin: false }; }
     },
   };
 });

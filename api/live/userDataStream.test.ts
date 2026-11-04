@@ -35,14 +35,23 @@ class FakeSocket implements UserDataSocket {
   }
 }
 
-function order(): LiveOrder {
+const ACCOUNT_MODE = { dualSide: false, fingerprint: "0".repeat(64) } as const;
+const DUAL_MODE = { dualSide: true, fingerprint: "1".repeat(64) } as const;
+
+function order(
+  side: "LONG" | "SHORT" = "LONG",
+  accountMode: typeof ACCOUNT_MODE | typeof DUAL_MODE = ACCOUNT_MODE,
+): LiveOrder {
   return {
     id: "order-1",
     intentId: "intent-1",
     clientOrderId: "client-1",
     exchangeOrderId: "901",
     symbol: "BTCUSDT",
-    side: "LONG",
+    side,
+    positionSide: side,
+    entrySemantics: "ENTRY",
+    accountModeFingerprint: accountMode.fingerprint,
     type: "LIMIT",
     status: "NEW",
     price: "100",
@@ -60,6 +69,9 @@ const seed: LivePositionSeed = {
   id: "intent-1",
   symbol: "BTCUSDT",
   side: "LONG",
+  positionSide: "LONG",
+  entrySemantics: "ENTRY",
+  accountModeFingerprint: ACCOUNT_MODE.fingerprint,
   stopPrice: "95",
   liquidationPrice: "80",
   leverage: "2",
@@ -68,7 +80,13 @@ const seed: LivePositionSeed = {
   cumMaintenance: "0",
 };
 
-function fillEvent(eventTime: number, tradeId: number, status = "FILLED") {
+function fillEvent(
+  eventTime: number,
+  tradeId: number,
+  status = "FILLED",
+  side: "LONG" | "SHORT" = "LONG",
+  positionSide: "BOTH" | "LONG" | "SHORT" | undefined = "BOTH",
+) {
   return {
     e: "ORDER_TRADE_UPDATE",
     E: eventTime,
@@ -77,7 +95,8 @@ function fillEvent(eventTime: number, tradeId: number, status = "FILLED") {
       s: "BTCUSDT",
       c: "client-1",
       i: 901,
-      S: "BUY",
+      S: side === "LONG" ? "BUY" : "SELL",
+      ps: positionSide as "BOTH" | "LONG" | "SHORT" | undefined,
       o: "LIMIT",
       q: "2",
       p: "100",
@@ -96,6 +115,8 @@ function fillEvent(eventTime: number, tradeId: number, status = "FILLED") {
 
 interface HarnessOptions {
   withOrder?: boolean;
+  accountMode?: typeof ACCOUNT_MODE | typeof DUAL_MODE;
+  side?: "LONG" | "SHORT";
   reconcile?: () => Promise<{ ok: boolean }>;
   pause?: () => Promise<void>;
   reconnectDelayMs?: number;
@@ -110,8 +131,10 @@ interface HarnessOptions {
 function harness(options: HarnessOptions = {}) {
   const sockets: FakeSocket[] = [];
   const calls: string[] = [];
+  const accountMode = options.accountMode ?? ACCOUNT_MODE;
+  const side = options.side ?? "LONG";
   const orders = new InMemoryLiveOrderStore();
-  if (options.withOrder ?? true) orders.addOrder(order());
+  if (options.withOrder ?? true) orders.addOrder(order(side, accountMode));
   const store = new InMemoryReconciliationStore();
   const gateway: LiveOrderGateway = {
     placeOrder: async (request) => ({
@@ -123,6 +146,7 @@ function harness(options: HarnessOptions = {}) {
       executedQty: "0",
       status: "NEW",
       side: request.side,
+      positionSide: request.positionSide,
       type: request.type,
       reduceOnly: request.reduceOnly,
     } satisfies BinanceOpenOrder),
@@ -130,7 +154,7 @@ function harness(options: HarnessOptions = {}) {
     queryOrder: async () => null,
     userTrades: async () => [],
   };
-  const machine = new OrderStateMachine(orders, gateway);
+  const machine = new OrderStateMachine(orders, gateway, { accountMode });
   const client = {
     createListenKey: async () => {
       calls.push("create");
@@ -168,7 +192,12 @@ function harness(options: HarnessOptions = {}) {
     machine,
     orders,
     store,
-    seedFor: async () => seed,
+    seedFor: async () => ({
+      ...seed,
+      side,
+      positionSide: side,
+      accountModeFingerprint: accountMode.fingerprint,
+    }),
     loadIntentMetadata: async (currentOrder) => loadLiveIntentMetadata({
       select: () => ({
         from: () => ({
@@ -495,6 +524,36 @@ describe("private order and account events", () => {
       breakoutPrice: "99.9",
       exitPending: false,
     });
+  });
+
+  it.each([
+    { mode: "one-way", accountMode: ACCOUNT_MODE, side: "LONG", wireSide: "BOTH" },
+    { mode: "one-way", accountMode: ACCOUNT_MODE, side: "SHORT", wireSide: "BOTH" },
+    { mode: "dual", accountMode: DUAL_MODE, side: "LONG", wireSide: "LONG" },
+    { mode: "dual", accountMode: DUAL_MODE, side: "SHORT", wireSide: "SHORT" },
+  ] as const)("validates $mode $side WS fill positionSide before applying it", async ({ accountMode, side, wireSide }) => {
+    const h = harness({ accountMode, side });
+    running.push(h.stream);
+    await h.stream.start();
+
+    h.sockets[0]?.emit(fillEvent(200, 2, "PARTIALLY_FILLED", side, wireSide));
+
+    await vi.waitFor(async () => expect((await h.orders.getOrder("client-1"))?.executedQuantity).toBe("1"));
+    expect(await h.orders.getPosition("intent-1")).toMatchObject({ side, positionSide: side, quantity: "1" });
+  });
+
+  it.each(["SHORT", undefined] as const)("freezes a dual LONG fill with mismatched or missing positionSide: %s", async (wireSide) => {
+    const h = harness({ accountMode: DUAL_MODE });
+    running.push(h.stream);
+    await h.stream.start();
+    const event = fillEvent(200, 2, "PARTIALLY_FILLED", "LONG", "LONG");
+    event.o.ps = wireSide;
+
+    h.sockets[0]?.emit(event);
+
+    await vi.waitFor(async () => expect((await h.store.listIssues()).length).toBeGreaterThan(0));
+    expect((await h.orders.getOrder("client-1"))?.executedQuantity).toBe("0");
+    expect(await h.orders.getPosition("intent-1")).toBeNull();
   });
 
   it("advances NEW to CANCELED when both events share a millisecond", async () => {

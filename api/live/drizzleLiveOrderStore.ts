@@ -174,7 +174,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
   async listActiveProtectionOrders(): Promise<LiveOrder[]> {
     const rows = await this.db.select().from(liveOrders).where(and(
       eq(liveOrders.type, "STOP_MARKET"),
-      eq(liveOrders.reduceOnly, true),
+      eq(liveOrders.entrySemantics, "REDUCE"),
       inArray(liveOrders.status, ["NEW", "PARTIALLY_FILLED"]),
     ));
     return ordersFromRows(this.db, rows);
@@ -192,7 +192,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
         status: patch.status ?? current.status,
         exchangeOrderId: patch.exchangeOrderId === undefined ? current.exchangeOrderId : patch.exchangeOrderId,
       }).where(eq(liveOrders.id, current.id));
-      if (patch.status && !current.reduceOnly) {
+      if (patch.status && current.entrySemantics === "ENTRY") {
         await tx.update(liveIntents).set({ status: patch.status }).where(eq(liveIntents.id, current.intentId));
       }
       return readOrder(tx, clientOrderId);
@@ -327,7 +327,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
         exchangeOrderId: next.order.exchangeOrderId,
         executedQuantity: next.order.executedQuantity,
       }).where(eq(liveOrders.id, orderId));
-      if (!next.order.reduceOnly) {
+      if (next.order.entrySemantics === "ENTRY") {
         await tx.update(liveIntents).set({ status: next.order.status }).where(eq(liveIntents.id, next.order.intentId));
       }
       await tx.insert(livePositions).values({

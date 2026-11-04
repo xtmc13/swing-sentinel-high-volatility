@@ -760,4 +760,65 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
       dayKey: "2027-01-15", dayStartEquity: "1000.000000000000000000000000000000", dailyLocked: true,
     }]);
   });
+
+  it("REDUCE 部分成交在独立连接重启后仍按身份减仓且不修改入场 intent 状态", async () => {
+    if (!db) throw new Error("database required");
+    const { DrizzleLiveOrderStore } = await import("./drizzleLiveOrderStore");
+    const database = independentDb();
+    const store = new DrizzleLiveOrderStore(database);
+    const fingerprint = "1".repeat(64);
+    const id = crypto.randomUUID();
+    const input = {
+      ...intentInput(id, "durable-reduce-identity"), positionSide: "LONG" as const,
+      entrySemantics: "ENTRY" as const, accountModeFingerprint: fingerprint,
+    };
+    await createApprovedIntent(database, input);
+    const seed = {
+      id, symbol: input.symbol, side: input.side, positionSide: input.positionSide,
+      entrySemantics: input.entrySemantics, accountModeFingerprint: fingerprint,
+      stopPrice: input.stopPrice, liquidationPrice: input.liquidationPrice, leverage: String(input.leverage),
+      maintenanceBracket: 1, maintMarginRatio: "0.01", cumMaintenance: "0",
+    };
+    await store.insertOrder({
+      id: "durable-entry", intentId: id, clientOrderId: "durable-entry", exchangeOrderId: "980",
+      symbol: input.symbol, side: input.side, positionSide: "LONG", entrySemantics: "ENTRY",
+      accountModeFingerprint: fingerprint, type: "LIMIT", status: "NEW", price: "100", stopPrice: null,
+      originalQuantity: "3", executedQuantity: "0", averagePrice: "0", commission: "0",
+      reduceOnly: false, createdAt: NOW,
+    });
+    await store.applyFill("durable-entry", {
+      exchangeTradeId: "durable-entry-fill", exchangeOrderId: "980", symbol: input.symbol, side: "BUY",
+      positionSide: "LONG", price: "100", quantity: "3", commission: "0.1", commissionAsset: "USDT",
+      realizedPnl: "0", isMaker: false, executedAt: NOW,
+    }, seed);
+    await store.insertOrder({
+      id: "durable-close", intentId: id, clientOrderId: "durable-close", exchangeOrderId: "981",
+      symbol: input.symbol, side: input.side, positionSide: "LONG", entrySemantics: "REDUCE",
+      accountModeFingerprint: fingerprint, type: "MARKET", status: "NEW", price: "0", stopPrice: null,
+      originalQuantity: "3", executedQuantity: "0", averagePrice: "0", commission: "0",
+      reduceOnly: false, createdAt: NOW + 1,
+    });
+
+    await store.applyFill("durable-close", {
+      exchangeTradeId: "durable-close-partial", exchangeOrderId: "981", symbol: input.symbol, side: "SELL",
+      positionSide: "LONG", price: "101", quantity: "1", commission: "0.1", commissionAsset: "USDT",
+      realizedPnl: "1", isMaker: false, executedAt: NOW + 1,
+    }, seed);
+
+    const restarted = new DrizzleLiveOrderStore(independentDb());
+    expect(await restarted.getPosition(id)).toMatchObject({ status: "OPEN", quantity: "2" });
+    expect(await restarted.getOrder("durable-close")).toMatchObject({
+      status: "PARTIALLY_FILLED", executedQuantity: "1", entrySemantics: "REDUCE",
+    });
+    expect((await db.select().from(schema.liveIntents).where(eq(schema.liveIntents.id, id)))[0]?.status).toBe("FILLED");
+
+    await restarted.applyFill("durable-close", {
+      exchangeTradeId: "durable-close-final", exchangeOrderId: "981", symbol: input.symbol, side: "SELL",
+      positionSide: "LONG", price: "101", quantity: "2", commission: "0.2", commissionAsset: "USDT",
+      realizedPnl: "2", isMaker: false, executedAt: NOW + 2,
+    }, seed);
+
+    expect(await restarted.getPosition(id)).toMatchObject({ status: "CLOSED", quantity: "0" });
+    expect((await db.select().from(schema.liveIntents).where(eq(schema.liveIntents.id, id)))[0]?.status).toBe("FILLED");
+  });
 });

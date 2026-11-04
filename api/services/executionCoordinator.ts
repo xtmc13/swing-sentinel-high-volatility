@@ -534,7 +534,8 @@ export class ExecutionCoordinator {
       && privateWsHeartbeatValid && reconciliationHealthy;
     const missingProtections = settings.executionMode === "LIVE_MAINNET"
       ? positions.filter((position) => !operations.protectionOrders.some((order) => order.intentId === position.id
-        && order.type === "STOP_MARKET" && order.reduceOnly && ["NEW", "PARTIALLY_FILLED"].includes(order.status)))
+        && order.type === "STOP_MARKET" && order.entrySemantics === "REDUCE"
+        && ["NEW", "PARTIALLY_FILLED"].includes(order.status)))
         .map((position) => `${position.symbol} 缺少有效止损保护`)
       : [];
     const healthReasons: string[] = [];

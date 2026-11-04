@@ -1,4 +1,10 @@
-export type Side = "LONG" | "SHORT";
+export type PositionSide = "LONG" | "SHORT";
+export type Side = PositionSide;
+export type MarginType = "ISOLATED" | "CROSS";
+export type EntrySemantics = "ENTRY" | "REDUCE";
+export type LiquidationPriceSource = "EXCHANGE" | "PRETRADE_ESTIMATE" | "LEGACY_UNKNOWN";
+export type LeverageMode = "SYMBOL_MAX" | "FIXED" | "ACCOUNT_CONFIGURED";
+export type AccountValuationBasis = "EXCHANGE_ACCOUNT_TOTALS" | "PAPER_USDT" | "LEGACY_UNKNOWN";
 export type DataSource = "MAINNET" | "TESTNET";
 export type OpportunityStatus = "READY" | "WAIT" | "BLOCKED";
 export type EngineState = "RUNNING" | "PAUSED" | "LOCKED" | "DEGRADED";
@@ -76,6 +82,16 @@ export interface LiveOrderView {
   exchangeOrderId: string | null;
   symbol: string;
   side: Side;
+  positionSide?: PositionSide | null;
+  marginType?: MarginType | null;
+  entrySemantics?: EntrySemantics | null;
+  effectiveLeverage?: number | null;
+  maintenanceBracket?: number | null;
+  maintMarginRatio?: string | null;
+  cumMaintenance?: string | null;
+  liquidationPriceSource?: LiquidationPriceSource | null;
+  accountModeFingerprint?: string | null;
+  compatibilityFrozen?: boolean;
   type: "LIMIT" | "MARKET" | "STOP_MARKET";
   status: string;
   price: string;
@@ -91,6 +107,16 @@ export interface UnsettledIntentView {
   id: string;
   symbol: string;
   status: string;
+  positionSide?: PositionSide | null;
+  marginType?: MarginType | null;
+  entrySemantics?: EntrySemantics | null;
+  effectiveLeverage?: number | null;
+  maintenanceBracket?: number | null;
+  maintMarginRatio?: string | null;
+  cumMaintenance?: string | null;
+  liquidationPriceSource?: LiquidationPriceSource | null;
+  accountModeFingerprint?: string | null;
+  compatibilityFrozen?: boolean;
 }
 
 export interface ReconciliationIssueView {
@@ -164,7 +190,7 @@ export interface TradingSettings {
   maxPositions: number;
   totalMarginCapPct: number;
   dailyLossLimitPct: number;
-  leverageMode: "SYMBOL_MAX" | "FIXED";
+  leverageMode: LeverageMode;
   fixedLeverage: number;
   takerFeeBps: number;
   slippageBps: number;
@@ -203,6 +229,9 @@ export interface AccountSnapshot {
   todayPnl: number;
   todayPnlPct: number;
   dayStartEquity: number;
+  dualSide?: boolean | null;
+  multiAssets?: boolean | null;
+  valuationBasis?: AccountValuationBasis | null;
   valuationValid: boolean;
   valuationIssues: string[];
   dailyLocked: boolean;
@@ -255,6 +284,9 @@ export interface PositionView {
   exitPending?: boolean;
   symbol: string;
   side: Side;
+  positionSide?: PositionSide | null;
+  marginType?: MarginType | null;
+  effectiveLeverage?: number | null;
   qty: number;
   initialQty: number;
   entryPrice: number;
@@ -262,6 +294,7 @@ export interface PositionView {
   stopPrice: number;
   targetPrice: number;
   liquidationPrice: number;
+  liquidationPriceSource?: LiquidationPriceSource | null;
   leverage: number;
   margin: number;
   unrealizedPnl: number;

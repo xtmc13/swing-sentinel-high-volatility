@@ -1,3 +1,4 @@
+import type { LeverageMode } from "@contracts/trading";
 import type {
   BinanceExchangeInfoResponse,
   BinanceLeverageBracket,
@@ -26,7 +27,7 @@ export interface LivePreflightInput {
   client: LivePreflightClient;
   symbol: string;
   allowedSymbols: string[];
-  leverageMode: "SYMBOL_MAX" | "FIXED";
+  leverageMode: LeverageMode;
   fixedLeverage: number;
   reconciliationIssues: LiveReconciliationIssue[];
   ownedClientOrderIds?: string[];

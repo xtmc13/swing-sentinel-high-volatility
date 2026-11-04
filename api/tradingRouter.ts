@@ -30,7 +30,7 @@ export const settingsInput = z.object({
   maxPositions: z.number().int().min(1).max(10),
   totalMarginCapPct: z.number().min(1).max(30),
   dailyLossLimitPct: z.number().min(0.5).max(10),
-  leverageMode: z.enum(["SYMBOL_MAX", "FIXED"]),
+  leverageMode: z.enum(["SYMBOL_MAX", "FIXED", "ACCOUNT_CONFIGURED"]),
   fixedLeverage: z.number().int().min(1).max(125),
   takerFeeBps: z.number().min(0).max(20),
   slippageBps: z.number().min(0).max(30),

@@ -52,7 +52,9 @@ export function settingsFromRow(row: typeof tradingSettings.$inferSelect): Tradi
     maxPositions: row.maxPositions,
     totalMarginCapPct: row.totalMarginCapPct,
     dailyLossLimitPct: row.dailyLossLimitPct,
-    leverageMode: row.leverageMode === "FIXED" ? "FIXED" : "SYMBOL_MAX",
+    leverageMode: row.leverageMode === "FIXED" || row.leverageMode === "ACCOUNT_CONFIGURED"
+      ? row.leverageMode
+      : "SYMBOL_MAX",
     fixedLeverage: row.fixedLeverage,
     takerFeeBps: row.takerFeeBps,
     slippageBps: row.slippageBps,

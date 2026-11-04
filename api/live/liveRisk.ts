@@ -1,4 +1,4 @@
-import type { Side, VolatilityMode } from "@contracts/trading";
+import type { LeverageMode, Side, VolatilityMode } from "@contracts/trading";
 import { portfolioRisk } from "../services/risk";
 import type { BinanceLeverageBracket, BinancePositionRisk } from "./binanceSigned";
 import {
@@ -25,7 +25,7 @@ export interface LiveRiskInput {
   stopPrice: DecimalString;
   liquidationPrice: DecimalString;
   actualLeverage: DecimalString;
-  leverageMode: "SYMBOL_MAX" | "FIXED";
+  leverageMode: LeverageMode;
   fixedLeverage: number;
   riskPerTradePct: number;
   mode: VolatilityMode;

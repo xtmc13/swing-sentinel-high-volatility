@@ -4,6 +4,9 @@ import { drizzle } from "drizzle-orm/mysql2";
 import { migrate } from "drizzle-orm/mysql2/migrator";
 import mysql from "mysql2/promise";
 import { fileURLToPath } from "node:url";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import * as schema from "@db/schema";
 import { calculateLivePositionRisk } from "./liveRisk";
 import { DrizzleLiveDailyRisk } from "./liveDailyRisk";
@@ -29,8 +32,26 @@ if (testDatabaseUrl && new URL(testDatabaseUrl).pathname !== "/swing_sentinel_ta
 
 const NOW = 1_793_600_000_000;
 const PAPER_SENTINEL = "task3-paper-sentinel";
+const migrationsFolder = fileURLToPath(new URL("../../db/migrations", import.meta.url));
 const db = testDatabaseUrl ? drizzle(testDatabaseUrl, { mode: "planetscale", schema }) : null;
 const pools: { end(): void | Promise<void> }[] = [];
+
+async function migrateLegacySchema(database: LiveDatabase) {
+  const legacyFolder = await mkdtemp(join(tmpdir(), "account-compat-legacy-"));
+  try {
+    const files = (await readdir(migrationsFolder)).filter((name) => /^\d{4}_.*\.sql$/.test(name) && name < "0015_");
+    await mkdir(join(legacyFolder, "meta"));
+    const journal = JSON.parse(await readFile(join(migrationsFolder, "meta", "_journal.json"), "utf8")) as {
+      entries: { idx: number }[];
+    };
+    journal.entries = journal.entries.filter((entry) => entry.idx < 15);
+    await writeFile(join(legacyFolder, "meta", "_journal.json"), JSON.stringify(journal));
+    for (const name of files) await copyFile(join(migrationsFolder, name), join(legacyFolder, name));
+    await migrate(database, { migrationsFolder: legacyFolder });
+  } finally {
+    await rm(legacyFolder, { recursive: true, force: true });
+  }
+}
 
 function independentDb() {
   if (!testDatabaseUrl) throw new Error("TASK3_TEST_DATABASE_URL is required");
@@ -120,6 +141,112 @@ afterAll(async () => {
 });
 
 describeDatabase("Task 3 独立 MariaDB 持久化", () => {
+  it("0015 完整保存新身份并保守迁移旧 one-way 记录", async () => {
+    if (!testDatabaseUrl) throw new Error("database required");
+    const serverUrl = new URL(testDatabaseUrl);
+    serverUrl.pathname = "";
+    const server = await mysql.createConnection({ uri: serverUrl.toString(), multipleStatements: true });
+    const migrationUrl = new URL(testDatabaseUrl);
+    migrationUrl.pathname = "/swing_sentinel_task3_migration_test";
+    let migrationDb: typeof db = null;
+    try {
+      await server.query("DROP DATABASE IF EXISTS swing_sentinel_task3_migration_test");
+      await server.query("CREATE DATABASE swing_sentinel_task3_migration_test");
+      migrationDb = drizzle(migrationUrl.toString(), { mode: "planetscale", schema });
+      await migrateLegacySchema(migrationDb);
+      await migrationDb.execute(sql`INSERT INTO trading_settings (id, leverage_mode) VALUES (1, 'SYMBOL_MAX')`);
+      await migrationDb.execute(sql`
+        INSERT INTO live_intents
+          (id, signal_id, symbol, side, status, quantity, limit_price, stop_price, liquidation_price,
+           leverage, notional, reserved_margin, reserved_risk, expires_at)
+        VALUES ('legacy-intent', 'legacy-signal', 'BTCUSDT', 'LONG', 'PENDING_SEND', 2, 100, 99, 50,
+          5, 200, 40, 2, '2037-01-01')
+      `);
+      await migrationDb.execute(sql`
+        INSERT INTO live_orders
+          (id, intent_id, client_order_id, symbol, side, type, status, price, original_quantity,
+           executed_quantity, reduce_only)
+        VALUES
+          ('legacy-entry', 'legacy-intent', 'legacy-entry-client', 'BTCUSDT', 'LONG', 'LIMIT', 'NEW', 100, 2, 0, false),
+          ('legacy-reduce', 'legacy-intent', 'legacy-reduce-client', 'BTCUSDT', 'LONG', 'MARKET', 'NEW', 100, 1, 0, true)
+      `);
+      await migrationDb.execute(sql`
+        INSERT INTO live_positions
+          (id, symbol, side, status, initial_quantity, quantity, entry_price, mark_price,
+           liquidation_price, isolated_wallet, leverage, maintenance_bracket, maint_margin_ratio,
+           cum_maintenance, closed_at)
+        VALUES
+          ('legacy-open', 'BTCUSDT', 'LONG', 'OPEN', 2, 2, 100, 101, 50, 40, 5, 1, 0.01, 0, NULL),
+          ('legacy-closed', 'BTCUSDT', 'SHORT', 'CLOSED', 1, 0, 100, 90, 150, 20, 5, 1, 0.01, 0, CURRENT_TIMESTAMP(3))
+      `);
+
+      await migrate(migrationDb, { migrationsFolder });
+      expect((await migrationDb.select().from(schema.tradingSettings))[0]?.leverageMode).toBe("ACCOUNT_CONFIGURED");
+      expect((await migrationDb.select().from(schema.liveIntents))[0]).toMatchObject({
+        id: "legacy-intent", positionSide: "LONG", marginType: null, entrySemantics: "ENTRY",
+        effectiveLeverage: 5, maintenanceBracket: null, maintMarginRatio: null, cumMaintenance: null,
+        liquidationPriceSource: "LEGACY_UNKNOWN", accountModeFingerprint: null, compatibilityFrozen: true,
+      });
+      const legacyOrders = await migrationDb.select().from(schema.liveOrders);
+      expect(legacyOrders).toMatchObject([
+        { id: "legacy-entry", positionSide: "LONG", entrySemantics: "ENTRY", effectiveLeverage: 5,
+          liquidationPriceSource: "LEGACY_UNKNOWN", compatibilityFrozen: true },
+        { id: "legacy-reduce", positionSide: "LONG", entrySemantics: "REDUCE", effectiveLeverage: 5,
+          liquidationPriceSource: "LEGACY_UNKNOWN", compatibilityFrozen: true },
+      ]);
+      const legacyPositions = await migrationDb.select().from(schema.livePositions);
+      expect(legacyPositions.find((row) => row.id === "legacy-open")).toMatchObject({
+        positionSide: "LONG", marginType: null, effectiveLeverage: 5,
+        maintenanceBracket: 1, liquidationPriceSource: "LEGACY_UNKNOWN", compatibilityFrozen: true,
+      });
+      expect(legacyPositions.find((row) => row.id === "legacy-closed")).toMatchObject({
+        positionSide: "SHORT", marginType: null, effectiveLeverage: 5,
+        maintenanceBracket: 1, liquidationPriceSource: "LEGACY_UNKNOWN", compatibilityFrozen: false,
+      });
+
+      const fingerprint = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      await migrationDb.insert(schema.liveIntents).values({
+        id: "new-intent", signalId: "new-signal", symbol: "BTCUSDT", side: "SHORT", status: "PENDING_SEND",
+        quantity: "1", limitPrice: "100", stopPrice: "101", liquidationPrice: "150", leverage: 150,
+        notional: "100", reservedMargin: "0.666666666666666666666666666667", reservedRisk: "1",
+        expiresAt: new Date("2037-01-01T00:00:00Z"), positionSide: "SHORT", marginType: "CROSS",
+        entrySemantics: "ENTRY", effectiveLeverage: 150, maintenanceBracket: 2, maintMarginRatio: "0.02",
+        cumMaintenance: "10", liquidationPriceSource: "PRETRADE_ESTIMATE", accountModeFingerprint: fingerprint,
+        compatibilityFrozen: false,
+      });
+      await migrationDb.insert(schema.liveOrders).values({
+        id: "new-order", intentId: "new-intent", clientOrderId: "new-client", symbol: "BTCUSDT", side: "SHORT",
+        type: "MARKET", status: "NEW", price: "100", originalQuantity: "1", executedQuantity: "0",
+        positionSide: "SHORT", marginType: "CROSS", entrySemantics: "REDUCE", effectiveLeverage: 150,
+        maintenanceBracket: 2, maintMarginRatio: "0.02", cumMaintenance: "10",
+        liquidationPriceSource: "EXCHANGE", accountModeFingerprint: fingerprint, compatibilityFrozen: false,
+      });
+      await migrationDb.insert(schema.livePositions).values({
+        id: "new-position", symbol: "BTCUSDT", side: "SHORT", initialQuantity: "1", quantity: "1",
+        entryPrice: "100", markPrice: "100", liquidationPrice: "150", isolatedWallet: "1", leverage: "150",
+        maintenanceBracket: 2, maintMarginRatio: "0.02", cumMaintenance: "10", positionSide: "SHORT",
+        marginType: "CROSS", entrySemantics: "ENTRY", effectiveLeverage: 150,
+        liquidationPriceSource: "EXCHANGE", accountModeFingerprint: fingerprint, compatibilityFrozen: false,
+      });
+      expect(await migrationDb.select().from(schema.liveIntents).where(eq(schema.liveIntents.id, "new-intent")))
+        .toMatchObject([{ positionSide: "SHORT", marginType: "CROSS", entrySemantics: "ENTRY",
+          effectiveLeverage: 150, maintenanceBracket: 2, liquidationPriceSource: "PRETRADE_ESTIMATE",
+          accountModeFingerprint: fingerprint, compatibilityFrozen: false }]);
+      expect(await migrationDb.select().from(schema.liveOrders).where(eq(schema.liveOrders.id, "new-order")))
+        .toMatchObject([{ positionSide: "SHORT", marginType: "CROSS", entrySemantics: "REDUCE",
+          effectiveLeverage: 150, maintenanceBracket: 2, liquidationPriceSource: "EXCHANGE",
+          accountModeFingerprint: fingerprint, compatibilityFrozen: false }]);
+      expect(await migrationDb.select().from(schema.livePositions).where(eq(schema.livePositions.id, "new-position")))
+        .toMatchObject([{ positionSide: "SHORT", marginType: "CROSS", entrySemantics: "ENTRY",
+          effectiveLeverage: 150, maintenanceBracket: 2, liquidationPriceSource: "EXCHANGE",
+          accountModeFingerprint: fingerprint, compatibilityFrozen: false }]);
+    } finally {
+      if (migrationDb) await migrationDb.$client.end();
+      await server.query("DROP DATABASE IF EXISTS swing_sentinel_task3_migration_test");
+      await server.end();
+    }
+  });
+
   it("增量迁移保留 paper 持仓并为真实账本建立 DECIMAL 表", async () => {
     if (!db) throw new Error("database required");
     const paper = await db.select().from(schema.positions).where(eq(schema.positions.id, PAPER_SENTINEL));

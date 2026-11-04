@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "@contracts/trading";
 import { tradingSettings } from "@db/schema";
+import { settingsInput } from "../tradingRouter";
 import { settingsFromRow } from "./trading";
 
 function row(overrides: Partial<typeof tradingSettings.$inferSelect> = {}): typeof tradingSettings.$inferSelect {
@@ -38,5 +39,17 @@ describe("交易设置持久化契约", () => {
       strategyMode: "SWING",
       momentumEnabled: false,
     });
+  });
+
+  it("ACCOUNT_CONFIGURED 通过 RPC 校验且序列化不丢失", () => {
+    expect(settingsInput.parse({ ...DEFAULT_SETTINGS, leverageMode: "ACCOUNT_CONFIGURED" }).leverageMode)
+      .toBe("ACCOUNT_CONFIGURED");
+    expect(settingsFromRow(row({ leverageMode: "ACCOUNT_CONFIGURED" })).leverageMode)
+      .toBe("ACCOUNT_CONFIGURED");
+  });
+
+  it("PAPER 新默认值显式保留 SYMBOL_MAX", () => {
+    expect(DEFAULT_SETTINGS.executionMode).toBe("PAPER");
+    expect(DEFAULT_SETTINGS.leverageMode).toBe("SYMBOL_MAX");
   });
 });

@@ -1,5 +1,8 @@
 import { createHmac } from "node:crypto";
+import type { PositionSide } from "@contracts/trading";
 import type { DecimalString } from "./decimal";
+
+export type BinancePositionSide = PositionSide | "BOTH";
 
 export const BINANCE_MAINNET_REST_URL = "https://fapi.binance.com";
 export const BINANCE_MAINNET_PRIVATE_WS_URL = "wss://fstream.binance.com/ws";
@@ -51,6 +54,7 @@ export interface BinanceAccountResponse {
 
 export interface BinancePositionRisk {
   symbol: string;
+  positionSide?: BinancePositionSide;
   positionAmt: DecimalString;
   entryPrice: DecimalString;
   markPrice: DecimalString;
@@ -108,6 +112,7 @@ export interface BinanceOpenOrder {
   executedQty: DecimalString;
   status: string;
   side: string;
+  positionSide?: BinancePositionSide;
   type: string;
   reduceOnly?: boolean;
   [key: string]: unknown;
@@ -118,6 +123,7 @@ export interface BinanceUserTrade {
   id: number;
   orderId: number;
   side: string;
+  positionSide?: BinancePositionSide;
   price: DecimalString;
   qty: DecimalString;
   realizedPnl: DecimalString;
@@ -160,6 +166,7 @@ export interface IncomeParams {
 export interface PlaceOrderRequest {
   symbol: string;
   side: "BUY" | "SELL";
+  positionSide?: BinancePositionSide;
   type: "LIMIT" | "MARKET" | "STOP_MARKET";
   quantity: DecimalString;
   price?: DecimalString;

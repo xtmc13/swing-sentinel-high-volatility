@@ -1,6 +1,7 @@
-import type { Side, StrategyType } from "@contracts/trading";
+import type { EntrySemantics, PositionSide, Side, StrategyType } from "@contracts/trading";
 import type { AssertCurrentLiveAdmission } from "./liveConfig";
 import { liveSubmissionPermitted } from "./livePersistence";
+import { buildOrderWire, type OrderWireAccountMode } from "./orderWire";
 import type {
   BinanceOpenOrder,
   LiveOrderGateway,
@@ -34,6 +35,9 @@ export interface LiveOrder {
   exchangeOrderId: string | null;
   symbol: string;
   side: Side;
+  positionSide?: PositionSide | null;
+  entrySemantics?: EntrySemantics | null;
+  accountModeFingerprint?: string | null;
   type: "LIMIT" | "MARKET" | "STOP_MARKET";
   status: LiveOrderStatus;
   price: DecimalString;
@@ -387,6 +391,7 @@ export interface OrderStateMachineOptions {
   alert?: (message: string) => unknown;
   id?: () => string;
   assertCurrentAdmission?: AssertCurrentLiveAdmission;
+  accountMode?: OrderWireAccountMode;
 }
 
 export async function serializeLivePositionOperation<T>(
@@ -418,6 +423,7 @@ export class OrderStateMachine {
   private readonly alert: (message: string) => unknown;
   private readonly id: () => string;
   private readonly assertCurrentAdmission?: AssertCurrentLiveAdmission;
+  private readonly accountMode?: OrderWireAccountMode;
 
   constructor(
     store: LiveOrderStore,
@@ -429,6 +435,7 @@ export class OrderStateMachine {
     this.alert = options.alert ?? (() => undefined);
     this.id = options.id ?? (() => crypto.randomUUID());
     this.assertCurrentAdmission = options.assertCurrentAdmission;
+    this.accountMode = options.accountMode;
   }
 
   async createOrder(order: LiveOrder): Promise<LiveOrder> {
@@ -851,6 +858,10 @@ export class OrderStateMachine {
   }
 
   private requestFor(order: LiveOrder): PlaceOrderRequest {
+    if (this.accountMode) return buildOrderWire(order, this.accountMode);
+    if (order.positionSide != null || order.entrySemantics != null || order.accountModeFingerprint != null) {
+      throw new Error("Account mode is required for an identified live order");
+    }
     return {
       symbol: order.symbol,
       side: this.orderSide(order),

@@ -13,6 +13,32 @@ import {
   type LiveOrder,
   type LivePositionSeed,
 } from "./orderStateMachine";
+import { buildOrderWire, type OrderWireAccountMode } from "./orderWire";
+
+const ONE_WAY_FINGERPRINT = "0".repeat(64);
+const DUAL_FINGERPRINT = "1".repeat(64);
+const ONE_WAY_MODE: OrderWireAccountMode = { dualSide: false, fingerprint: ONE_WAY_FINGERPRINT };
+const DUAL_MODE: OrderWireAccountMode = { dualSide: true, fingerprint: DUAL_FINGERPRINT };
+
+type WireOrder = Parameters<typeof buildOrderWire>[0];
+
+function wireOrder(
+  positionSide: "LONG" | "SHORT",
+  entrySemantics: "ENTRY" | "REDUCE",
+  type: LiveOrder["type"],
+): WireOrder {
+  return {
+    symbol: "BTCUSDT",
+    positionSide,
+    entrySemantics,
+    accountModeFingerprint: ONE_WAY_FINGERPRINT,
+    type,
+    originalQuantity: "3",
+    price: "100",
+    stopPrice: type === "STOP_MARKET" ? "99" : null,
+    clientOrderId: `${positionSide}-${entrySemantics}-${type}`,
+  };
+}
 
 class FakeGateway implements LiveOrderGateway {
   readonly placed: PlaceOrderRequest[] = [];
@@ -138,6 +164,113 @@ function setup() {
   });
   return { store, gateway, alerts, machine };
 }
+
+describe("Binance order wire identity", () => {
+  const cases = [
+    { mode: "one-way", positionSide: "LONG", entrySemantics: "ENTRY", type: "LIMIT", side: "BUY", wirePositionSide: "BOTH", reduceOnly: false },
+    { mode: "one-way", positionSide: "SHORT", entrySemantics: "ENTRY", type: "LIMIT", side: "SELL", wirePositionSide: "BOTH", reduceOnly: false },
+    { mode: "one-way", positionSide: "LONG", entrySemantics: "REDUCE", type: "MARKET", side: "SELL", wirePositionSide: "BOTH", reduceOnly: true },
+    { mode: "one-way", positionSide: "SHORT", entrySemantics: "REDUCE", type: "MARKET", side: "BUY", wirePositionSide: "BOTH", reduceOnly: true },
+    { mode: "one-way", positionSide: "LONG", entrySemantics: "REDUCE", type: "STOP_MARKET", side: "SELL", wirePositionSide: "BOTH", reduceOnly: true },
+    { mode: "one-way", positionSide: "SHORT", entrySemantics: "REDUCE", type: "STOP_MARKET", side: "BUY", wirePositionSide: "BOTH", reduceOnly: true },
+    { mode: "dual", positionSide: "LONG", entrySemantics: "ENTRY", type: "LIMIT", side: "BUY", wirePositionSide: "LONG", reduceOnly: false },
+    { mode: "dual", positionSide: "SHORT", entrySemantics: "ENTRY", type: "LIMIT", side: "SELL", wirePositionSide: "SHORT", reduceOnly: false },
+    { mode: "dual", positionSide: "LONG", entrySemantics: "REDUCE", type: "MARKET", side: "SELL", wirePositionSide: "LONG", reduceOnly: false },
+    { mode: "dual", positionSide: "SHORT", entrySemantics: "REDUCE", type: "MARKET", side: "BUY", wirePositionSide: "SHORT", reduceOnly: false },
+    { mode: "dual", positionSide: "LONG", entrySemantics: "REDUCE", type: "STOP_MARKET", side: "SELL", wirePositionSide: "LONG", reduceOnly: false },
+    { mode: "dual", positionSide: "SHORT", entrySemantics: "REDUCE", type: "STOP_MARKET", side: "BUY", wirePositionSide: "SHORT", reduceOnly: false },
+  ] as const;
+
+  it.each(cases)(
+    "maps $mode $positionSide $entrySemantics $type without changing internal semantics",
+    ({ mode, positionSide, entrySemantics, type, side, wirePositionSide, reduceOnly }) => {
+      const accountMode = mode === "dual" ? DUAL_MODE : ONE_WAY_MODE;
+      const order = {
+        ...wireOrder(positionSide, entrySemantics, type),
+        accountModeFingerprint: accountMode.fingerprint,
+      };
+
+      const wire = buildOrderWire(order, accountMode);
+
+      expect(wire).toMatchObject({
+        symbol: "BTCUSDT",
+        side,
+        positionSide: wirePositionSide,
+        type,
+        quantity: "3",
+        newClientOrderId: order.clientOrderId,
+      });
+      expect(wire.reduceOnly).toBe(reduceOnly || undefined);
+      expect(Object.hasOwn(wire, "reduceOnly")).toBe(reduceOnly);
+      expect(order.entrySemantics).toBe(entrySemantics);
+    },
+  );
+
+  it("keeps LIMIT pricing and STOP_MARKET trigger parameters in the shared builder", () => {
+    expect(buildOrderWire(wireOrder("LONG", "ENTRY", "LIMIT"), ONE_WAY_MODE)).toMatchObject({
+      price: "100",
+      timeInForce: "IOC",
+    });
+    expect(buildOrderWire(wireOrder("LONG", "REDUCE", "STOP_MARKET"), ONE_WAY_MODE)).toMatchObject({
+      price: "100",
+      stopPrice: "99",
+    });
+    expect(buildOrderWire(wireOrder("LONG", "REDUCE", "MARKET"), ONE_WAY_MODE).price).toBeUndefined();
+  });
+
+  it.each([
+    "mismatched",
+    "missing",
+    "malformed",
+  ])("rejects a %s order account fingerprint", (kind) => {
+    const accountModeFingerprint = kind === "mismatched" ? DUAL_FINGERPRINT
+      : kind === "malformed" ? "not-a-sha256-fingerprint" : undefined;
+    expect(() => buildOrderWire(
+      { ...wireOrder("LONG", "ENTRY", "LIMIT"), accountModeFingerprint },
+      ONE_WAY_MODE,
+    )).toThrow("account mode fingerprint");
+  });
+
+  it("rejects an invalid current account fingerprint", () => {
+    expect(() => buildOrderWire(wireOrder("LONG", "ENTRY", "LIMIT"), {
+      dualSide: false,
+      fingerprint: "invalid",
+    })).toThrow("account mode fingerprint");
+  });
+
+  it("rejects missing position identity and entry semantics instead of guessing", () => {
+    const order = wireOrder("LONG", "ENTRY", "LIMIT");
+    expect(() => buildOrderWire({ ...order, positionSide: undefined }, ONE_WAY_MODE)).toThrow("positionSide");
+    expect(() => buildOrderWire({ ...order, entrySemantics: undefined }, ONE_WAY_MODE)).toThrow("entrySemantics");
+  });
+
+  it("uses the shared builder at submission while retaining internal REDUCE", async () => {
+    const store = new InMemoryLiveOrderStore();
+    const gateway = new FakeGateway();
+    const machine = new OrderStateMachine(store, gateway, { accountMode: DUAL_MODE });
+    store.addOrder({
+      ...wireOrder("SHORT", "REDUCE", "STOP_MARKET"),
+      accountModeFingerprint: DUAL_FINGERPRINT,
+      id: "wire-row",
+      intentId: seed.id,
+      exchangeOrderId: null,
+      side: "SHORT",
+      status: "PENDING_SEND",
+      executedQuantity: "0",
+      averagePrice: "0",
+      commission: "0",
+      reduceOnly: true,
+      createdAt: 1,
+    });
+
+    await expect(machine.submit("SHORT-REDUCE-STOP_MARKET")).resolves.toMatchObject({
+      entrySemantics: "REDUCE",
+      reduceOnly: true,
+    });
+    expect(gateway.placed[0]).toMatchObject({ side: "BUY", positionSide: "SHORT", stopPrice: "99" });
+    expect(gateway.placed[0]).not.toHaveProperty("reduceOnly");
+  });
+});
 
 describe("fill-driven live order state machine", () => {
   it("acknowledgement does not open a position; partial, out-of-order and duplicate fills aggregate exactly", async () => {

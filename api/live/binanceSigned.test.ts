@@ -321,7 +321,7 @@ describe("Binance signed mainnet client", () => {
   it("submits signed IOC orders without automatic retries and preserves decimal parameters", async () => {
     const acknowledgement = {
       symbol: "BTCUSDT", orderId: 123, clientOrderId: "entry-1", price: "67000.100000000000000001",
-      origQty: "0.000000000000000003", executedQty: "0", status: "NEW", side: "BUY", type: "LIMIT",
+      origQty: "0.000000000000000003", executedQty: "0", status: "NEW", side: "BUY", positionSide: "BOTH", type: "LIMIT",
     };
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ serverTime: NOW }))
@@ -329,13 +329,14 @@ describe("Binance signed mainnet client", () => {
     const client = clientWith(fetchMock);
 
     await expect(client.placeOrder({
-      symbol: "BTCUSDT", side: "BUY", type: "LIMIT", quantity: "0.000000000000000003",
+      symbol: "BTCUSDT", side: "BUY", positionSide: "BOTH", type: "LIMIT", quantity: "0.000000000000000003",
       price: "67000.100000000000000001", timeInForce: "IOC", newClientOrderId: "entry-1",
     })).resolves.toEqual(acknowledgement);
     const url = requestUrl(fetchMock, 1);
     expect(url.pathname).toBe("/fapi/v1/order");
     expect(url.searchParams.get("price")).toBe("67000.100000000000000001");
     expect(url.searchParams.get("quantity")).toBe("0.000000000000000003");
+    expect(url.searchParams.get("positionSide")).toBe("BOTH");
     expect(url.searchParams.get("timeInForce")).toBe("IOC");
     expect(fetchMock.mock.calls[1]![1]).toMatchObject({ method: "POST", headers: { "X-MBX-APIKEY": "test-key" } });
   });

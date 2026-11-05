@@ -42,6 +42,7 @@ export interface BinanceAccountAsset {
   walletBalance: DecimalString;
   availableBalance: DecimalString;
   crossWalletBalance?: DecimalString;
+  crossUnPnl?: DecimalString;
 }
 
 export interface BinanceAccountResponse {
@@ -50,6 +51,8 @@ export interface BinanceAccountResponse {
   totalMarginBalance?: DecimalString;
   availableBalance?: DecimalString;
   totalPositionInitialMargin?: DecimalString;
+  totalCrossWalletBalance?: DecimalString;
+  totalCrossUnPnl?: DecimalString;
   [key: string]: unknown;
 }
 

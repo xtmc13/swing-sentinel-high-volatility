@@ -7,6 +7,7 @@ import { InMemoryLiveOrderStore } from "./orderStateMachine";
 import { InMemoryReconciliationStore } from "./reconciliation";
 import { InMemoryAccountingStore } from "./accounting";
 import { createBinanceProductionLiveServices } from "./productionServices";
+import { estimateFlatLiquidationPrice } from "./liveRisk";
 import { createProductionLiveRuntime } from "./productionRuntime";
 import type { LiveFill, LiveOrder, LivePositionSeed } from "./orderStateMachine";
 import type { UserDataSocket } from "./userDataStream";
@@ -49,7 +50,12 @@ function finalGateDatabase(
     transaction: async (operation: (transaction: typeof tx) => Promise<unknown>) => operation(tx),
     update: () => ({ set: () => ({ where: async () => [{ affectedRows: 1 }] }) }),
   } as unknown as LiveDatabase;
-  return { db, inserted: () => intentRows.at(-1), insertedCount: () => intentRows.length };
+  return {
+    db,
+    inserted: () => intentRows.at(-1),
+    insertedCount: () => intentRows.length,
+    clearIntents: () => { intentRows.length = 0; },
+  };
 }
 
 class FakeSocket implements UserDataSocket {
@@ -462,7 +468,7 @@ describe("production service composition with fake exchange", () => {
         maintMarginRatio: "0.005", cum: "0",
       }],
     }]);
-    vi.spyOn(client, "account").mockResolvedValue({
+    let account = {
       assets: [
         { asset: "USDT", walletBalance: "600", availableBalance: "500" },
         { asset: "BNB", walletBalance: "1", availableBalance: "1" },
@@ -471,6 +477,17 @@ describe("production service composition with fake exchange", () => {
       totalMarginBalance: "1000",
       availableBalance: "900",
       totalPositionInitialMargin: "0",
+      totalCrossWalletBalance: "1000",
+      totalCrossUnPnl: "0",
+    };
+    let changeAfterNextAccountRead = false;
+    vi.spyOn(client, "account").mockImplementation(async () => {
+      const current = account;
+      if (changeAfterNextAccountRead) {
+        changeAfterNextAccountRead = false;
+        account = { ...account, totalCrossWalletBalance: "999" };
+      }
+      return current;
     });
     placeOrder.mockImplementation(async (request) => ({
       symbol: request.symbol, orderId: 150, clientOrderId: request.newClientOrderId ?? "account-entry",
@@ -495,6 +512,7 @@ describe("production service composition with fake exchange", () => {
       socketFactory: () => socket,
       now,
       accountMode: { dualSide: true, multiAssets: true, fingerprint: ACCOUNT_MODE.fingerprint },
+      crossCollateral: { haircut: "1", observedAt: now() },
     });
     const signal: Opportunity = {
       id: "multi-asset-opportunity", signalId: "multi-asset-signal", strategyType: "SWING",
@@ -519,8 +537,12 @@ describe("production service composition with fake exchange", () => {
         maintMarginRatio: "0.005",
         cumMaintenance: "0",
         reservedMargin: "9.724666666666666666666666666666",
+        liquidationPriceSource: "PRETRADE_ESTIMATE",
         compatibilityFrozen: false,
       });
+      expect(store.inserted()?.liquidationPrice).not.toBe(estimateFlatLiquidationPrice({
+        side: "LONG", entryPrice: "100", leverage: 150, maintMarginRatio: "0.005",
+      }));
       expect(placeOrder).toHaveBeenCalledWith(expect.objectContaining({ positionSide: "LONG" }));
 
       const blocked = await services.adapter.open({
@@ -531,6 +553,19 @@ describe("production service composition with fake exchange", () => {
       expect(blocked.ok).toBe(false);
       expect(blocked.reason).toMatch(/cross 持仓或相关待单/);
       expect(store.insertedCount()).toBe(1);
+      expect(placeOrder).toHaveBeenCalledTimes(1);
+
+      store.clearIntents();
+      await expect(services.preflight()).resolves.toMatchObject({ ready: true });
+      changeAfterNextAccountRead = true;
+      const changed = await services.adapter.open({
+        ...signal,
+        id: "cross-changed-snapshot-opportunity",
+        signalId: "cross-changed-snapshot-signal",
+      });
+      expect(changed.ok).toBe(false);
+      expect(changed.reason).toMatch(/二次快照|snapshot/);
+      expect(store.insertedCount()).toBe(0);
       expect(placeOrder).toHaveBeenCalledTimes(1);
     } finally {
       await services.stop();

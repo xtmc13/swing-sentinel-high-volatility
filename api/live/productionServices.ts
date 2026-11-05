@@ -6,7 +6,8 @@ import { getSettings as readSettings, settingsFromRow } from "../queries/trading
 import { binance } from "../services/binance";
 import { alignedCorrelation } from "../services/risk";
 import { log } from "../lib/logger";
-import { BinanceSignedClient } from "./binanceSigned";
+import { BinanceSignedClient, type BinanceAccountResponse } from "./binanceSigned";
+import { estimateCrossLiquidationBoundary, type CrossRiskPosition } from "./crossRisk";
 import { binanceCredentialStore } from "../credentials/binanceCredentialStore";
 import {
   createLiveAdapter,
@@ -75,6 +76,7 @@ export interface ProductionServicesOptions {
   reconciliationIntervalMs?: number;
   pauseAutoTrade?: () => Promise<void>;
   accountMode?: OrderWireAccountMode;
+  crossCollateral?: { haircut: DecimalString; observedAt: number };
 }
 
 interface FreshPreflight {
@@ -88,6 +90,18 @@ interface FreshPreflight {
 function allowedSymbols(env: ServerEnvironment): string[] {
   return [...new Set((env.BINANCE_MAINNET_ALLOWED_SYMBOLS ?? "")
     .split(",").map((symbol) => symbol.trim().toUpperCase()).filter(Boolean))];
+}
+
+function crossAccountValuation(account: BinanceAccountResponse, multiAssets: boolean) {
+  const usdt = account.assets.find((asset) => asset.asset === "USDT");
+  const crossWalletBalance = account.totalCrossWalletBalance
+    ?? (multiAssets ? undefined : usdt?.crossWalletBalance);
+  const crossUnrealizedPnl = account.totalCrossUnPnl
+    ?? (multiAssets ? undefined : usdt?.crossUnPnl);
+  if (crossWalletBalance === undefined || crossUnrealizedPnl === undefined) {
+    throw new Error("缺少 cross 专用钱包或未实现盈亏");
+  }
+  return { crossWalletBalance, crossUnrealizedPnl };
 }
 
 function admissionLiquidationPrice(
@@ -276,12 +290,12 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       if (marginType !== "ISOLATED" && marginType !== "CROSS") {
         return { approved: false, reason: "目标合约 marginType 无效" };
       }
-      if (marginType === "CROSS" && (pendingSymbols.length > 0
-        || activeRemote.some((position) => position.marginType.toLowerCase() === "cross"))) {
+      if (marginType === "CROSS" && pendingSymbols.length > 0) {
         return { approved: false, reason: "存在 cross 持仓或相关待单，必须完成组合强平估算后才能新增" };
       }
       let existingExposure: DecimalString = "0";
       const portfolioPositions: Array<{ remote: (typeof activeRemote)[number]; stopPrice: DecimalString }> = [];
+      const crossPositions: CrossRiskPosition[] = [];
       for (const remote of activeRemote) {
         const remotePositionSide = remote.positionSide === "LONG" || remote.positionSide === "SHORT"
           ? remote.positionSide
@@ -300,17 +314,26 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
           ? subtractDecimals("0", remote.positionAmt) : remote.positionAmt;
         existingExposure = addDecimals(existingExposure, multiplyDecimals(signedQuantity, remote.markPrice));
         portfolioPositions.push({ remote, stopPrice: intentStop.stopPrice });
+        if (remote.marginType.toLowerCase() === "cross") {
+          crossPositions.push({
+            remote,
+            maintMarginRatio: local.maintMarginRatio,
+            cumMaintenance: local.cumMaintenance,
+          });
+        }
       }
       const actualLeverage = Number(cached.result.positionRisk.leverage);
+      let approvedLiquidationPrice = marginType === "CROSS" ? "0" : admissionLiquidationPrice(
+        cached.result, opportunity.side, input.limitPrice, actualLeverage,
+      );
       const risk = calculateLivePositionRisk({
         side: opportunity.side,
         walletBalance: valuation.equity,
         availableBalance: valuation.availableBalance,
         entryPrice: input.limitPrice,
         stopPrice: input.stopPrice,
-        liquidationPrice: admissionLiquidationPrice(
-          cached.result, opportunity.side, input.limitPrice, actualLeverage,
-        ),
+        liquidationPrice: marginType === "CROSS" ? null : approvedLiquidationPrice,
+        portfolioLiquidation: marginType === "CROSS",
         actualLeverage: cached.result.positionRisk.leverage,
         leverageMode: settings.leverageMode,
         fixedLeverage: settings.fixedLeverage,
@@ -361,6 +384,41 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       if (!approvedBracket || risk.effectiveLeverage > approvedBracket.initialLeverage) {
         return { approved: false, reason: "最终批准名义价值没有可用杠杆档位" };
       }
+      if (marginType === "CROSS") {
+        try {
+          const boundary = estimateCrossLiquidationBoundary({
+            ...crossAccountValuation(cached.account, options.accountMode?.multiAssets === true),
+            positions: crossPositions,
+            multiAssets: options.accountMode?.multiAssets === true,
+            observedAt: cached.checkedAt,
+            collateral: options.crossCollateral,
+            relatedPendingIntents: pendingSymbols.length,
+          }, {
+            symbol: opportunity.symbol,
+            side: opportunity.side,
+            quantity,
+            entryPrice: input.limitPrice,
+            stopPrice: input.stopPrice,
+            tickSize: cached.result.filters.tickSize,
+            brackets: cached.result.brackets,
+          });
+          if (!boundary.ok) return { approved: false, reason: boundary.reason };
+          approvedLiquidationPrice = boundary.liquidationPrice ?? "0";
+          const [secondAccount, secondPositions, secondOrders] = await Promise.all([
+            client.account(), client.positionRisk(), client.openOrders(),
+          ]);
+          if (JSON.stringify(secondAccount) !== JSON.stringify(cached.account)
+            || JSON.stringify(secondPositions) !== JSON.stringify(cached.result.positions)
+            || JSON.stringify(secondOrders) !== JSON.stringify(cached.result.orders)) {
+            return { approved: false, reason: "Cross 二次快照与预检账户、持仓或活动单不一致" };
+          }
+        } catch (error) {
+          return {
+            approved: false,
+            reason: `Cross 组合强平估算或二次快照失败：${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }
       const portfolio = validateLivePortfolioAdmission({
         symbol: opportunity.symbol,
         side: opportunity.side,
@@ -392,9 +450,11 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         maintenanceBracket: approvedBracket.bracket,
         maintMarginRatio: approvedBracket.maintMarginRatio,
         cumMaintenance: approvedBracket.cum,
-        liquidationPriceSource: compareDecimals(cached.result.positionRisk.positionAmt, "0") !== 0
-          || compareDecimals(cached.result.positionRisk.liquidationPrice, "0") > 0
-          ? "EXCHANGE" : "PRETRADE_ESTIMATE",
+        liquidationPrice: approvedLiquidationPrice,
+        liquidationPriceSource: marginType === "CROSS" ? "PRETRADE_ESTIMATE"
+          : compareDecimals(cached.result.positionRisk.positionAmt, "0") !== 0
+            || compareDecimals(cached.result.positionRisk.liquidationPrice, "0") > 0
+            ? "EXCHANGE" : "PRETRADE_ESTIMATE",
         validUntil: new Date(Math.min(opportunity.expiryTime, now() + 5_000)),
       };
     },

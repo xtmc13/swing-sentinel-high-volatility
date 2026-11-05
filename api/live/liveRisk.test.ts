@@ -211,6 +211,21 @@ describe("主网精确风险与预留", () => {
     }))).toMatchObject({ ok: false });
   });
 
+  it("defers liquidation validation only for an explicit cross portfolio estimate", () => {
+    const cross = calculateLivePositionRisk(input({
+      liquidationPrice: null,
+      portfolioLiquidation: true,
+    }));
+
+    expect(cross).toMatchObject({ ok: true, quantity: "50" });
+    expect(calculateLivePositionRisk(input({ liquidationPrice: null }))).toMatchObject({ ok: false });
+    expect(calculateLivePositionRisk(input({
+      liquidationPrice: null,
+      portfolioLiquidation: true,
+      stopPrice: "100",
+    }))).toMatchObject({ ok: false });
+  });
+
   it("derives a conservative maintenance-margin liquidation buffer for a flat symbol", () => {
     const longLiquidation = estimateFlatLiquidationPrice({
       side: "LONG", entryPrice: "100", leverage: 5, maintMarginRatio: "0.01",

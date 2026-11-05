@@ -23,7 +23,8 @@ export interface LiveRiskInput {
   availableBalance: DecimalString;
   entryPrice: DecimalString;
   stopPrice: DecimalString;
-  liquidationPrice: DecimalString;
+  liquidationPrice: DecimalString | null;
+  portfolioLiquidation?: boolean;
   actualLeverage: DecimalString;
   leverageMode: LeverageMode;
   fixedLeverage: number;
@@ -106,19 +107,25 @@ export function calculateLivePositionRisk(input: LiveRiskInput): LiveRiskResult 
   try {
     const entryPrice = decimal(input.entryPrice);
     const stopPrice = decimal(input.stopPrice);
-    const liquidationPrice = decimal(input.liquidationPrice);
+    const liquidationPrice = input.liquidationPrice === null ? null : decimal(input.liquidationPrice);
     if (compareDecimals(entryPrice, "0") <= 0 || compareDecimals(stopPrice, "0") <= 0
-      || compareDecimals(liquidationPrice, "0") <= 0) {
-      return { ok: false, reason: "价格必须为正数" };
+      || (liquidationPrice !== null && compareDecimals(liquidationPrice, "0") <= 0)
+      || (liquidationPrice === null && input.portfolioLiquidation !== true)) {
+      return { ok: false, reason: "价格必须为正数且必须提供强平口径" };
     }
     const stopDistance = input.side === "LONG"
       ? subtractDecimals(entryPrice, stopPrice)
       : subtractDecimals(stopPrice, entryPrice);
-    const liquidationBuffer = input.side === "LONG"
-      ? subtractDecimals(stopPrice, liquidationPrice)
-      : subtractDecimals(liquidationPrice, stopPrice);
-    if (compareDecimals(stopDistance, "0") <= 0 || compareDecimals(liquidationBuffer, "0") <= 0) {
+    if (compareDecimals(stopDistance, "0") <= 0) {
       return { ok: false, reason: "止损方向或真实强平缓冲无效" };
+    }
+    if (input.portfolioLiquidation !== true) {
+      const liquidationBuffer = input.side === "LONG"
+        ? subtractDecimals(stopPrice, liquidationPrice!)
+        : subtractDecimals(liquidationPrice!, stopPrice);
+      if (compareDecimals(liquidationBuffer, "0") <= 0) {
+        return { ok: false, reason: "止损方向或真实强平缓冲无效" };
+      }
     }
 
     const reservedMargin = addDecimals(...input.pendingIntents.map((intent) => intent.margin));

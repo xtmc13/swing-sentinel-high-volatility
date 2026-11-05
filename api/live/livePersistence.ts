@@ -62,6 +62,7 @@ export type LiveFinalGateResult =
       maintenanceBracket: number;
       maintMarginRatio: DecimalString;
       cumMaintenance: DecimalString;
+      liquidationPrice?: DecimalString;
       liquidationPriceSource: Exclude<LiquidationPriceSource, "LEGACY_UNKNOWN">;
       validUntil: Date;
     }
@@ -150,8 +151,9 @@ function approvalError(
   try {
     if (compareDecimals(approval.quantity, "0") <= 0 || compareDecimals(approval.notional, "0") <= 0
       || compareDecimals(approval.reservedMargin, "0") <= 0 || compareDecimals(approval.reservedRisk, "0") <= 0
-      || compareDecimals(approval.maintMarginRatio, "0") < 0 || compareDecimals(approval.cumMaintenance, "0") < 0) {
-      return "final gate 数量、名义价值、margin、opening risk 或 bracket 数值无效";
+      || compareDecimals(approval.maintMarginRatio, "0") < 0 || compareDecimals(approval.cumMaintenance, "0") < 0
+      || (approval.liquidationPrice !== undefined && compareDecimals(approval.liquidationPrice, "0") < 0)) {
+      return "final gate 数量、名义价值、margin、opening risk、强平价或 bracket 数值无效";
     }
     const expectedNotional = multiplyDecimals(approval.quantity, input.limitPrice);
     if (compareDecimals(approval.notional, expectedNotional) !== 0) {
@@ -261,7 +263,7 @@ export async function createLiveIntent(
         limitPrice: input.limitPrice,
         stopPrice: input.stopPrice,
         tickSize: input.tickSize,
-        liquidationPrice: input.liquidationPrice,
+        liquidationPrice: approval.liquidationPrice ?? input.liquidationPrice,
         leverage: approval.effectiveLeverage,
         notional: approval.notional,
         reservedMargin: approval.reservedMargin,

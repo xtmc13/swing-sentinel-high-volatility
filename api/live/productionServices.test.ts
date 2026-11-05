@@ -129,6 +129,7 @@ describe("production service composition with fake exchange", () => {
       socketFactory: () => socket,
       now: () => now,
       reconciliationIntervalMs: 60_000,
+      accountMode: ACCOUNT_MODE,
     });
 
     await services.start();
@@ -163,7 +164,7 @@ describe("production service composition with fake exchange", () => {
         orderStore: new InMemoryLiveOrderStore(), reconciliationStore: new InMemoryReconciliationStore(),
         accountingStore: new InMemoryAccountingStore(),
       dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) }, socketFactory: () => socket,
-        now: () => now, reconciliationIntervalMs: 5_000,
+        now: () => now, reconciliationIntervalMs: 5_000, accountMode: ACCOUNT_MODE,
       });
       await services.start();
 

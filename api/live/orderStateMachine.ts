@@ -965,6 +965,9 @@ export class OrderStateMachine {
         if (protections.some((order) => !this.protectionOwnedBy(latest, order))) {
           throw new Error("STOP_MARKET ownership, positionSide, fingerprint, or entrySemantics mismatch");
         }
+        if (protections.some((order) => order.compatibilityFrozen)) {
+          throw new Error("STOP_MARKET compatibility frozen");
+        }
         const protection = protections[0];
         if (protection && ["SUBMITTING", "RECONCILING", "REPLACE"].includes(protection.status)) return;
         if (protection?.status === "UNKNOWN") throw new Error("STOP_MARKET requires reconciliation");
@@ -996,6 +999,9 @@ export class OrderStateMachine {
       const current = await this.store.getPosition(position.id);
       if (current?.compatibilityFrozen) throw error;
       const orders = await this.store.listOrders();
+      const frozenProtection = orders.some((order) => this.protectionOwnedBy(position, order)
+        && order.compatibilityFrozen && WORKING_STATUSES.has(order.status));
+      if (frozenProtection) throw error;
       const protectionInFlight = orders.some((order) => this.protectionOwnedBy(position, order)
         && WORKING_STATUSES.has(order.status) && order.status !== "UNKNOWN");
       if (protectionInFlight) return;

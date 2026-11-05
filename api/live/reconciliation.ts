@@ -633,17 +633,21 @@ export class ReconciliationService {
 
   private async currentAccountMode(): Promise<CurrentAccountMode | null> {
     if (!this.options.accountMode) return null;
-    if (!this.options.client.positionSide || !this.options.client.multiAssetsMargin) {
-      throw new Error("Signed account mode readers are required for reconciliation");
+    const readPositionSide = this.options.client.positionSide;
+    const readMultiAssets = this.options.client.multiAssetsMargin;
+    if (!readPositionSide || !readMultiAssets) return null;
+    try {
+      const [positionSide, multiAssets] = await Promise.all([
+        readPositionSide.call(this.options.client),
+        readMultiAssets.call(this.options.client),
+      ]);
+      if (typeof positionSide.dualSidePosition !== "boolean" || typeof multiAssets.multiAssetsMargin !== "boolean") {
+        return null;
+      }
+      return { dualSide: positionSide.dualSidePosition, multiAssets: multiAssets.multiAssetsMargin };
+    } catch {
+      return null;
     }
-    const [positionSide, multiAssets] = await Promise.all([
-      this.options.client.positionSide(),
-      this.options.client.multiAssetsMargin(),
-    ]);
-    if (typeof positionSide.dualSidePosition !== "boolean" || typeof multiAssets.multiAssetsMargin !== "boolean") {
-      throw new Error("Signed account mode response is incomplete");
-    }
-    return { dualSide: positionSide.dualSidePosition, multiAssets: multiAssets.multiAssetsMargin };
   }
 
   private async enforceCompatibility(
@@ -652,14 +656,19 @@ export class ReconciliationService {
     unsettledIntents: UnsettledLiveIntent[],
     currentMode: CurrentAccountMode | null,
   ): Promise<ReconciliationIssue[]> {
-    const active = new Map<string, { symbol: string; fingerprint?: string | null; frozen: boolean }>();
+    const active = new Map<string, {
+      symbol: string;
+      fingerprints: Array<string | null | undefined>;
+      frozen: boolean;
+    }>();
     const add = (id: string, symbol: string, fingerprint?: string | null, frozen = false) => {
       const existing = active.get(id);
-      active.set(id, {
-        symbol,
-        fingerprint: existing?.fingerprint ?? fingerprint,
-        frozen: existing?.frozen === true || frozen,
-      });
+      if (existing) {
+        existing.fingerprints.push(fingerprint);
+        existing.frozen = existing.frozen || frozen;
+        return;
+      }
+      active.set(id, { symbol, fingerprints: [fingerprint], frozen });
     };
     for (const order of localOrders) {
       if (!TERMINAL_ORDER_STATUSES.has(order.status)) {
@@ -677,22 +686,23 @@ export class ReconciliationService {
     const modeChanged = invalidConfigured ? true : configured.dualSide !== currentMode.dualSide
       || configured.multiAssets !== currentMode.multiAssets;
     if (active.size === 0) {
-      if (configured && (invalidConfigured || modeChanged)) {
+      if (invalidConfigured || modeChanged) {
         return [await this.issue({
           category: "ACCOUNT_MODE_MISMATCH",
           severity: "CRITICAL",
           symbol: null,
           expectedValue: null,
           actualValue: null,
-          message: "当前账户模式与启动指纹不一致，禁止新开仓并等待重新对账",
+          message: "当前账户模式与启动指纹不一致或不可证明，禁止新开仓并等待重新对账",
         })];
       }
       return [];
     }
     const incompatible = new Map<string, { symbol: string; legacy: boolean }>();
     for (const [id, record] of active) {
-      const fingerprintMismatch = invalidConfigured
-        || (record.fingerprint !== undefined && record.fingerprint !== configured?.fingerprint);
+      const fingerprintMismatch = invalidConfigured || record.fingerprints.some((fingerprint) =>
+        typeof fingerprint !== "string" || !ACCOUNT_FINGERPRINT.test(fingerprint)
+        || fingerprint !== configured?.fingerprint);
       if (record.frozen || modeChanged || fingerprintMismatch) {
         incompatible.set(id, { symbol: record.symbol, legacy: record.frozen });
       }

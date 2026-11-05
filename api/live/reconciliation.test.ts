@@ -101,7 +101,8 @@ interface HarnessOptions {
   accountingError?: boolean;
   entriesAlreadyPaused?: boolean;
   unsettledIntents?: Array<{ id: string; symbol: string; status: string }>;
-  accountMode?: typeof ONE_WAY_MODE | typeof DUAL_MODE;
+  accountMode?: typeof ONE_WAY_MODE | typeof DUAL_MODE | null;
+  accountModeReaders?: "available" | "missing" | "incomplete";
   currentDualSide?: boolean;
   currentMultiAssets?: boolean;
 }
@@ -114,7 +115,7 @@ async function harness(options: HarnessOptions = {}) {
   for (const local of localOrders) orders.addOrder(local);
   const calls: string[] = [];
   const recovered: string[] = [];
-  const accountMode = options.accountMode ?? ONE_WAY_MODE;
+  const accountMode = options.accountMode === null ? undefined : options.accountMode ?? ONE_WAY_MODE;
   const client = {
     account: async () => {
       calls.push("account");
@@ -125,8 +126,14 @@ async function harness(options: HarnessOptions = {}) {
     openOrders: async () => options.remoteOrders ?? localOrders.filter((local) => local.status !== "PENDING_SEND"
       && local.status !== "SUBMITTING" && local.status !== "UNKNOWN" && local.status !== "RECONCILING")
       .map((local, index) => remoteOrder(local, String(index + 1))),
-    positionSide: async () => ({ dualSidePosition: options.currentDualSide ?? accountMode.dualSide }),
-    multiAssetsMargin: async () => ({ multiAssetsMargin: options.currentMultiAssets ?? accountMode.multiAssets }),
+    ...(options.accountModeReaders === "missing" ? {} : {
+      positionSide: async () => options.accountModeReaders === "incomplete"
+        ? {} as { dualSidePosition: boolean }
+        : { dualSidePosition: options.currentDualSide ?? accountMode?.dualSide ?? false },
+      multiAssetsMargin: async () => ({
+        multiAssetsMargin: options.currentMultiAssets ?? accountMode?.multiAssets ?? false,
+      }),
+    }),
   };
   const service = new ReconciliationService({
     client,
@@ -294,10 +301,8 @@ describe("startup reconciliation", () => {
 
     expect(result.ok).toBe(false);
     expect(h.calls).not.toContain("allow");
-    expect((await h.store.listIssues())[0]).toMatchObject({
-      category: "UNSETTLED_INTENT",
-      symbol: "BTCUSDT",
-    });
+    expect((await h.store.listIssues()).some((issue) => issue.category === "UNSETTLED_INTENT"
+      && issue.symbol === "BTCUSDT")).toBe(true);
   });
 
   it("does not resume an operator pause that predated reconciliation", async () => {
@@ -359,9 +364,12 @@ describe("entry admission resume ownership", () => {
         account: async () => account(),
         positionRisk: async () => [],
         openOrders: async () => externalOrder ? [manual] : [],
+        positionSide: async () => ({ dualSidePosition: false }),
+        multiAssetsMargin: async () => ({ multiAssetsMargin: false }),
       },
       orders,
       store,
+      accountMode: ONE_WAY_MODE,
       recovery: { recover: async () => { throw new Error("unexpected"); } },
       accounting: { synchronize: async () => undefined },
       pauseNewEntries: () => gate.pauseForReconciliation(),
@@ -387,9 +395,12 @@ describe("entry admission resume ownership", () => {
         },
         positionRisk: async () => [],
         openOrders: async () => [],
+        positionSide: async () => ({ dualSidePosition: false }),
+        multiAssetsMargin: async () => ({ multiAssetsMargin: false }),
       },
       orders,
       store,
+      accountMode: ONE_WAY_MODE,
       recovery: { recover: async () => { throw new Error("unexpected"); } },
       accounting: { synchronize: async () => undefined },
       pauseNewEntries: () => gate.pauseForReconciliation(),
@@ -631,9 +642,14 @@ describe("exchange and database comparison", () => {
       expectedValue: "1000", actualValue: "999", message: "USDT wallet balance 与上次持久化快照不一致", detectedAt: 1_100,
     });
     const service = new ReconciliationService({
-      client: { account: async () => account("999"), positionRisk: async () => [], openOrders: async () => [] },
+      client: {
+        account: async () => account("999"), positionRisk: async () => [], openOrders: async () => [],
+        positionSide: async () => ({ dualSidePosition: false }),
+        multiAssetsMargin: async () => ({ multiAssetsMargin: false }),
+      },
       orders,
       store,
+      accountMode: ONE_WAY_MODE,
       ledger: { listLedgerEntries: async () => [{
         id: "ledger-1", exchangeTransactionId: "income-1", symbol: "BTCUSDT", asset: "USDT",
         entryType: "REALIZED_PNL", amount: "-1", occurredAt: 2_000,
@@ -758,11 +774,14 @@ describe("account compatibility reconciliation", () => {
     h.orders.addOrder(stop.local);
 
     const result = await h.service.reconcile();
+    const issues = await h.store.listIssues();
 
     expect(result.ok).toBe(false);
-    expect((await h.store.listIssues()).some((issue) =>
+    expect(issues.some((issue) =>
       issue.category === "POSITION_MISMATCH" || issue.category === "UNKNOWN_MANUAL_POSITION"
     )).toBe(true);
+    expect(issues.some((issue) => issue.category === "ORDER_MISMATCH"
+      && issue.message.includes(stop.local.clientOrderId))).toBe(true);
   });
 
   it("keeps an opposite-side external position separate from the managed leg", async () => {
@@ -803,6 +822,74 @@ describe("account compatibility reconciliation", () => {
     expect(result.ok).toBe(false);
     expect(h.calls).not.toContain("allow");
     expect((await h.store.listIssues()).some((issue) => issue.category === "ACCOUNT_MODE_MISMATCH")).toBe(true);
+  });
+
+  it("emits ACCOUNT_MODE_MISMATCH for absent account config with zero open records", async () => {
+    const h = await harness({ accountMode: null });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect(h.calls).not.toContain("allow");
+    expect((await h.store.listIssues()).some((issue) => issue.category === "ACCOUNT_MODE_MISMATCH")).toBe(true);
+  });
+
+  it.each([
+    { name: "missing", readers: "missing" },
+    { name: "incomplete", readers: "incomplete" },
+  ] as const)("emits ACCOUNT_MODE_MISMATCH for $name account-mode readers with zero open records", async ({ readers }) => {
+    const h = await harness({ accountModeReaders: readers });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect(h.calls).not.toContain("allow");
+    expect((await h.store.listIssues()).some((issue) => issue.category === "ACCOUNT_MODE_MISMATCH")).toBe(true);
+  });
+
+  it("rejects an active order whose fingerprint is undefined", async () => {
+    const h = await harness({ statuses: ["NEW"] });
+    await h.orders.transitionOrder("client-1", ["NEW"], { accountModeFingerprint: undefined });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).some((issue) => issue.category === "ACCOUNT_MODE_MISMATCH")).toBe(true);
+    expect(await h.orders.getOrder("client-1")).toMatchObject({ compatibilityFrozen: true });
+  });
+
+  it("does not let a valid position hide a null fingerprint on its active order", async () => {
+    const stop = protection("LONG", "1", "95", "3", "1");
+    const working = { ...order("NEW", "4"), intentId: "intent-1", accountModeFingerprint: null };
+    const h = await harness({
+      positions: [{ ...position("1"), positionSide: "LONG" }],
+      remoteOrders: [remoteOrder(working, "4"), stop.remote],
+      accountMode: DUAL_MODE,
+    });
+    await addManagedLeg(h, "LONG", "1", "1");
+    h.orders.addOrder(working);
+    h.orders.addOrder(stop.local);
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).some((issue) => issue.category === "ACCOUNT_MODE_MISMATCH"
+      && issue.message.includes("intent-1"))).toBe(true);
+    expect(await h.orders.getOrder(working.clientOrderId)).toMatchObject({ compatibilityFrozen: true });
+  });
+
+  it("marks an orphaned legacy unsettled intent as fingerprint-incompatible", async () => {
+    const h = await harness({
+      unsettledIntents: [{ id: "legacy-orphan", symbol: "BTCUSDT", status: "SUBMITTING" }],
+    });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).map((issue) => issue.category)).toEqual(expect.arrayContaining([
+      "UNSETTLED_INTENT",
+      "ACCOUNT_MODE_MISMATCH",
+    ]));
   });
 
   it("reports a persisted legacy freeze again after restart instead of resuming it", async () => {

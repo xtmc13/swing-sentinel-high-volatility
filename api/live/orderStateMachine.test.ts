@@ -440,6 +440,34 @@ describe("account-mode derived position orders", () => {
       compatibilityFrozen: true,
     });
   });
+
+  it("rejects an order-only frozen protection before the NEW early return", async () => {
+    const h = await openPosition(ONE_WAY_MODE);
+    await h.store.transitionOrder("protect-intent-1", ["NEW"], { compatibilityFrozen: true });
+
+    expect((await h.store.getPosition(seed.id))?.compatibilityFrozen).not.toBe(true);
+    await expect(h.machine.protectPosition(seed.id)).rejects.toThrow("frozen");
+  });
+
+  it("rethrows an order-only frozen protection from the fill-driven protection catch", async () => {
+    const h = setup();
+    entry(h.store, "2");
+    await h.machine.submit("entry-1");
+    await h.machine.handleFill("entry-1", fill({ quantity: "1" }), seed);
+    await h.store.transitionOrder("protect-intent-1", ["NEW"], { compatibilityFrozen: true });
+    const placed = h.gateway.placed.length;
+    const cancelled = h.gateway.cancelled.length;
+
+    await expect(h.machine.handleFill("entry-1", fill({
+      exchangeTradeId: "trade-frozen-protection",
+      quantity: "1",
+      executedAt: 3,
+    }), seed)).rejects.toThrow("frozen");
+
+    expect((await h.store.getPosition(seed.id))?.compatibilityFrozen).not.toBe(true);
+    expect(h.gateway.placed).toHaveLength(placed);
+    expect(h.gateway.cancelled).toHaveLength(cancelled);
+  });
 });
 
 describe("fill-driven live order state machine", () => {

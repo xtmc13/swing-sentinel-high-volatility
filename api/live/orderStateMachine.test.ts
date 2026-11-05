@@ -406,6 +406,40 @@ describe("account-mode derived position orders", () => {
     await expect(machine.submit("unidentified")).resolves.toMatchObject({ status: "UNKNOWN" });
     expect(gateway.placed).toHaveLength(0);
   });
+
+  it("enforces a persisted legacy freeze after restart for submit, replace, protect, and close retry", async () => {
+    const h = await openPosition(ONE_WAY_MODE);
+    await h.store.updatePosition(seed.id, { compatibilityFrozen: true });
+    await h.store.transitionOrder("entry-1", ["FILLED"], { compatibilityFrozen: true });
+    await h.store.transitionOrder("protect-intent-1", ["NEW"], { compatibilityFrozen: true });
+    const pending: LiveOrder = {
+      ...(await h.store.getOrder("entry-1"))!,
+      id: "legacy-pending-row",
+      clientOrderId: "legacy-pending",
+      exchangeOrderId: null,
+      status: "PENDING_SEND",
+      executedQuantity: "0",
+      averagePrice: "0",
+      commission: "0",
+      compatibilityFrozen: true,
+    };
+    h.store.addOrder(pending);
+    const restarted = new OrderStateMachine(h.store, h.gateway, { accountMode: ONE_WAY_MODE });
+    const placed = h.gateway.placed.length;
+    const cancelled = h.gateway.cancelled.length;
+
+    await expect(restarted.submit(pending.clientOrderId)).rejects.toThrow("frozen");
+    await expect(restarted.replaceOrder("protect-intent-1", "98")).rejects.toThrow("frozen");
+    await expect(restarted.protectPosition(seed.id)).rejects.toThrow("frozen");
+    await expect(restarted.closePosition(seed.id)).rejects.toThrow("frozen");
+
+    expect(h.gateway.placed).toHaveLength(placed);
+    expect(h.gateway.cancelled).toHaveLength(cancelled);
+    expect(await h.store.getOrder(pending.clientOrderId)).toMatchObject({
+      status: "PENDING_SEND",
+      compatibilityFrozen: true,
+    });
+  });
 });
 
 describe("fill-driven live order state machine", () => {

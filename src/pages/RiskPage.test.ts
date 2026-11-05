@@ -3,7 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "@contracts/trading";
 
-const view = vi.hoisted(() => ({ executionMode: "LIVE_MAINNET" as "PAPER" | "LIVE_MAINNET" }));
+const view = vi.hoisted(() => ({
+  executionMode: "LIVE_MAINNET" as "PAPER" | "LIVE_MAINNET",
+  accountModeKnown: true,
+}));
 const mutations = vi.hoisted(() => ({
   save: vi.fn(),
   setMode: vi.fn(),
@@ -20,14 +23,14 @@ vi.mock("@/components/terminal-context", () => ({
       execution: { executionMode: view.executionMode, armed: false },
       volatilityStates: [],
       account: {
-        dualSide: true,
-        multiAssets: true,
+        dualSide: view.accountModeKnown ? true : null,
+        multiAssets: view.accountModeKnown ? true : null,
         symbolLeverages: { BTCUSDT: 150, ETHUSDT: 20 },
         symbolMarginTypes: { BTCUSDT: "CROSS", ETHUSDT: "ISOLATED" },
       },
       positions: [{
         id: "live-position-1",
-        symbol: "BTCUSDT", effectiveLeverage: 150, maintenanceBracket: 2,
+        symbol: "BTCUSDT", positionSide: "LONG", effectiveLeverage: 150, maintenanceBracket: 2,
         marginType: "CROSS", liquidationPriceSource: "EXCHANGE",
       }],
       events: [],
@@ -62,6 +65,7 @@ import RiskPage from "./RiskPage";
 describe("RiskPage 公共实时控制", () => {
   beforeEach(() => {
     view.executionMode = "LIVE_MAINNET";
+    view.accountModeKnown = true;
   });
 
   it("保留凭据、armed 和 canary 表单，但不渲染管理员或只读限制", () => {
@@ -83,10 +87,20 @@ describe("RiskPage 公共实时控制", () => {
     expect(html).toContain("DUAL");
     expect(html).toContain("MULTI-ASSETS");
     expect(html).toContain("BTCUSDT");
+    expect(html).toContain("LONG");
     expect(html).toContain("150×");
     expect(html).toContain("CROSS");
     expect(html).toContain("EXCHANGE");
     expect(html).not.toContain("满杠杆模式使用系统内置的模拟标的上限");
+  });
+
+  it("账户模式未知时显示 UNKNOWN，不伪造 one-way 或单资产", () => {
+    view.accountModeKnown = false;
+    const html = renderToStaticMarkup(createElement(RiskPage));
+
+    expect(html).toContain("UNKNOWN");
+    expect(html).not.toContain(">ONE-WAY</span>");
+    expect(html).not.toContain(">SINGLE-ASSET</span>");
   });
 
   it("PAPER 主账户重置使用中性账户文案", () => {

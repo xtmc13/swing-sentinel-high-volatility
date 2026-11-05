@@ -520,6 +520,7 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     store: reconciliationStore,
     recovery: adapter.machine,
     accounting,
+    accountMode: options.accountMode,
     seedFor: currentSeed,
     ledger: accountingStore,
     pauseNewEntries: () => admission.pauseForReconciliation(),

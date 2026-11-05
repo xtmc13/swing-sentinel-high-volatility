@@ -366,6 +366,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   async replaceOrder(clientOrderId: string, newLimitPrice: DecimalString) {
     const order = await this.dependencies.store.getOrder(clientOrderId);
     if (!order) throw new Error("Live order not found");
+    if (order.compatibilityFrozen) throw new Error("Legacy compatibility record is frozen");
     if (order.type === "LIMIT" && order.entrySemantics === "ENTRY") {
       if (!order.maxEntryPrice) throw new Error("缺少持久化动量限价");
       try {
@@ -475,6 +476,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   }
 
   private assertPositionIdentity(position: LivePosition): void {
+    if (position.compatibilityFrozen) throw new Error(`${position.symbol} 持仓 compatibility frozen`);
     if (!this.dependencies.accountMode
       || position.accountModeFingerprint !== this.dependencies.accountMode.fingerprint) {
       throw new Error(`${position.symbol} 持仓 account mode fingerprint 与当前模式不一致`);
@@ -491,6 +493,9 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
   private async currentProtection(position: LivePosition): Promise<LiveOrder | undefined> {
     const protections = (await this.dependencies.store.listActiveProtectionOrders())
       .filter((order) => order.intentId === position.id);
+    if (protections.some((order) => order.compatibilityFrozen)) {
+      throw new Error("STOP_MARKET compatibility frozen");
+    }
     if (protections.some((order) => !this.protectionOwnedBy(position, order))) {
       throw new Error("STOP_MARKET ownership, positionSide, fingerprint, or entrySemantics mismatch");
     }

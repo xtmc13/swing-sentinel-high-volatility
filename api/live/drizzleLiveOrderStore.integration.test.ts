@@ -194,4 +194,19 @@ describeDatabase("Task 4 dedicated durable order store", () => {
     ]);
     expect([first, second].filter(Boolean)).toHaveLength(1);
   });
+
+  it("persists a compatibility freeze on intent, order, and position across restart", async () => {
+    if (!db) throw new Error("database required");
+    const store = new DrizzleLiveOrderStore(db);
+    await store.insertOrder(order);
+    await store.applyFill(order.id, fill(), seed);
+
+    expect(store.freezeCompatibility).toBeTypeOf("function");
+    await store.freezeCompatibility([seed.id]);
+
+    const restarted = new DrizzleLiveOrderStore(db);
+    expect(await restarted.getOrder(order.clientOrderId)).toMatchObject({ compatibilityFrozen: true });
+    expect(await restarted.getPosition(seed.id)).toMatchObject({ compatibilityFrozen: true });
+    expect((await db.select().from(schema.liveIntents))[0]?.compatibilityFrozen).toBe(true);
+  });
 });

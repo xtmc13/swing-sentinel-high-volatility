@@ -12,7 +12,7 @@ import { createProductionLiveRuntime } from "./productionRuntime";
 import type { LiveFill, LiveOrder, LivePositionSeed } from "./orderStateMachine";
 import type { UserDataSocket } from "./userDataStream";
 
-const ACCOUNT_MODE = { dualSide: false, fingerprint: "0".repeat(64) } as const;
+const ACCOUNT_MODE = { dualSide: false, multiAssets: false, fingerprint: "0".repeat(64) } as const;
 
 function finalGateDatabase(
   settings: Partial<typeof DEFAULT_SETTINGS> = {},

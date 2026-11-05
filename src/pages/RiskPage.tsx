@@ -147,9 +147,9 @@ function RiskPageContent() {
             </div>
             {data.account && <div className="mt-4 border border-[#1a2540] bg-[#080e19] p-4 text-[11px] leading-6">
               <div className="terminal-label">签名账户实际配置</div>
-              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1"><span>{data.account.dualSide ? "DUAL" : "ONE-WAY"}</span><span>{data.account.multiAssets ? "MULTI-ASSETS" : "SINGLE-ASSET"}</span></div>
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1"><span>{typeof data.account.dualSide === "boolean" ? data.account.dualSide ? "DUAL" : "ONE-WAY" : "UNKNOWN"}</span><span>{typeof data.account.multiAssets === "boolean" ? data.account.multiAssets ? "MULTI-ASSETS" : "SINGLE-ASSET" : "UNKNOWN"}</span></div>
               {Object.entries(data.account.symbolLeverages ?? {}).map(([symbol, leverage]) => <div key={symbol} className="mt-1 flex justify-between gap-3"><span>{symbol} · {data.account?.symbolMarginTypes?.[symbol] ?? "UNKNOWN"}</span><span>{leverage}×</span></div>)}
-              {data.positions.filter((position) => position.liquidationPriceSource).map((position) => <div key={position.id} className="mt-1 flex justify-between gap-3"><span>{position.symbol} 强平价来源</span><span>{position.liquidationPriceSource}</span></div>)}
+              {data.positions.filter((position) => position.liquidationPriceSource).map((position) => <div key={position.id} className="mt-1 flex justify-between gap-3"><span>{position.symbol} {position.positionSide ?? "UNKNOWN"} 强平价来源</span><span>{position.liquidationPriceSource}</span></div>)}
             </div>}
             <div className="reading mt-4 border-l-2 border-[#fbbf24] bg-[#17150e] px-4 py-3 text-[11px] leading-6 text-[#d8c68e]">LIVE 使用签名 positionRisk 的逐 symbol 实际杠杆，并受目标名义价值档位约束；不会自动修改交易所杠杆。SYMBOL_MAX 仅保留 PAPER 旧行为。止损与强平缓冲、费用和最小名义价值检查仍然强制执行。</div>
           </section>

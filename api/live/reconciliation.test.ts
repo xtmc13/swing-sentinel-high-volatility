@@ -48,6 +48,7 @@ function remoteOrder(local: LiveOrder, suffix = "1"): BinanceOpenOrder {
     status: local.status === "PARTIALLY_FILLED" ? "PARTIALLY_FILLED" : "NEW",
     side: "BUY",
     type: local.type,
+    positionSide: "BOTH",
     reduceOnly: local.reduceOnly,
   };
 }
@@ -61,6 +62,7 @@ function account(walletBalance = "1000"): BinanceAccountResponse {
 function position(amount: string): BinancePositionRisk {
   return {
     symbol: "BTCUSDT",
+    positionSide: "BOTH",
     positionAmt: amount,
     entryPrice: "100",
     markPrice: "101",
@@ -85,6 +87,9 @@ const seed: LivePositionSeed = {
   cumMaintenance: "0",
 };
 
+const ONE_WAY_MODE = { dualSide: false, multiAssets: false, fingerprint: "0".repeat(64) } as const;
+const DUAL_MODE = { dualSide: true, multiAssets: false, fingerprint: "0".repeat(64) } as const;
+
 interface HarnessOptions {
   statuses?: LiveOrderStatus[];
   remoteOrders?: BinanceOpenOrder[];
@@ -96,6 +101,9 @@ interface HarnessOptions {
   accountingError?: boolean;
   entriesAlreadyPaused?: boolean;
   unsettledIntents?: Array<{ id: string; symbol: string; status: string }>;
+  accountMode?: typeof ONE_WAY_MODE | typeof DUAL_MODE;
+  currentDualSide?: boolean;
+  currentMultiAssets?: boolean;
 }
 
 async function harness(options: HarnessOptions = {}) {
@@ -106,6 +114,7 @@ async function harness(options: HarnessOptions = {}) {
   for (const local of localOrders) orders.addOrder(local);
   const calls: string[] = [];
   const recovered: string[] = [];
+  const accountMode = options.accountMode ?? ONE_WAY_MODE;
   const client = {
     account: async () => {
       calls.push("account");
@@ -116,11 +125,14 @@ async function harness(options: HarnessOptions = {}) {
     openOrders: async () => options.remoteOrders ?? localOrders.filter((local) => local.status !== "PENDING_SEND"
       && local.status !== "SUBMITTING" && local.status !== "UNKNOWN" && local.status !== "RECONCILING")
       .map((local, index) => remoteOrder(local, String(index + 1))),
+    positionSide: async () => ({ dualSidePosition: options.currentDualSide ?? accountMode.dualSide }),
+    multiAssetsMargin: async () => ({ multiAssetsMargin: options.currentMultiAssets ?? accountMode.multiAssets }),
   };
   const service = new ReconciliationService({
     client,
     orders,
     store,
+    accountMode,
     recovery: {
       recover: async (clientOrderId) => {
         recovered.push(clientOrderId);
@@ -568,7 +580,7 @@ describe("exchange and database comparison", () => {
     orders.addOrder(terminal);
     orders.addOrder({
       ...order("NEW", "2"), intentId: terminal.intentId, clientOrderId: "protect-intent-1",
-      exchangeOrderId: "902", type: "STOP_MARKET", reduceOnly: true, price: "95", stopPrice: "95",
+      exchangeOrderId: "902", type: "STOP_MARKET", entrySemantics: "REDUCE", reduceOnly: true, price: "95", stopPrice: "95",
     });
     const remoteProtection = remoteOrder(order("NEW", "2"), "2");
     Object.assign(remoteProtection, {
@@ -578,9 +590,12 @@ describe("exchange and database comparison", () => {
     const service = new ReconciliationService({
       client: {
         account: async () => account(), positionRisk: async () => [position("1")], openOrders: async () => [remoteProtection],
+        positionSide: async () => ({ dualSidePosition: false }),
+        multiAssetsMargin: async () => ({ multiAssetsMargin: false }),
       },
       orders,
       store,
+      accountMode: ONE_WAY_MODE,
       seedFor: async () => seed,
       recovery: {
         recover: async (clientOrderId, recoverySeed) => {
@@ -634,5 +649,185 @@ describe("exchange and database comparison", () => {
     expect(result.ok).toBe(true);
     expect((await store.listIssues()).find((issue) => issue.id === existing.id)?.status).toBe("RESOLVED");
     expect((await store.listIssues()).some((issue) => issue.category === "BALANCE_MISMATCH" && issue.status === "OPEN")).toBe(false);
+  });
+});
+
+describe("account compatibility reconciliation", () => {
+  function protection(side: "LONG" | "SHORT", quantity: string, stopPrice: string, suffix: string, intentSuffix: string) {
+    const local: LiveOrder = {
+      ...order("NEW", suffix),
+      intentId: `intent-${intentSuffix}`,
+      clientOrderId: `protect-intent-${suffix}`,
+      side,
+      positionSide: side,
+      entrySemantics: "REDUCE",
+      type: "STOP_MARKET",
+      price: stopPrice,
+      stopPrice,
+      originalQuantity: quantity,
+      reduceOnly: true,
+    };
+    const remote: BinanceOpenOrder = {
+      ...remoteOrder(local, suffix),
+      side: side === "LONG" ? "SELL" : "BUY",
+      positionSide: side,
+      reduceOnly: undefined,
+    };
+    return { local, remote };
+  }
+
+  async function addManagedLeg(
+    h: Awaited<ReturnType<typeof harness>>,
+    side: "LONG" | "SHORT",
+    quantity: string,
+    suffix: string,
+  ) {
+    const entry = {
+      ...order("FILLED", suffix),
+      side,
+      positionSide: side,
+      originalQuantity: quantity,
+    };
+    h.orders.addOrder(entry);
+    await h.orders.applyFill(entry.id, {
+      exchangeTradeId: `trade-${suffix}`,
+      exchangeOrderId: entry.exchangeOrderId!,
+      symbol: entry.symbol,
+      side: side === "LONG" ? "BUY" : "SELL",
+      positionSide: side,
+      price: "100",
+      quantity,
+      commission: "0",
+      commissionAsset: "USDT",
+      realizedPnl: "0",
+      isMaker: false,
+      executedAt: 100,
+    }, {
+      ...seed,
+      id: entry.intentId,
+      side,
+      positionSide: side,
+      stopPrice: side === "LONG" ? "95" : "105",
+    });
+  }
+
+  it("reconciles same-symbol LONG and SHORT legs with their own identities and protection", async () => {
+    const longProtection = protection("LONG", "1", "95", "3", "1");
+    const shortProtection = protection("SHORT", "2", "105", "4", "2");
+    const h = await harness({
+      accountMode: DUAL_MODE,
+      positions: [
+        { ...position("1"), positionSide: "LONG" },
+        { ...position("-2"), positionSide: "SHORT" },
+      ],
+      remoteOrders: [longProtection.remote, shortProtection.remote],
+    });
+    await addManagedLeg(h, "LONG", "1", "1");
+    await addManagedLeg(h, "SHORT", "2", "2");
+    h.orders.addOrder(longProtection.local);
+    h.orders.addOrder(shortProtection.local);
+
+    const result = await h.service.reconcile();
+
+    expect((await h.store.listIssues()).map((issue) => issue.message)).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+
+  it("accepts a legal dual STOP_MARKET without reduceOnly", async () => {
+    const stop = protection("LONG", "1", "95", "3", "1");
+    const h = await harness({
+      accountMode: DUAL_MODE,
+      positions: [{ ...position("1"), positionSide: "LONG" }],
+      remoteOrders: [stop.remote],
+    });
+    await addManagedLeg(h, "LONG", "1", "1");
+    h.orders.addOrder(stop.local);
+
+    await expect(h.service.reconcile()).resolves.toMatchObject({ ok: true });
+  });
+
+  it("rejects a remote position and protection with the wrong positionSide", async () => {
+    const stop = protection("LONG", "1", "95", "3", "1");
+    stop.remote.reduceOnly = true;
+    const h = await harness({
+      accountMode: DUAL_MODE,
+      positions: [{ ...position("1"), positionSide: "SHORT" }],
+      remoteOrders: [{ ...stop.remote, positionSide: "SHORT" }],
+    });
+    await addManagedLeg(h, "LONG", "1", "1");
+    h.orders.addOrder(stop.local);
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).some((issue) =>
+      issue.category === "POSITION_MISMATCH" || issue.category === "UNKNOWN_MANUAL_POSITION"
+    )).toBe(true);
+  });
+
+  it("keeps an opposite-side external position separate from the managed leg", async () => {
+    const stop = protection("LONG", "1", "95", "3", "1");
+    const h = await harness({
+      accountMode: DUAL_MODE,
+      positions: [
+        { ...position("1"), positionSide: "LONG" },
+        { ...position("-3"), positionSide: "SHORT" },
+      ],
+      remoteOrders: [stop.remote],
+    });
+    await addManagedLeg(h, "LONG", "1", "1");
+    h.orders.addOrder(stop.local);
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).some((issue) => issue.category === "UNKNOWN_MANUAL_POSITION"
+      && issue.actualValue === "-3")).toBe(true);
+  });
+
+  it("persistently freezes unsettled records when the current account mode changes", async () => {
+    const h = await harness({ statuses: ["NEW"], currentDualSide: true });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).some((issue) => issue.category === "ACCOUNT_MODE_MISMATCH")).toBe(true);
+    expect(await h.orders.getOrder("client-1")).toMatchObject({ compatibilityFrozen: true });
+  });
+
+  it("blocks new entries on an account mode change even when there are no open records", async () => {
+    const h = await harness({ currentDualSide: true });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect(h.calls).not.toContain("allow");
+    expect((await h.store.listIssues()).some((issue) => issue.category === "ACCOUNT_MODE_MISMATCH")).toBe(true);
+  });
+
+  it("reports a persisted legacy freeze again after restart instead of resuming it", async () => {
+    const h = await harness({ statuses: ["NEW"] });
+    await h.orders.transitionOrder("client-1", ["NEW"], { compatibilityFrozen: true });
+    const restarted = new ReconciliationService({
+      client: {
+        account: async () => account(),
+        positionRisk: async () => [],
+        openOrders: async () => [remoteOrder(order("NEW"))],
+        positionSide: async () => ({ dualSidePosition: false }),
+        multiAssetsMargin: async () => ({ multiAssetsMargin: false }),
+      },
+      orders: h.orders,
+      store: h.store,
+      accountMode: ONE_WAY_MODE,
+      recovery: { recover: async () => (await h.orders.getOrder("client-1"))! },
+      accounting: { synchronize: async () => undefined },
+      pauseNewEntries: async () => null,
+    });
+
+    const result = await restarted.reconcile();
+
+    expect(result.ok).toBe(false);
+    expect((await h.store.listIssues()).some((issue) => issue.category === "ACCOUNT_MODE_MISMATCH")).toBe(true);
+    expect(await h.orders.getOrder("client-1")).toMatchObject({ compatibilityFrozen: true });
   });
 });

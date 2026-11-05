@@ -127,7 +127,7 @@ export interface FillApplication {
 
 export type LivePositionUpdate = Partial<Pick<LivePosition,
   "markPrice" | "liquidationPrice" | "isolatedWallet" | "stopPrice" | "exitPending"
-  | "marginType" | "liquidationPriceSource">>;
+  | "marginType" | "liquidationPriceSource" | "compatibilityFrozen">>;
 
 export interface LiveOrderStore {
   insertOrder(order: LiveOrder): Promise<void>;
@@ -151,6 +151,7 @@ export interface LiveOrderStore {
     expectedGeneration: number,
     assertCurrentAdmission: AssertCurrentLiveAdmission,
   ): Promise<LiveOrder>;
+  freezeCompatibility(intentIds: string[]): Promise<void>;
   applyFill(orderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication>;
   getPosition(positionId: string): Promise<LivePosition | null>;
   updatePosition(positionId: string, patch: LivePositionUpdate): Promise<LivePosition | null>;
@@ -175,6 +176,10 @@ function isReduceOrder(order: LiveOrder): boolean {
   if (order.entrySemantics === "REDUCE") return true;
   if (order.entrySemantics === "ENTRY") return false;
   throw new Error("Order entrySemantics is required");
+}
+
+function assertNotCompatibilityFrozen(record: { compatibilityFrozen?: boolean }): void {
+  if (record.compatibilityFrozen) throw new Error("Legacy compatibility record is frozen");
 }
 
 export function applyNewFill(
@@ -357,6 +362,7 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
     const order = this.orders.get(clientOrderId);
     if (!order) throw new Error("Live order not found");
     if (!["PENDING_SEND", "SUBMITTING"].includes(order.status)) return copyOrder(order);
+    assertNotCompatibilityFrozen(order);
     const permitted = () => liveSubmissionPermitted({
       armed: this.armed,
       executionMode: "LIVE_MAINNET",
@@ -377,8 +383,9 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
     } catch {
       authorized = false;
     }
+    const current = this.orders.get(clientOrderId) ?? order;
+    assertNotCompatibilityFrozen(current);
     if (!authorized || !permitted()) {
-      const current = this.orders.get(clientOrderId) ?? order;
       const cancelled = { ...current, status: "CANCEL" as const };
       this.orders.set(clientOrderId, cancelled);
       return copyOrder(cancelled);
@@ -387,6 +394,16 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
     const submitting = { ...order, status: "SUBMITTING" as const };
     this.orders.set(clientOrderId, submitting);
     return copyOrder(submitting);
+  }
+
+  async freezeCompatibility(intentIds: string[]): Promise<void> {
+    const ids = new Set(intentIds);
+    for (const [clientOrderId, order] of this.orders) {
+      if (ids.has(order.intentId)) this.orders.set(clientOrderId, { ...order, compatibilityFrozen: true });
+    }
+    for (const [positionId, position] of this.positions) {
+      if (ids.has(positionId)) this.positions.set(positionId, { ...position, compatibilityFrozen: true });
+    }
   }
 
   async applyFill(orderId: string, fill: LiveFill, seed: LivePositionSeed): Promise<FillApplication> {
@@ -481,6 +498,7 @@ export class OrderStateMachine {
   async submit(clientOrderId: string, expectedGeneration?: number): Promise<LiveOrder> {
     const order = await this.requireOrder(clientOrderId);
     if (order.status !== "PENDING_SEND") return order;
+    assertNotCompatibilityFrozen(order);
     if (expectedGeneration !== undefined && !this.assertCurrentAdmission) {
       return await this.store.transitionOrder(clientOrderId, ["PENDING_SEND"], { status: "CANCEL" }) ?? order;
     }
@@ -490,9 +508,11 @@ export class OrderStateMachine {
     if (!submitting || submitting.status !== "SUBMITTING") return submitting ?? this.requireOrder(clientOrderId);
     const admissionState = await this.requireOrder(clientOrderId);
     if (admissionState.status !== "SUBMITTING") return admissionState;
+    assertNotCompatibilityFrozen(admissionState);
     const finalAdmission = expectedGeneration === undefined ? admissionState
       : await this.store.admitOrder(clientOrderId, expectedGeneration, this.assertCurrentAdmission!);
     if (finalAdmission.status !== "SUBMITTING") return finalAdmission;
+    assertNotCompatibilityFrozen(finalAdmission);
     let acknowledgement: Partial<BinanceOpenOrder>;
     try {
       acknowledgement = await this.gateway.placeOrder(this.requestFor(finalAdmission)) as Partial<BinanceOpenOrder>;
@@ -634,6 +654,7 @@ export class OrderStateMachine {
   async protectPosition(positionId: string): Promise<void> {
     const position = await this.store.getPosition(positionId);
     if (!position || position.status !== "OPEN") return;
+    this.assertPositionIdentity(position);
     return this.serializePosition(positionId, () => this.ensureProtection(position));
   }
 
@@ -689,6 +710,7 @@ export class OrderStateMachine {
   }
 
   private assertPositionIdentity(position: LivePosition): void {
+    assertNotCompatibilityFrozen(position);
     if (!this.accountMode || position.accountModeFingerprint !== this.accountMode.fingerprint) {
       throw new Error("Position account mode fingerprint mismatch");
     }
@@ -852,6 +874,7 @@ export class OrderStateMachine {
     order: LiveOrder,
     changes: { price?: DecimalString; quantity?: DecimalString },
   ): Promise<LiveOrder> {
+    assertNotCompatibilityFrozen(order);
     if (!["NEW", "PARTIALLY_FILLED"].includes(order.status)) {
       throw new Error(`${order.status} order requires reconciliation before replacement`);
     }
@@ -863,6 +886,7 @@ export class OrderStateMachine {
       if (!position || position.status !== "OPEN" || !this.protectionOwnedBy(position, order)) {
         throw new Error("STOP_MARKET replacement ownership or fingerprint mismatch");
       }
+      this.assertPositionIdentity(position);
     }
     const replacementClientOrderId = `replace-${order.clientOrderId}`;
     let replacing = await this.store.transitionOrder(order.clientOrderId, [order.status], { status: "REPLACE" });
@@ -969,6 +993,8 @@ export class OrderStateMachine {
       }
       throw new Error("STOP_MARKET position version kept changing");
     } catch (error) {
+      const current = await this.store.getPosition(position.id);
+      if (current?.compatibilityFrozen) throw error;
       const orders = await this.store.listOrders();
       const protectionInFlight = orders.some((order) => this.protectionOwnedBy(position, order)
         && WORKING_STATUSES.has(order.status) && order.status !== "UNKNOWN");

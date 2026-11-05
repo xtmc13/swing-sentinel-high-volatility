@@ -289,6 +289,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       const current = await readOrder(tx, clientOrderId, true);
       if (!current) throw new Error("Live order not found");
       if (!["PENDING_SEND", "SUBMITTING"].includes(current.status)) return current;
+      if (current.compatibilityFrozen) throw new Error("Legacy compatibility record is frozen");
       const settings = await tx.select({ autoTrade: tradingSettings.autoTrade, executionMode: tradingSettings.executionMode }).from(tradingSettings)
         .where(eq(tradingSettings.id, 1)).for("update");
       const controls = await lockLiveControls(tx);
@@ -318,6 +319,15 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       await tx.update(liveOrders).set({ status: "SUBMITTING" }).where(eq(liveOrders.id, current.id));
       await tx.update(liveIntents).set({ status: "SUBMITTING" }).where(eq(liveIntents.id, current.intentId));
       return { ...current, status: "SUBMITTING" };
+    });
+  }
+
+  async freezeCompatibility(intentIds: string[]): Promise<void> {
+    if (intentIds.length === 0) return;
+    await this.db.transaction(async (tx) => {
+      await tx.update(liveIntents).set({ compatibilityFrozen: true }).where(inArray(liveIntents.id, intentIds));
+      await tx.update(liveOrders).set({ compatibilityFrozen: true }).where(inArray(liveOrders.intentId, intentIds));
+      await tx.update(livePositions).set({ compatibilityFrozen: true }).where(inArray(livePositions.id, intentIds));
     });
   }
 
@@ -433,6 +443,7 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
         isolatedWallet: patch.isolatedWallet ?? current.isolatedWallet,
         marginType: patch.marginType ?? current.marginType ?? null,
         exitPending: patch.exitPending ?? current.exitPending ?? false,
+        compatibilityFrozen: patch.compatibilityFrozen ?? current.compatibilityFrozen ?? true,
       }).where(eq(livePositions.id, positionId));
       if (patch.stopPrice !== undefined) {
         await tx.update(liveIntents).set({ stopPrice: patch.stopPrice }).where(eq(liveIntents.id, positionId));

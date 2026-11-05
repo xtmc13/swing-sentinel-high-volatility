@@ -113,9 +113,12 @@ export async function runLivePreflight(input: LivePreflightInput): Promise<LiveP
       || candidate.marginType.toLowerCase() !== marginType)) {
       reasons.push("目标合约不同 positionSide 的杠杆或 marginType 不一致");
     }
-    if (positionSide.dualSidePosition
-      && targetPositions.some((candidate) => candidate.positionSide !== "LONG" && candidate.positionSide !== "SHORT")) {
-      reasons.push("双向模式缺少目标合约 LONG/SHORT positionSide");
+    if (positionSide.dualSidePosition) {
+      const longLegs = targetPositions.filter((candidate) => candidate.positionSide === "LONG");
+      const shortLegs = targetPositions.filter((candidate) => candidate.positionSide === "SHORT");
+      if (longLegs.length !== 1 || shortLegs.length !== 1) {
+        reasons.push("双向模式目标合约必须各有唯一 LONG 和 SHORT positionSide 行");
+      }
     }
     if (!positionSide.dualSidePosition
       && targetPositions.some((candidate) => candidate.positionSide !== undefined && candidate.positionSide !== "BOTH")) {

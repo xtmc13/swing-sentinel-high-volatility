@@ -95,6 +95,7 @@ describe("主网只读预检", () => {
         multiAssets: { multiAssetsMargin: true },
         positions: [
           { ...isolatedPosition, positionSide: "LONG", marginType: "cross", leverage: "150" },
+          { ...isolatedPosition, positionSide: "SHORT", marginType: "cross", leverage: "150" },
           { ...isolatedPosition, symbol: "ETHUSDT", positionSide: "BOTH", leverage: "20" },
         ],
         brackets: [{
@@ -118,6 +119,7 @@ describe("主网只读预检", () => {
         multiAssets: { multiAssetsMargin: true },
         positions: [
           { ...isolatedPosition, positionSide: "LONG", marginType: "cross", leverage: "5" },
+          { ...isolatedPosition, positionSide: "SHORT", marginType: "cross", leverage: "5" },
           { ...isolatedPosition, symbol: "ETHUSDT", leverage: "20" },
         ],
       }),
@@ -129,6 +131,39 @@ describe("主网只读预检", () => {
     expect(supported.ok).toBe(true);
     expect(mismatch).toMatchObject({ ok: false });
     if (!mismatch.ok) expect(mismatch.reasons.join(" ")).toMatch(/杠杆/);
+  });
+
+  it.each([
+    {
+      name: "缺少 SHORT",
+      rows: [{ ...isolatedPosition, positionSide: "LONG" as const }],
+    },
+    {
+      name: "重复 LONG",
+      rows: [
+        { ...isolatedPosition, positionSide: "LONG" as const },
+        { ...isolatedPosition, positionSide: "LONG" as const },
+        { ...isolatedPosition, positionSide: "SHORT" as const },
+      ],
+    },
+    {
+      name: "重复 SHORT",
+      rows: [
+        { ...isolatedPosition, positionSide: "LONG" as const },
+        { ...isolatedPosition, positionSide: "SHORT" as const },
+        { ...isolatedPosition, positionSide: "SHORT" as const },
+      ],
+    },
+  ])("dual 目标合约$name时失败关闭", async ({ rows }) => {
+    const result = await runLivePreflight(input({
+      client: client({
+        positionSide: { dualSidePosition: true },
+        positions: rows,
+      }),
+    }));
+
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) expect(result.reasons.join(" ")).toMatch(/唯一|LONG.*SHORT|SHORT.*LONG/);
   });
 
   it("拒绝非白名单、非 USDT 永续或不可交易合约并提取合法过滤值", async () => {

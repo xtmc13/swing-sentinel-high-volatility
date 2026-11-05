@@ -94,7 +94,7 @@ function admissionLiquidationPrice(
   result: Extract<LivePreflightResult, { ok: true }>,
   side: Opportunity["side"],
   entryPrice: DecimalString,
-  fixedLeverage: number,
+  actualLeverage: number,
 ): DecimalString {
   if (compareDecimals(result.positionRisk.positionAmt, "0") !== 0
     || compareDecimals(result.positionRisk.liquidationPrice, "0") > 0) {
@@ -103,7 +103,7 @@ function admissionLiquidationPrice(
   const maintMarginRatio = result.brackets.map((bracket) => bracket.maintMarginRatio)
     .reduce((highest, value) => compareDecimals(value, highest) > 0 ? value : highest);
   return estimateFlatLiquidationPrice({
-    side, entryPrice, leverage: fixedLeverage, maintMarginRatio,
+    side, entryPrice, leverage: actualLeverage, maintMarginRatio,
   });
 }
 
@@ -283,10 +283,18 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       let existingExposure: DecimalString = "0";
       const portfolioPositions: Array<{ remote: (typeof activeRemote)[number]; stopPrice: DecimalString }> = [];
       for (const remote of activeRemote) {
-        const local = positions.find((position) => position.symbol === remote.symbol);
-        const intentStop = intentStops.find((intent) => intent.id === local?.id);
-        if (!local || !intentStop) {
-          return { approved: false, reason: `${remote.symbol} 缺少已管理持仓或持久止损` };
+        const remotePositionSide = remote.positionSide === "LONG" || remote.positionSide === "SHORT"
+          ? remote.positionSide
+          : compareDecimals(remote.positionAmt, "0") < 0 ? "SHORT" : "LONG";
+        const localMatches = positions.filter((position) => position.symbol === remote.symbol
+          && position.positionSide === remotePositionSide);
+        if (localMatches.length !== 1) {
+          return { approved: false, reason: `${remote.symbol} ${remotePositionSide} 已管理持仓缺失或不唯一` };
+        }
+        const local = localMatches[0];
+        const intentStop = intentStops.find((intent) => intent.id === local.id);
+        if (!intentStop) {
+          return { approved: false, reason: `${remote.symbol} ${remotePositionSide} 缺少该腿意图的持久止损` };
         }
         const signedQuantity = compareDecimals(remote.positionAmt, "0") < 0
           ? subtractDecimals("0", remote.positionAmt) : remote.positionAmt;

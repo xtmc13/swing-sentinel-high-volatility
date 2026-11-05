@@ -231,6 +231,8 @@ export interface AccountSnapshot {
   dayStartEquity: number;
   dualSide?: boolean | null;
   multiAssets?: boolean | null;
+  symbolLeverages?: Record<string, number>;
+  symbolMarginTypes?: Record<string, MarginType>;
   valuationBasis?: AccountValuationBasis | null;
   valuationValid: boolean;
   valuationIssues: string[];

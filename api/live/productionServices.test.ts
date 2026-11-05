@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_SETTINGS } from "@contracts/trading";
+import { DEFAULT_SETTINGS, type Opportunity } from "@contracts/trading";
+import { liveControls, liveIntents, tradingSettings, volatilityStates } from "@db/schema";
 import type { BinanceOpenOrder, BinanceSignedClient, PlaceOrderRequest } from "./binanceSigned";
 import type { LiveDatabase } from "./livePersistence";
 import { InMemoryLiveOrderStore } from "./orderStateMachine";
@@ -11,6 +12,42 @@ import type { LiveFill, LiveOrder, LivePositionSeed } from "./orderStateMachine"
 import type { UserDataSocket } from "./userDataStream";
 
 const ACCOUNT_MODE = { dualSide: false, fingerprint: "0".repeat(64) } as const;
+
+function finalGateDatabase(settings: Partial<typeof DEFAULT_SETTINGS> = {}) {
+  const intentRows: Record<string, unknown>[] = [];
+  const tx = {
+    select: (selection?: Record<string, unknown>) => ({
+      from: (table: unknown) => ({
+        where: () => {
+          const rows: unknown[] = table === tradingSettings
+            ? [{ ...DEFAULT_SETTINGS, ...settings, executionMode: "LIVE_MAINNET", autoTrade: true }]
+            : table === liveControls ? [{ armed: true, generation: 0 }]
+              : table === volatilityStates ? [{ mode: "NORMAL" }]
+                : table === liveIntents && selection?.margin === liveIntents.reservedMargin
+                  ? intentRows.map((row) => ({ margin: row.reservedMargin, risk: row.reservedRisk }))
+                  : table === liveIntents ? intentRows : [];
+          const query = Object.assign(Promise.resolve(rows), {
+            for: async () => rows,
+          });
+          return Object.assign(query, {
+            limit: () => Object.assign(Promise.resolve(rows), { for: async () => rows }),
+          });
+        },
+      }),
+    }),
+    execute: async () => [[{ db_now_ms: Date.now() }]],
+    insert: (table: unknown) => ({
+      values: async (values: Record<string, unknown>) => {
+        if (table === liveIntents) intentRows.push(values);
+      },
+    }),
+  };
+  const db = {
+    transaction: async (operation: (transaction: typeof tx) => Promise<unknown>) => operation(tx),
+    update: () => ({ set: () => ({ where: async () => [{ affectedRows: 1 }] }) }),
+  } as unknown as LiveDatabase;
+  return { db, inserted: () => intentRows.at(-1), insertedCount: () => intentRows.length };
+}
 
 class FakeSocket implements UserDataSocket {
   onmessage: ((event: { data: unknown }) => void) | null = null;
@@ -256,5 +293,97 @@ describe("production service composition with fake exchange", () => {
     }));
     expect(placeOrder.mock.calls[0]?.[0]).not.toHaveProperty("reduceOnly");
     expect(await orders.getOrder(`close-${seed.id}`)).toMatchObject({ accountModeFingerprint: fingerprint });
+  });
+
+  it("uses the same multi-asset totals and actual 150x leverage through finalGate persistence", async () => {
+    const now = () => 1_800_000_000_000;
+    const socket = new FakeSocket();
+    const { client, placeOrder } = fakeClient(now);
+    vi.spyOn(client, "positionSide").mockResolvedValue({ dualSidePosition: true });
+    vi.spyOn(client, "multiAssetsMargin").mockResolvedValue({ multiAssetsMargin: true });
+    vi.spyOn(client, "positionRisk").mockResolvedValue([{
+      symbol: "BTCUSDT", positionSide: "LONG", positionAmt: "0", entryPrice: "0", markPrice: "100",
+      liquidationPrice: "0", leverage: "150", marginType: "cross",
+    }]);
+    vi.spyOn(client, "leverageBracket").mockResolvedValue([{
+      symbol: "BTCUSDT",
+      brackets: [{
+        bracket: 1, initialLeverage: 150, notionalCap: "50000", notionalFloor: "0",
+        maintMarginRatio: "0.005", cum: "0",
+      }],
+    }]);
+    vi.spyOn(client, "account").mockResolvedValue({
+      assets: [
+        { asset: "USDT", walletBalance: "600", availableBalance: "500" },
+        { asset: "BNB", walletBalance: "1", availableBalance: "1" },
+      ],
+      totalWalletBalance: "1000",
+      totalMarginBalance: "1000",
+      availableBalance: "900",
+      totalPositionInitialMargin: "0",
+    });
+    placeOrder.mockImplementation(async (request) => ({
+      symbol: request.symbol, orderId: 150, clientOrderId: request.newClientOrderId ?? "account-entry",
+      price: request.price ?? "0", origQty: request.quantity, executedQty: "0", status: "NEW",
+      side: request.side, positionSide: request.positionSide, type: request.type,
+    }));
+    const store = finalGateDatabase({ leverageMode: "ACCOUNT_CONFIGURED", fixedLeverage: 20 });
+    const services = createBinanceProductionLiveServices({
+      env: {
+        LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key",
+        BINANCE_MAINNET_API_SECRET: "fake-secret", BINANCE_MAINNET_ALLOWED_SYMBOLS: "BTCUSDT",
+      },
+      db: store.db,
+      getSettings: async () => ({
+        ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET", leverageMode: "ACCOUNT_CONFIGURED", fixedLeverage: 20,
+      }),
+      client,
+      orderStore: new InMemoryLiveOrderStore(),
+      reconciliationStore: new InMemoryReconciliationStore(),
+      accountingStore: new InMemoryAccountingStore(),
+      dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) },
+      socketFactory: () => socket,
+      now,
+      accountMode: { dualSide: true, multiAssets: true, fingerprint: ACCOUNT_MODE.fingerprint },
+    });
+    const signal: Opportunity = {
+      id: "multi-asset-opportunity", signalId: "multi-asset-signal", strategyType: "SWING",
+      symbol: "BTCUSDT", side: "LONG", status: "READY", score: 1, regime: "NORMAL",
+      entry: 100, stop: 99.9, target: 100.22, stopDistancePct: 0.1, rewardRisk: 2.2,
+      leverage: 150, marginPct: 2, riskPct: 0.35, reasons: [], signalCloseTime: now(), signalTime: now(),
+      expiryTime: now() + 60_000, triggerPrice: 100, limitPrice: 100, stateVersion: 1,
+      sourceGeneration: 1, detectorVersion: "test", configVersion: "test", createdAt: new Date(now()).toISOString(),
+    };
+
+    try {
+      await services.start();
+      await expect(services.preflight()).resolves.toMatchObject({ ready: true });
+      await expect(services.adapter.account()).resolves.toMatchObject({ equity: 1000, cash: 1000, availableMargin: 900 });
+      const opened = await services.adapter.open(signal);
+      expect(opened.ok, opened.reason).toBe(true);
+      expect(store.inserted()).toMatchObject({
+        effectiveLeverage: 150,
+        leverage: 150,
+        marginType: "CROSS",
+        maintenanceBracket: 1,
+        maintMarginRatio: "0.005",
+        cumMaintenance: "0",
+        reservedMargin: "9.724666666666666666666666666666",
+        compatibilityFrozen: false,
+      });
+      expect(placeOrder).toHaveBeenCalledWith(expect.objectContaining({ positionSide: "LONG" }));
+
+      const blocked = await services.adapter.open({
+        ...signal,
+        id: "cross-pending-opportunity",
+        signalId: "cross-pending-signal",
+      });
+      expect(blocked.ok).toBe(false);
+      expect(blocked.reason).toMatch(/cross 持仓或相关待单/);
+      expect(store.insertedCount()).toBe(1);
+      expect(placeOrder).toHaveBeenCalledTimes(1);
+    } finally {
+      await services.stop();
+    }
   });
 });

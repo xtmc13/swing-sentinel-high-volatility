@@ -19,6 +19,17 @@ vi.mock("@/components/terminal-context", () => ({
       settings: { ...DEFAULT_SETTINGS, executionMode: view.executionMode },
       execution: { executionMode: view.executionMode, armed: false },
       volatilityStates: [],
+      account: {
+        dualSide: true,
+        multiAssets: true,
+        symbolLeverages: { BTCUSDT: 150, ETHUSDT: 20 },
+        symbolMarginTypes: { BTCUSDT: "CROSS", ETHUSDT: "ISOLATED" },
+      },
+      positions: [{
+        id: "live-position-1",
+        symbol: "BTCUSDT", effectiveLeverage: 150, maintenanceBracket: 2,
+        marginType: "CROSS", liquidationPriceSource: "EXCHANGE",
+      }],
       events: [],
     },
     refresh: vi.fn(),
@@ -63,6 +74,19 @@ describe("RiskPage 公共实时控制", () => {
     expect(html).not.toContain("管理员");
     expect(html).not.toContain("只读");
     expect(html).not.toContain('type="password"');
+  });
+
+  it("展示真实账户模式、逐 symbol 杠杆和强平价来源，并支持账户配置模式", () => {
+    const html = renderToStaticMarkup(createElement(RiskPage));
+
+    expect(html).toContain('value="ACCOUNT_CONFIGURED"');
+    expect(html).toContain("DUAL");
+    expect(html).toContain("MULTI-ASSETS");
+    expect(html).toContain("BTCUSDT");
+    expect(html).toContain("150×");
+    expect(html).toContain("CROSS");
+    expect(html).toContain("EXCHANGE");
+    expect(html).not.toContain("满杠杆模式使用系统内置的模拟标的上限");
   });
 
   it("PAPER 主账户重置使用中性账户文案", () => {

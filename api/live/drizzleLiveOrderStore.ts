@@ -1,6 +1,12 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { liveFills, liveIntents, liveOrders, livePositions, tradingSettings } from "@db/schema";
-import type { EntrySemantics, PositionSide, Side } from "@contracts/trading";
+import type {
+  EntrySemantics,
+  LiquidationPriceSource,
+  MarginType,
+  PositionSide,
+  Side,
+} from "@contracts/trading";
 import type { AssertCurrentLiveAdmission } from "./liveConfig";
 import { databaseNow, liveSubmissionPermitted, lockLiveControls, type LiveDatabase, type LiveTransaction } from "./livePersistence";
 import {
@@ -47,8 +53,15 @@ function orderFromRows(row: OrderRow, fills: FillRow[]): LiveOrder {
     symbol: row.symbol,
     side: row.side as Side,
     positionSide: row.positionSide as PositionSide | null,
+    marginType: row.marginType as MarginType | null,
     entrySemantics: row.entrySemantics as EntrySemantics | null,
+    effectiveLeverage: row.effectiveLeverage,
+    maintenanceBracket: row.maintenanceBracket,
+    maintMarginRatio: row.maintMarginRatio,
+    cumMaintenance: row.cumMaintenance,
+    liquidationPriceSource: row.liquidationPriceSource as LiquidationPriceSource,
     accountModeFingerprint: row.accountModeFingerprint,
+    compatibilityFrozen: row.compatibilityFrozen,
     type: row.type as LiveOrder["type"],
     status: row.status as LiveOrderStatus,
     price: row.price,
@@ -75,8 +88,12 @@ function positionFromRow(row: PositionRow, stopPrice: string): LivePosition {
     symbol: row.symbol,
     side: row.side as Side,
     positionSide: row.positionSide as PositionSide | null,
+    marginType: row.marginType as MarginType | null,
     entrySemantics: row.entrySemantics as EntrySemantics | null,
+    effectiveLeverage: row.effectiveLeverage,
+    liquidationPriceSource: row.liquidationPriceSource as LiquidationPriceSource,
     accountModeFingerprint: row.accountModeFingerprint,
+    compatibilityFrozen: row.compatibilityFrozen,
     status: row.status as LivePosition["status"],
     initialQuantity: decimal(row.initialQuantity),
     quantity: decimal(row.quantity),
@@ -142,8 +159,15 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       symbol: order.symbol,
       side: order.side,
       positionSide: order.positionSide ?? null,
+      marginType: order.marginType ?? null,
       entrySemantics: order.entrySemantics ?? null,
+      effectiveLeverage: order.effectiveLeverage ?? null,
+      maintenanceBracket: order.maintenanceBracket ?? null,
+      maintMarginRatio: order.maintMarginRatio ?? null,
+      cumMaintenance: order.cumMaintenance ?? null,
+      liquidationPriceSource: order.liquidationPriceSource ?? "LEGACY_UNKNOWN",
       accountModeFingerprint: order.accountModeFingerprint ?? null,
+      compatibilityFrozen: order.compatibilityFrozen ?? true,
       type: order.type,
       status: order.status,
       price: order.price,
@@ -222,8 +246,15 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
           symbol: replacement.symbol,
           side: replacement.side,
           positionSide: replacement.positionSide ?? null,
+          marginType: replacement.marginType ?? null,
           entrySemantics: replacement.entrySemantics ?? null,
+          effectiveLeverage: replacement.effectiveLeverage ?? null,
+          maintenanceBracket: replacement.maintenanceBracket ?? null,
+          maintMarginRatio: replacement.maintMarginRatio ?? null,
+          cumMaintenance: replacement.cumMaintenance ?? null,
+          liquidationPriceSource: replacement.liquidationPriceSource ?? "LEGACY_UNKNOWN",
           accountModeFingerprint: replacement.accountModeFingerprint ?? null,
+          compatibilityFrozen: replacement.compatibilityFrozen ?? true,
           type: replacement.type,
           status: replacement.status,
           price: replacement.price,
@@ -339,8 +370,12 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
         symbol: next.position.symbol,
         side: next.position.side,
         positionSide: next.position.positionSide ?? null,
+        marginType: next.position.marginType ?? null,
         entrySemantics: next.position.entrySemantics ?? null,
+        effectiveLeverage: next.position.effectiveLeverage ?? null,
+        liquidationPriceSource: next.position.liquidationPriceSource ?? "LEGACY_UNKNOWN",
         accountModeFingerprint: next.position.accountModeFingerprint ?? null,
+        compatibilityFrozen: next.position.compatibilityFrozen ?? true,
         status: next.position.status,
         initialQuantity: next.position.initialQuantity,
         quantity: next.position.quantity,
@@ -358,6 +393,10 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       }).onDuplicateKeyUpdate({
         set: {
           status: next.position.status,
+          marginType: next.position.marginType ?? null,
+          effectiveLeverage: next.position.effectiveLeverage ?? null,
+          liquidationPriceSource: next.position.liquidationPriceSource ?? "LEGACY_UNKNOWN",
+          compatibilityFrozen: next.position.compatibilityFrozen ?? true,
           initialQuantity: next.position.initialQuantity,
           quantity: next.position.quantity,
           entryPrice: next.position.entryPrice,
@@ -390,7 +429,9 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       await tx.update(livePositions).set({
         markPrice: patch.markPrice ?? current.markPrice,
         liquidationPrice: patch.liquidationPrice ?? current.liquidationPrice,
+        liquidationPriceSource: patch.liquidationPriceSource ?? current.liquidationPriceSource ?? "LEGACY_UNKNOWN",
         isolatedWallet: patch.isolatedWallet ?? current.isolatedWallet,
+        marginType: patch.marginType ?? current.marginType ?? null,
         exitPending: patch.exitPending ?? current.exitPending ?? false,
       }).where(eq(livePositions.id, positionId));
       if (patch.stopPrice !== undefined) {

@@ -153,11 +153,17 @@ function reversalFrame(eventTime: number, sequence: number) {
   };
 }
 
-function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTrade?: boolean } = {}) {
+function setup(options: {
+  limitPrice?: string;
+  mode?: "NORMAL" | "HIGH";
+  autoTrade?: boolean;
+  multiAssets?: boolean;
+} = {}) {
   const store = new InMemoryLiveOrderStore({ emergencyGeneration: 7, autoTrade: options.autoTrade });
   const gateway = new AdapterGateway();
   const created: CreateLiveIntentInput[] = [];
   const claims: ClaimLiveIntentInput[] = [];
+  const accountMode = { ...ACCOUNT_MODE, multiAssets: options.multiAssets ?? false };
   let finalMode: string | undefined;
   const createIntent = vi.fn<(
     input: CreateLiveIntentInput,
@@ -184,17 +190,19 @@ function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTra
     gateway,
     userTradesPageLimit: 2,
     workerId: "worker-a",
-    accountMode: ACCOUNT_MODE,
+    accountMode,
     createIntent,
     claimIntent,
     pauseAutoTrade,
+    getSettings: async () => ({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" }),
+    dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) },
     prepareIntent: (signal) => ({
       signalId: signal.signalId,
       symbol: signal.symbol,
       side: signal.side,
       positionSide: signal.side,
       entrySemantics: "ENTRY",
-      accountModeFingerprint: ACCOUNT_MODE.fingerprint,
+      accountModeFingerprint: accountMode.fingerprint,
       quantity: "2",
       limitPrice: options.limitPrice ?? "100",
       tickSize: "0.01",
@@ -218,6 +226,12 @@ function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTra
         notional: "200",
         reservedMargin: "40",
         reservedRisk: "2",
+        effectiveLeverage: 5,
+        marginType: "ISOLATED",
+        maintenanceBracket: 1,
+        maintMarginRatio: "0.01",
+        cumMaintenance: "0",
+        liquidationPriceSource: "PRETRADE_ESTIMATE",
         validUntil: new Date(9_999_999_999_999),
       };
     },
@@ -234,7 +248,7 @@ function setup(options: { limitPrice?: string; mode?: "NORMAL" | "HIGH"; autoTra
     isolatedWallet: position.isolatedWallet === "0" ? "40" : position.isolatedWallet,
   }));
   return { store, gateway, created, claims, createIntent, claimIntent, pauseAutoTrade, assertCurrentAdmission, adapter,
-    accountMode: ACCOUNT_MODE, finalMode: () => finalMode };
+    accountMode, finalMode: () => finalMode };
 }
 
 function useMomentumClaimDatabase(store: InMemoryLiveOrderStore, positionId: string) {
@@ -292,6 +306,91 @@ describe("mainnet live execution adapter", () => {
     expect(h.createIntent.mock.calls[0]?.[1].requireAutoTrade).toBe(true);
     expect(h.gateway.placed[0]).toMatchObject({ type: "LIMIT", timeInForce: "IOC", quantity: "2" });
     expect(await h.store.getPosition(h.created[0].id)).toBeNull();
+  });
+
+  it("uses exchange account totals and real cross position margin for multi-asset valuation", async () => {
+    const h = setup({ multiAssets: true });
+    h.gateway.account = async () => ({
+      assets: [
+        { asset: "USDT", walletBalance: "10", availableBalance: "9" },
+        { asset: "BNB", walletBalance: "2", availableBalance: "1" },
+      ],
+      totalWalletBalance: "12",
+      totalMarginBalance: "22",
+      availableBalance: "8",
+      totalPositionInitialMargin: "3",
+    });
+    h.gateway.positionRisk = async () => [{
+      symbol: "BTCUSDT", positionSide: "BOTH", positionAmt: "1", entryPrice: "100", markPrice: "110",
+      liquidationPrice: "50", leverage: "150", marginType: "cross", positionInitialMargin: "2",
+    }];
+
+    await expect(h.adapter.account()).resolves.toMatchObject({
+      equity: 22,
+      cash: 12,
+      availableMargin: 8,
+      usedMargin: 3,
+      unrealizedPnl: 10,
+      valuationValid: true,
+      valuationBasis: "EXCHANGE_ACCOUNT_TOTALS",
+      dualSide: false,
+      multiAssets: true,
+      symbolLeverages: { BTCUSDT: 150 },
+      symbolMarginTypes: { BTCUSDT: "CROSS" },
+    });
+  });
+
+  it("prefers totalPositionInitialMargin without requiring redundant per-position margin", async () => {
+    const h = setup({ multiAssets: true });
+    h.gateway.account = async () => ({
+      assets: [{ asset: "USDT", walletBalance: "10", availableBalance: "9" }],
+      totalWalletBalance: "12",
+      totalMarginBalance: "22",
+      availableBalance: "8",
+      totalPositionInitialMargin: "3",
+    });
+    h.gateway.positionRisk = async () => [{
+      symbol: "BTCUSDT", positionSide: "BOTH", positionAmt: "1", entryPrice: "100", markPrice: "110",
+      liquidationPrice: "50", leverage: "150", marginType: "cross",
+    }];
+
+    await expect(h.adapter.account()).resolves.toMatchObject({ usedMargin: 3, valuationValid: true });
+  });
+
+  it("fails closed when multi-asset mode lacks account-level totals", async () => {
+    const h = setup({ multiAssets: true });
+    h.gateway.account = async () => ({
+      assets: [{ asset: "USDT", walletBalance: "10", availableBalance: "9" }],
+    });
+    h.gateway.positionRisk = async () => [];
+
+    await expect(h.adapter.account()).resolves.toMatchObject({
+      valuationValid: false,
+      dailyLocked: true,
+    });
+  });
+
+  it("refreshes a cross position from positionInitialMargin instead of requiring isolatedWallet", async () => {
+    const h = setup();
+    await h.adapter.open(opportunity);
+    const order = (await h.store.listOrders())[0];
+    const value = h.created[0];
+    await h.store.applyFill(order.id, {
+      exchangeTradeId: "cross-fill", exchangeOrderId: "500", symbol: "BTCUSDT", side: "BUY",
+      positionSide: "BOTH", price: "100", quantity: "2", commission: "0", commissionAsset: "USDT",
+      realizedPnl: "0", isMaker: false, executedAt: 1,
+    }, seedFor(value));
+    h.gateway.positionRisk = async () => [{
+      symbol: "BTCUSDT", positionSide: "BOTH", positionAmt: "2", entryPrice: "100", markPrice: "101",
+      liquidationPrice: "50", leverage: "5", marginType: "cross", positionInitialMargin: "40",
+    }];
+
+    expect(await h.adapter.positions()).toMatchObject([{
+      margin: 40,
+      valuationValid: true,
+      marginType: "CROSS",
+      liquidationPriceSource: "EXCHANGE",
+    }]);
   });
 
   it("manual canary persists its admission class and submits while autoTrade is paused", async () => {

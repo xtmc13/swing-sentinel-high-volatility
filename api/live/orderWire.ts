@@ -3,6 +3,7 @@ import type { LiveOrder } from "./orderStateMachine";
 
 export interface OrderWireAccountMode {
   dualSide: boolean;
+  multiAssets?: boolean;
   fingerprint: string;
 }
 

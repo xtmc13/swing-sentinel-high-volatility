@@ -16,7 +16,7 @@ import {
   type ServerEnvironment,
 } from "./liveConfig";
 import { DrizzleLiveOrderStore } from "./drizzleLiveOrderStore";
-import { createMainnetLiveExecutionAdapter } from "./liveExecution";
+import { createMainnetLiveExecutionAdapter, readLiveAccountValuation } from "./liveExecution";
 import {
   getLiveIntentReservations,
   getPendingLiveIntentSymbols,
@@ -138,6 +138,7 @@ export async function createBinanceProductionLiveServicesFromStore(
     const mode = { dualSide: positionSide.dualSidePosition, multiAssets: multiAssetsMargin.multiAssetsMargin };
     accountMode = {
       dualSide: mode.dualSide,
+      multiAssets: mode.multiAssets,
       fingerprint: createHash("sha256").update(JSON.stringify(mode)).digest("hex"),
     };
   }
@@ -163,12 +164,15 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     const rows = await options.db.select().from(liveIntents).where(eq(liveIntents.id, order.intentId)).limit(1);
     const intent = rows[0];
     if (!intent) throw new Error("Live position intent is missing");
-    const bracketRows = await client.leverageBracket(intent.symbol);
-    const brackets = bracketRows.find((row) => row.symbol === intent.symbol)?.brackets ?? [];
-    const matching = brackets.filter((bracket) => compareDecimals(intent.notional, bracket.notionalFloor) >= 0
-      && compareDecimals(intent.notional, bracket.notionalCap) <= 0);
-    if (matching.length !== 1) throw new Error("Cannot restore a unique real maintenance bracket");
-    const bracket = matching[0];
+    const effectiveLeverage = intent.effectiveLeverage;
+    if (!Number.isInteger(effectiveLeverage) || (effectiveLeverage ?? 0) < 1
+      || !Number.isInteger(intent.maintenanceBracket) || (intent.maintenanceBracket ?? 0) < 1
+      || intent.maintMarginRatio === null || intent.cumMaintenance === null
+      || (intent.marginType !== "ISOLATED" && intent.marginType !== "CROSS")
+      || (intent.liquidationPriceSource !== "EXCHANGE"
+        && intent.liquidationPriceSource !== "PRETRADE_ESTIMATE")) {
+      throw new Error("Live intent lacks persisted compatibility, leverage, bracket, or liquidation metadata");
+    }
     return {
       id: intent.id,
       signalId: intent.signalId,
@@ -177,15 +181,19 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       symbol: intent.symbol,
       side: intent.side === "SHORT" ? "SHORT" : "LONG",
       positionSide: intent.positionSide === "SHORT" ? "SHORT" : intent.positionSide === "LONG" ? "LONG" : null,
+      marginType: intent.marginType,
       entrySemantics: intent.entrySemantics === "REDUCE" ? "REDUCE" : intent.entrySemantics === "ENTRY" ? "ENTRY" : null,
+      effectiveLeverage,
+      liquidationPriceSource: intent.liquidationPriceSource,
       accountModeFingerprint: intent.accountModeFingerprint,
+      compatibilityFrozen: intent.compatibilityFrozen,
       stopPrice: intent.stopPrice,
       tickSize: intent.tickSize,
       liquidationPrice: intent.liquidationPrice,
-      leverage: String(intent.leverage),
-      maintenanceBracket: bracket.bracket,
-      maintMarginRatio: bracket.maintMarginRatio,
-      cumMaintenance: bracket.cum,
+      leverage: String(effectiveLeverage),
+      maintenanceBracket: intent.maintenanceBracket!,
+      maintMarginRatio: intent.maintMarginRatio,
+      cumMaintenance: intent.cumMaintenance,
     };
   }
 
@@ -246,8 +254,17 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       const settingsRow = (await tx.select().from(tradingSettings).where(eq(tradingSettings.id, 1)).limit(1))[0];
       if (!settingsRow) return { approved: false, reason: "缺少交易设置" };
       const settings = settingsFromRow(settingsRow);
-      const asset = cached.account.assets.find((candidate) => candidate.asset === "USDT");
-      if (!asset) return { approved: false, reason: "缺少真实 USDT 余额" };
+      let valuation: ReturnType<typeof readLiveAccountValuation>;
+      try {
+        valuation = readLiveAccountValuation(
+          cached.account, cached.result.positions, options.accountMode?.multiAssets === true,
+        );
+      } catch (error) {
+        return {
+          approved: false,
+          reason: `真实账户汇总估值无效：${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
       const [positions, intentStops, pendingIntents, pendingSymbols] = await Promise.all([
         tx.select().from(livePositions).where(eq(livePositions.status, "OPEN")),
         tx.select({ id: liveIntents.id, stopPrice: liveIntents.stopPrice }).from(liveIntents),
@@ -255,34 +272,36 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         getPendingLiveIntentSymbols(tx),
       ]);
       const activeRemote = cached.result.positions.filter((position) => compareDecimals(position.positionAmt, "0") !== 0);
-      let existingPositionMargin: DecimalString = "0";
+      const marginType = cached.result.positionRisk.marginType.toUpperCase();
+      if (marginType !== "ISOLATED" && marginType !== "CROSS") {
+        return { approved: false, reason: "目标合约 marginType 无效" };
+      }
+      if (marginType === "CROSS" && (pendingSymbols.length > 0
+        || activeRemote.some((position) => position.marginType.toLowerCase() === "cross"))) {
+        return { approved: false, reason: "存在 cross 持仓或相关待单，必须完成组合强平估算后才能新增" };
+      }
       let existingExposure: DecimalString = "0";
-      let unrealizedPnl: DecimalString = "0";
       const portfolioPositions: Array<{ remote: (typeof activeRemote)[number]; stopPrice: DecimalString }> = [];
       for (const remote of activeRemote) {
         const local = positions.find((position) => position.symbol === remote.symbol);
         const intentStop = intentStops.find((intent) => intent.id === local?.id);
-        if (!local || !intentStop || remote.isolatedWallet === undefined) {
-          return { approved: false, reason: `${remote.symbol} 缺少已管理持仓、持久止损或签名 isolated margin` };
+        if (!local || !intentStop) {
+          return { approved: false, reason: `${remote.symbol} 缺少已管理持仓或持久止损` };
         }
         const signedQuantity = compareDecimals(remote.positionAmt, "0") < 0
           ? subtractDecimals("0", remote.positionAmt) : remote.positionAmt;
-        existingPositionMargin = addDecimals(existingPositionMargin, remote.isolatedWallet);
         existingExposure = addDecimals(existingExposure, multiplyDecimals(signedQuantity, remote.markPrice));
-        unrealizedPnl = addDecimals(unrealizedPnl, multiplyDecimals(
-          remote.positionAmt, subtractDecimals(remote.markPrice, remote.entryPrice),
-        ));
         portfolioPositions.push({ remote, stopPrice: intentStop.stopPrice });
       }
-      const equity = addDecimals(asset.walletBalance, unrealizedPnl);
+      const actualLeverage = Number(cached.result.positionRisk.leverage);
       const risk = calculateLivePositionRisk({
         side: opportunity.side,
-        walletBalance: equity,
-        availableBalance: asset.availableBalance,
+        walletBalance: valuation.equity,
+        availableBalance: valuation.availableBalance,
         entryPrice: input.limitPrice,
         stopPrice: input.stopPrice,
         liquidationPrice: admissionLiquidationPrice(
-          cached.result, opportunity.side, input.limitPrice, settings.fixedLeverage,
+          cached.result, opportunity.side, input.limitPrice, actualLeverage,
         ),
         actualLeverage: cached.result.positionRisk.leverage,
         leverageMode: settings.leverageMode,
@@ -299,7 +318,7 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         minNotional: cached.result.filters.minNotional,
         brackets: cached.result.brackets,
         pendingIntents: [pendingIntents],
-        existingPositionMargin,
+        existingPositionMargin: valuation.usedMargin,
         existingExposure,
       });
       if (!risk.ok) return { approved: false, reason: risk.reason };
@@ -320,17 +339,24 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
           return { approved: false, reason: "canary 最小安全数量超过风险或保证金批准上限" };
         }
         notional = multiplyDecimals(quantity, input.limitPrice);
-        reservedMargin = divideDecimals(notional, String(settings.fixedLeverage), {
+        reservedMargin = divideDecimals(notional, String(risk.effectiveLeverage), {
           decimalPlaces: 30, roundingMode: "ROUND_DOWN",
         });
         reservedRisk = multiplyDecimals(quantity, divideDecimals(risk.estimatedRisk, risk.quantity, {
           decimalPlaces: 30, roundingMode: "ROUND_UP",
         }));
       }
+      const approvedBracket = [...cached.result.brackets]
+        .sort((left, right) => left.bracket - right.bracket)
+        .find((bracket) => compareDecimals(notional, bracket.notionalFloor) >= 0
+          && compareDecimals(notional, bracket.notionalCap) <= 0);
+      if (!approvedBracket || risk.effectiveLeverage > approvedBracket.initialLeverage) {
+        return { approved: false, reason: "最终批准名义价值没有可用杠杆档位" };
+      }
       const portfolio = validateLivePortfolioAdmission({
         symbol: opportunity.symbol,
         side: opportunity.side,
-        walletBalance: equity,
+        walletBalance: valuation.equity,
         candidateRisk: Number(reservedRisk),
         maxPositions: settings.maxPositions,
         dailyLossLimitPct: settings.dailyLossLimitPct,
@@ -353,6 +379,14 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         notional,
         reservedMargin,
         reservedRisk,
+        effectiveLeverage: risk.effectiveLeverage,
+        marginType,
+        maintenanceBracket: approvedBracket.bracket,
+        maintMarginRatio: approvedBracket.maintMarginRatio,
+        cumMaintenance: approvedBracket.cum,
+        liquidationPriceSource: compareDecimals(cached.result.positionRisk.positionAmt, "0") !== 0
+          || compareDecimals(cached.result.positionRisk.liquidationPrice, "0") > 0
+          ? "EXCHANGE" : "PRETRADE_ESTIMATE",
         validUntil: new Date(Math.min(opportunity.expiryTime, now() + 5_000)),
       };
     },

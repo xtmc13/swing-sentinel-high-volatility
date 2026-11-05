@@ -1,4 +1,11 @@
-import type { EntrySemantics, PositionSide, Side, StrategyType } from "@contracts/trading";
+import type {
+  EntrySemantics,
+  LiquidationPriceSource,
+  MarginType,
+  PositionSide,
+  Side,
+  StrategyType,
+} from "@contracts/trading";
 import type { AssertCurrentLiveAdmission } from "./liveConfig";
 import { liveSubmissionPermitted } from "./livePersistence";
 import { buildOrderWire, type OrderWireAccountMode } from "./orderWire";
@@ -36,8 +43,15 @@ export interface LiveOrder {
   symbol: string;
   side: Side;
   positionSide?: PositionSide | null;
+  marginType?: MarginType | null;
   entrySemantics?: EntrySemantics | null;
+  effectiveLeverage?: number | null;
+  maintenanceBracket?: number | null;
+  maintMarginRatio?: DecimalString | null;
+  cumMaintenance?: DecimalString | null;
+  liquidationPriceSource?: LiquidationPriceSource | null;
   accountModeFingerprint?: string | null;
+  compatibilityFrozen?: boolean;
   type: "LIMIT" | "MARKET" | "STOP_MARKET";
   status: LiveOrderStatus;
   price: DecimalString;
@@ -62,8 +76,12 @@ export interface LivePositionSeed {
   symbol: string;
   side: Side;
   positionSide?: PositionSide | null;
+  marginType?: MarginType | null;
   entrySemantics?: EntrySemantics | null;
+  effectiveLeverage?: number | null;
+  liquidationPriceSource?: LiquidationPriceSource | null;
   accountModeFingerprint?: string | null;
+  compatibilityFrozen?: boolean;
   stopPrice: DecimalString;
   initialStopPrice?: DecimalString | null;
   tickSize?: DecimalString | null;
@@ -108,7 +126,8 @@ export interface FillApplication {
 }
 
 export type LivePositionUpdate = Partial<Pick<LivePosition,
-  "markPrice" | "liquidationPrice" | "isolatedWallet" | "stopPrice" | "exitPending">>;
+  "markPrice" | "liquidationPrice" | "isolatedWallet" | "stopPrice" | "exitPending"
+  | "marginType" | "liquidationPriceSource">>;
 
 export interface LiveOrderStore {
   insertOrder(order: LiveOrder): Promise<void>;
@@ -749,8 +768,15 @@ export class OrderStateMachine {
       symbol: position.symbol,
       side: position.side,
       positionSide: position.positionSide,
+      marginType: position.marginType,
       entrySemantics: "REDUCE",
+      effectiveLeverage: position.effectiveLeverage ?? Number(position.leverage),
+      maintenanceBracket: position.maintenanceBracket,
+      maintMarginRatio: position.maintMarginRatio,
+      cumMaintenance: position.cumMaintenance,
+      liquidationPriceSource: position.liquidationPriceSource,
       accountModeFingerprint: position.accountModeFingerprint,
+      compatibilityFrozen: position.compatibilityFrozen,
       type: "MARKET",
       status: "PENDING_SEND",
       price: "0",
@@ -961,8 +987,15 @@ export class OrderStateMachine {
       symbol: position.symbol,
       side: position.side,
       positionSide: position.positionSide,
+      marginType: position.marginType,
       entrySemantics: "REDUCE",
+      effectiveLeverage: position.effectiveLeverage ?? Number(position.leverage),
+      maintenanceBracket: position.maintenanceBracket,
+      maintMarginRatio: position.maintMarginRatio,
+      cumMaintenance: position.cumMaintenance,
+      liquidationPriceSource: position.liquidationPriceSource,
       accountModeFingerprint: position.accountModeFingerprint,
+      compatibilityFrozen: position.compatibilityFrozen,
       type: "STOP_MARKET",
       status: "PENDING_SEND",
       price: position.stopPrice,

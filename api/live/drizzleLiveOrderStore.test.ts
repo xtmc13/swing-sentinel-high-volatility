@@ -10,7 +10,11 @@ const positionRow = {
   symbol: "BTCUSDT",
   side: "LONG",
   positionSide: "LONG",
+  marginType: "CROSS",
   entrySemantics: "ENTRY",
+  effectiveLeverage: 150,
+  liquidationPriceSource: "EXCHANGE",
+  compatibilityFrozen: false,
   accountModeFingerprint: "0".repeat(64),
   status: "OPEN",
   initialQuantity: "2",
@@ -45,7 +49,11 @@ describe("durable live position recovery", () => {
       stopPrice: "99",
       initialStopPrice: null,
       positionSide: "LONG",
+      marginType: "CROSS",
       entrySemantics: "ENTRY",
+      effectiveLeverage: 150,
+      liquidationPriceSource: "EXCHANGE",
+      compatibilityFrozen: false,
       accountModeFingerprint: "0".repeat(64),
     });
   });
@@ -73,7 +81,13 @@ describe("durable live position recovery", () => {
       symbol: "BTCUSDT",
       side: "LONG",
       positionSide: "LONG",
+      marginType: "CROSS",
       entrySemantics: "ENTRY",
+      effectiveLeverage: 150,
+      maintenanceBracket: 2,
+      maintMarginRatio: "0.02",
+      cumMaintenance: "10",
+      liquidationPriceSource: "PRETRADE_ESTIMATE",
       accountModeFingerprint: "0".repeat(64),
       type: "LIMIT",
       status: "PENDING_SEND",
@@ -91,7 +105,13 @@ describe("durable live position recovery", () => {
 
     expect(await store.getOrder(order.clientOrderId)).toMatchObject({
       positionSide: "LONG",
+      marginType: "CROSS",
       entrySemantics: "ENTRY",
+      effectiveLeverage: 150,
+      maintenanceBracket: 2,
+      maintMarginRatio: "0.02",
+      cumMaintenance: "10",
+      liquidationPriceSource: "PRETRADE_ESTIMATE",
       accountModeFingerprint: "0".repeat(64),
     });
   });

@@ -2,7 +2,15 @@ import { and, eq, gt, inArray, isNull, lte, ne, notInArray, or, sql } from "driz
 import type { MySql2Database } from "drizzle-orm/mysql2";
 import { liveControls, liveIntents, liveOrders, tradingSettings, volatilityStates } from "@db/schema";
 import type { AssertCurrentLiveAdmission } from "./liveConfig";
-import type { EntrySemantics, PositionSide, Side, StrategyType, VolatilityMode } from "@contracts/trading";
+import type {
+  EntrySemantics,
+  LiquidationPriceSource,
+  MarginType,
+  PositionSide,
+  Side,
+  StrategyType,
+  VolatilityMode,
+} from "@contracts/trading";
 import {
   addDecimals,
   compareDecimals,
@@ -49,6 +57,12 @@ export type LiveFinalGateResult =
       notional: DecimalString;
       reservedMargin: DecimalString;
       reservedRisk: DecimalString;
+      effectiveLeverage: number;
+      marginType: MarginType;
+      maintenanceBracket: number;
+      maintMarginRatio: DecimalString;
+      cumMaintenance: DecimalString;
+      liquidationPriceSource: Exclude<LiquidationPriceSource, "LEGACY_UNKNOWN">;
       validUntil: Date;
     }
   | { approved: false; reason: string };
@@ -127,21 +141,28 @@ function approvalError(
     return "final gate 批准结果已陈旧";
   }
   if (input.expiresAt.getTime() <= now.getTime()) return "意图在提交前复核时已过期";
+  if (!Number.isInteger(approval.effectiveLeverage) || approval.effectiveLeverage < 1
+    || !Number.isInteger(approval.maintenanceBracket) || approval.maintenanceBracket < 1
+    || !["ISOLATED", "CROSS"].includes(approval.marginType)
+    || !["EXCHANGE", "PRETRADE_ESTIMATE"].includes(approval.liquidationPriceSource)) {
+    return "final gate effectiveLeverage、marginType、bracket 或强平价来源无效";
+  }
   try {
     if (compareDecimals(approval.quantity, "0") <= 0 || compareDecimals(approval.notional, "0") <= 0
-      || compareDecimals(approval.reservedMargin, "0") <= 0 || compareDecimals(approval.reservedRisk, "0") <= 0) {
-      return "final gate 数量、名义价值、margin 或 opening risk 无效";
+      || compareDecimals(approval.reservedMargin, "0") <= 0 || compareDecimals(approval.reservedRisk, "0") <= 0
+      || compareDecimals(approval.maintMarginRatio, "0") < 0 || compareDecimals(approval.cumMaintenance, "0") < 0) {
+      return "final gate 数量、名义价值、margin、opening risk 或 bracket 数值无效";
     }
     const expectedNotional = multiplyDecimals(approval.quantity, input.limitPrice);
     if (compareDecimals(approval.notional, expectedNotional) !== 0) {
       return "final gate notional 与 quantity*limitPrice 不一致";
     }
-    const expectedMargin = divideDecimals(approval.notional, String(input.leverage), {
+    const expectedMargin = divideDecimals(approval.notional, String(approval.effectiveLeverage), {
       decimalPlaces: 30,
       roundingMode: "ROUND_DOWN",
     });
     if (compareDecimals(approval.reservedMargin, expectedMargin) !== 0) {
-      return "final gate margin 与批准的名义价值或杠杆不一致";
+      return "final gate margin 与批准的名义价值或 effectiveLeverage 不一致";
     }
   } catch {
     return "final gate 十进制结果无效";
@@ -170,7 +191,7 @@ export async function createLiveIntent(
 ): Promise<CreateLiveIntentResult> {
   if (!input.id || !input.signalId || !validLease(input.workerId, input.leaseDurationMs)
     || !Number.isSafeInteger(input.expiresAt.getTime()) || !Number.isInteger(input.leverage)
-    || input.leverage < 1 || input.leverage > 20) {
+    || input.leverage < 1) {
     return { ok: false, reason: "意图标识、杠杆、过期时间或 worker lease 无效" };
   }
   if (typeof options?.finalGate !== "function") return { ok: false, reason: "缺少 mandatory final gate" };
@@ -227,14 +248,21 @@ export async function createLiveIntent(
         symbol: input.symbol,
         side: input.side,
         positionSide: input.positionSide ?? null,
+        marginType: approval.marginType,
         entrySemantics: input.entrySemantics ?? null,
+        effectiveLeverage: approval.effectiveLeverage,
+        maintenanceBracket: approval.maintenanceBracket,
+        maintMarginRatio: approval.maintMarginRatio,
+        cumMaintenance: approval.cumMaintenance,
+        liquidationPriceSource: approval.liquidationPriceSource,
         accountModeFingerprint: input.accountModeFingerprint ?? null,
+        compatibilityFrozen: false,
         quantity: approval.quantity,
         limitPrice: input.limitPrice,
         stopPrice: input.stopPrice,
         tickSize: input.tickSize,
         liquidationPrice: input.liquidationPrice,
-        leverage: input.leverage,
+        leverage: approval.effectiveLeverage,
         notional: approval.notional,
         reservedMargin: approval.reservedMargin,
         reservedRisk: approval.reservedRisk,

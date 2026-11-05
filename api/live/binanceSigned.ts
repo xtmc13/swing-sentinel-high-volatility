@@ -49,6 +49,7 @@ export interface BinanceAccountResponse {
   totalWalletBalance?: DecimalString;
   totalMarginBalance?: DecimalString;
   availableBalance?: DecimalString;
+  totalPositionInitialMargin?: DecimalString;
   [key: string]: unknown;
 }
 
@@ -62,6 +63,7 @@ export interface BinancePositionRisk {
   leverage: DecimalString;
   marginType: string;
   isolatedWallet?: DecimalString;
+  positionInitialMargin?: DecimalString;
   [key: string]: unknown;
 }
 

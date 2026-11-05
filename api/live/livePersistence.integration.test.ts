@@ -89,6 +89,12 @@ function finalGateFor(input: CreateLiveIntentInput, overrides: Record<string, un
     notional: input.notional,
     reservedMargin: input.reservedMargin,
     reservedRisk: input.reservedRisk,
+    effectiveLeverage: input.leverage,
+    marginType: "ISOLATED" as const,
+    maintenanceBracket: 1,
+    maintMarginRatio: "0.01",
+    cumMaintenance: "0",
+    liquidationPriceSource: "PRETRADE_ESTIMATE" as const,
     validUntil: input.expiresAt,
     ...overrides,
   });

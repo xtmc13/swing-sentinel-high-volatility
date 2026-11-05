@@ -44,10 +44,40 @@ function input(overrides: Partial<LiveRiskInput> = {}): LiveRiskInput {
 }
 
 describe("主网精确风险与预留", () => {
-  it("拒绝 SYMBOL_MAX 和未明确固定的低杠杆", () => {
+  it("拒绝 SYMBOL_MAX、非法实际杠杆和 FIXED 配置不一致", () => {
     expect(calculateLivePositionRisk(input({ leverageMode: "SYMBOL_MAX" }))).toMatchObject({ ok: false });
-    expect(calculateLivePositionRisk(input({ fixedLeverage: 21 }))).toMatchObject({ ok: false });
+    expect(calculateLivePositionRisk(input({ fixedLeverage: 5.5 }))).toMatchObject({ ok: false });
     expect(calculateLivePositionRisk(input({ actualLeverage: "10" }))).toMatchObject({ ok: false });
+    expect(calculateLivePositionRisk(input({
+      leverageMode: "ACCOUNT_CONFIGURED", actualLeverage: "0",
+    }))).toMatchObject({ ok: false });
+  });
+
+  it("ACCOUNT_CONFIGURED 使用目标 symbol 的实际杠杆而不是固定值", () => {
+    const result = calculateLivePositionRisk(input({
+      leverageMode: "ACCOUNT_CONFIGURED",
+      actualLeverage: "10",
+      fixedLeverage: 2,
+    }));
+
+    expect(result).toMatchObject({ ok: true, effectiveLeverage: 10, initialMargin: "1000" });
+  });
+
+  it("150x 在账户和名义价值档位允许时合法，超过档位时拒绝", () => {
+    const brackets = [{
+      bracket: 1, initialLeverage: 150, notionalCap: "50000", notionalFloor: "0",
+      maintMarginRatio: "0.005", cum: "0",
+    }];
+    const legal = calculateLivePositionRisk(input({
+      actualLeverage: "150", fixedLeverage: 150, brackets,
+    }));
+    const overBracket = calculateLivePositionRisk(input({
+      actualLeverage: "150", fixedLeverage: 150,
+      brackets: [{ ...brackets[0], initialLeverage: 125 }],
+    }));
+
+    expect(legal).toMatchObject({ ok: true, effectiveLeverage: 150, initialMargin: "66.666666666666666666666666666666" });
+    expect(overBracket).toMatchObject({ ok: false });
   });
 
   it("按实际命中的币安维持保证金档位计算而不是使用模拟固定费率", () => {
@@ -136,7 +166,7 @@ describe("主网精确风险与预留", () => {
     expect(result).toMatchObject({ ok: false });
   });
 
-  it("维持保证金档位按已有 exposure 加候选名义价值选择", () => {
+  it("目标 symbol 档位只看候选名义价值，组合 exposure 仅保留组合风险口径", () => {
     const result = calculateLivePositionRisk(input({
       walletBalance: "100000",
       availableBalance: "100000",
@@ -155,8 +185,10 @@ describe("主网精确风险与预留", () => {
       quantity: "400",
       notional: "40000",
       totalExposure: "100000",
-      maintenanceMargin: "1950",
-      bracket: 2,
+      maintenanceMargin: "400",
+      bracket: 1,
+      maintMarginRatio: "0.01",
+      cumMaintenance: "0",
     });
   });
 

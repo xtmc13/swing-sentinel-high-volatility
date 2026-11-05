@@ -86,22 +86,49 @@ describe("主网只读预检", () => {
     }
   });
 
-  it("账户模式、保证金或实际杠杆不符时失败关闭", async () => {
+  it("支持 dual、multi-assets、cross 和 ACCOUNT_CONFIGURED 的逐 symbol 实际杠杆", async () => {
     const result = await runLivePreflight(input({
+      leverageMode: "ACCOUNT_CONFIGURED",
+      fixedLeverage: 20,
       client: client({
         positionSide: { dualSidePosition: true },
         multiAssets: { multiAssetsMargin: true },
-        positions: [{ ...isolatedPosition, marginType: "cross", leverage: "10" }],
+        positions: [
+          { ...isolatedPosition, positionSide: "LONG", marginType: "cross", leverage: "150" },
+          { ...isolatedPosition, symbol: "ETHUSDT", positionSide: "BOTH", leverage: "20" },
+        ],
+        brackets: [{
+          symbol: "BTCUSDT",
+          brackets: [{
+            bracket: 1, initialLeverage: 150, notionalCap: "50000", notionalFloor: "0",
+            maintMarginRatio: "0.005", cum: "0",
+          }],
+        }],
       }),
     }));
 
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.reasons.join(" ")).toMatch(/one-way/);
-      expect(result.reasons.join(" ")).toMatch(/multi-assets/);
-      expect(result.reasons.join(" ")).toMatch(/isolated/);
-      expect(result.reasons.join(" ")).toMatch(/杠杆/);
-    }
+    expect(result).toMatchObject({ ok: true, positionRisk: { leverage: "150", marginType: "cross" } });
+  });
+
+  it("FIXED 仍要求实际杠杆一致，但不把其他 symbol 的杠杆套用到目标合约", async () => {
+    const supported = await runLivePreflight(input({
+      fixedLeverage: 5,
+      client: client({
+        positionSide: { dualSidePosition: true },
+        multiAssets: { multiAssetsMargin: true },
+        positions: [
+          { ...isolatedPosition, positionSide: "LONG", marginType: "cross", leverage: "5" },
+          { ...isolatedPosition, symbol: "ETHUSDT", leverage: "20" },
+        ],
+      }),
+    }));
+    const mismatch = await runLivePreflight(input({
+      client: client({ positions: [{ ...isolatedPosition, leverage: "10" }] }),
+    }));
+
+    expect(supported.ok).toBe(true);
+    expect(mismatch).toMatchObject({ ok: false });
+    if (!mismatch.ok) expect(mismatch.reasons.join(" ")).toMatch(/杠杆/);
   });
 
   it("拒绝非白名单、非 USDT 永续或不可交易合约并提取合法过滤值", async () => {

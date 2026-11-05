@@ -55,7 +55,10 @@ export type LiveRiskResult =
       estimatedRisk: DecimalString;
       reservedMargin: DecimalString;
       reservedRisk: DecimalString;
+      effectiveLeverage: number;
       bracket: number;
+      maintMarginRatio: DecimalString;
+      cumMaintenance: DecimalString;
     };
 
 const EXACT_DIVISION = { decimalPlaces: 30, roundingMode: "ROUND_DOWN" } as const;
@@ -74,12 +77,20 @@ export function calculateLivePositionRisk(input: LiveRiskInput): LiveRiskResult 
     || input.highVolatilityRiskMultiplier <= 0 || input.highVolatilityRiskMultiplier > 1) {
     return { ok: false, reason: "HIGH 风险倍率无效" };
   }
-  if (input.leverageMode !== "FIXED") return { ok: false, reason: "主网禁止 SYMBOL_MAX，必须明确固定杠杆" };
-  if (!Number.isInteger(input.fixedLeverage) || input.fixedLeverage < 1 || input.fixedLeverage > 20) {
-    return { ok: false, reason: "主网固定杠杆必须在 1–20 之间" };
+  if (input.leverageMode !== "FIXED" && input.leverageMode !== "ACCOUNT_CONFIGURED") {
+    return { ok: false, reason: "主网禁止 SYMBOL_MAX，必须使用 FIXED 或 ACCOUNT_CONFIGURED" };
   }
-  if (compareDecimals(input.actualLeverage, String(input.fixedLeverage)) !== 0) {
-    return { ok: false, reason: "交易所实际杠杆与固定杠杆配置不符" };
+  const effectiveLeverage = Number(input.actualLeverage);
+  if (!Number.isInteger(effectiveLeverage) || effectiveLeverage < 1) {
+    return { ok: false, reason: "交易所实际杠杆必须为正整数" };
+  }
+  if (input.leverageMode === "FIXED") {
+    if (!Number.isInteger(input.fixedLeverage) || input.fixedLeverage < 1) {
+      return { ok: false, reason: "主网固定杠杆必须为正整数" };
+    }
+    if (compareDecimals(input.actualLeverage, String(input.fixedLeverage)) !== 0) {
+      return { ok: false, reason: "交易所实际杠杆与固定杠杆配置不符" };
+    }
   }
   const percentages = [
     input.riskPerTradePct,
@@ -142,7 +153,7 @@ export function calculateLivePositionRisk(input: LiveRiskInput): LiveRiskResult 
     const riskPerUnit = addDecimals(stopDistance, twoSidedCostPerUnit);
     const quantityByRisk = divideDecimals(remainingRisk, riskPerUnit, EXACT_DIVISION);
     const quantityByMargin = divideDecimals(
-      multiplyDecimals(marginLimit, String(input.fixedLeverage)),
+      multiplyDecimals(marginLimit, String(effectiveLeverage)),
       entryPrice,
       EXACT_DIVISION,
     );
@@ -158,17 +169,17 @@ export function calculateLivePositionRisk(input: LiveRiskInput): LiveRiskResult 
     const totalExposure = addDecimals(input.existingExposure, notional);
     const bracket = [...input.brackets]
       .sort((left, right) => left.bracket - right.bracket)
-      .find((candidate) => compareDecimals(totalExposure, candidate.notionalFloor) >= 0
-        && compareDecimals(totalExposure, candidate.notionalCap) <= 0);
-    if (!bracket) return { ok: false, reason: "总名义价值超出真实维持保证金档位" };
-    if (input.fixedLeverage > bracket.initialLeverage) {
-      return { ok: false, reason: "固定杠杆超过实际档位允许值" };
+      .find((candidate) => compareDecimals(notional, candidate.notionalFloor) >= 0
+        && compareDecimals(notional, candidate.notionalCap) <= 0);
+    if (!bracket) return { ok: false, reason: "目标名义价值超出真实维持保证金档位" };
+    if (effectiveLeverage > bracket.initialLeverage) {
+      return { ok: false, reason: "实际杠杆超过目标名义价值档位允许值" };
     }
 
-    const initialMargin = divideDecimals(notional, String(input.fixedLeverage), EXACT_DIVISION);
+    const initialMargin = divideDecimals(notional, String(effectiveLeverage), EXACT_DIVISION);
     const maintenanceMargin = minimum(
-      subtractDecimals(multiplyDecimals(totalExposure, bracket.maintMarginRatio), bracket.cum),
-      totalExposure,
+      subtractDecimals(multiplyDecimals(notional, bracket.maintMarginRatio), bracket.cum),
+      notional,
     );
     if (compareDecimals(initialMargin, marginLimit) > 0) {
       return { ok: false, reason: "初始保证金超过可用预留额度" };
@@ -183,7 +194,10 @@ export function calculateLivePositionRisk(input: LiveRiskInput): LiveRiskResult 
       estimatedRisk: multiplyDecimals(quantity, riskPerUnit),
       reservedMargin,
       reservedRisk,
+      effectiveLeverage,
       bracket: bracket.bracket,
+      maintMarginRatio: bracket.maintMarginRatio,
+      cumMaintenance: bracket.cum,
     };
   } catch {
     return { ok: false, reason: "主网十进制风险输入无效" };

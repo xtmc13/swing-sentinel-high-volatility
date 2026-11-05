@@ -142,10 +142,16 @@ function RiskPageContent() {
           <section className="panel p-4 sm:p-5">
             <div className="terminal-label">LEVERAGE & LIQUIDATION BUFFER</div><h2 className="mb-5 mt-1 text-[13px]">杠杆模式</h2>
             <div className="grid gap-4 sm:grid-cols-2">
-              <label className="block"><span className="terminal-label">模式</span><select className="terminal-input mt-2" value={form.leverageMode} onChange={(event) => update("leverageMode", event.target.value as TradingSettings["leverageMode"])}><option value="SYMBOL_MAX">标的上限（满杠杆模式）</option><option value="FIXED">固定杠杆（更容易保留强平缓冲）</option></select></label>
-              <NumberField label="固定杠杆值" value={form.fixedLeverage} suffix="×" step={1} min={1} max={125} onChange={(value) => update("fixedLeverage", Math.round(value))} />
+              <label className="block"><span className="terminal-label">模式</span><select className="terminal-input mt-2" value={form.leverageMode} onChange={(event) => update("leverageMode", event.target.value as TradingSettings["leverageMode"])}><option value="SYMBOL_MAX">标的上限（仅 PAPER）</option><option value="FIXED">FIXED · 校验账户实际值</option><option value="ACCOUNT_CONFIGURED">ACCOUNT_CONFIGURED · 使用账户实际值</option></select></label>
+              <NumberField label="FIXED 目标杠杆" value={form.fixedLeverage} suffix="×" step={1} min={1} onChange={(value) => update("fixedLeverage", Math.round(value))} />
             </div>
-            <div className="reading mt-4 border-l-2 border-[#fbbf24] bg-[#17150e] px-4 py-3 text-[11px] leading-6 text-[#d8c68e]">满杠杆模式使用系统内置的模拟标的上限，不代表你的币安账户实际档位。若止损已经落在估算强平价附近，系统会拒绝开仓，而不是为了成交取消强平检查。固定 10～20× 通常能保留更大的结构止损空间，但不代表更安全或必然盈利。</div>
+            {data.account && <div className="mt-4 border border-[#1a2540] bg-[#080e19] p-4 text-[11px] leading-6">
+              <div className="terminal-label">签名账户实际配置</div>
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1"><span>{data.account.dualSide ? "DUAL" : "ONE-WAY"}</span><span>{data.account.multiAssets ? "MULTI-ASSETS" : "SINGLE-ASSET"}</span></div>
+              {Object.entries(data.account.symbolLeverages ?? {}).map(([symbol, leverage]) => <div key={symbol} className="mt-1 flex justify-between gap-3"><span>{symbol} · {data.account?.symbolMarginTypes?.[symbol] ?? "UNKNOWN"}</span><span>{leverage}×</span></div>)}
+              {data.positions.filter((position) => position.liquidationPriceSource).map((position) => <div key={position.id} className="mt-1 flex justify-between gap-3"><span>{position.symbol} 强平价来源</span><span>{position.liquidationPriceSource}</span></div>)}
+            </div>}
+            <div className="reading mt-4 border-l-2 border-[#fbbf24] bg-[#17150e] px-4 py-3 text-[11px] leading-6 text-[#d8c68e]">LIVE 使用签名 positionRisk 的逐 symbol 实际杠杆，并受目标名义价值档位约束；不会自动修改交易所杠杆。SYMBOL_MAX 仅保留 PAPER 旧行为。止损与强平缓冲、费用和最小名义价值检查仍然强制执行。</div>
           </section>
 
           <section className="panel p-4 sm:p-5">

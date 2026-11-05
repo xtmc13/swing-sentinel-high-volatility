@@ -141,6 +141,62 @@ function exceedsDirectionalLimit(price: DecimalString, cap: DecimalString, side:
   return side === "LONG" ? comparison > 0 : comparison < 0;
 }
 
+export interface LiveAccountValuation {
+  equity: DecimalString;
+  cash: DecimalString;
+  availableBalance: DecimalString;
+  usedMargin: DecimalString;
+  unrealizedPnl: DecimalString;
+}
+
+function signedDecimal(value: unknown, label: string): DecimalString {
+  if (typeof value !== "string" || value.length === 0) throw new Error(`${label} 缺失或无效`);
+  return decimal(value);
+}
+
+export function signedPositionInitialMargin(position: BinancePositionRisk): DecimalString {
+  if (position.positionInitialMargin !== undefined) {
+    return signedDecimal(position.positionInitialMargin, `${position.symbol} positionInitialMargin`);
+  }
+  if (position.marginType.toLowerCase() === "isolated" && position.isolatedWallet !== undefined) {
+    return signedDecimal(position.isolatedWallet, `${position.symbol} isolatedWallet`);
+  }
+  throw new Error(`${position.symbol} 缺少签名持仓初始保证金`);
+}
+
+export function readLiveAccountValuation(
+  response: BinanceAccountResponse,
+  remotePositions: BinancePositionRisk[],
+  multiAssets: boolean,
+): LiveAccountValuation {
+  const active = remotePositions.filter((position) => compareDecimals(position.positionAmt, "0") !== 0);
+  let unrealizedPnl: DecimalString = "0";
+  let positionMargin: DecimalString = "0";
+  for (const position of active) {
+    unrealizedPnl = addDecimals(unrealizedPnl, multiplyDecimals(
+      position.positionAmt, subtractDecimals(position.markPrice, position.entryPrice),
+    ));
+    if (response.totalPositionInitialMargin === undefined) {
+      positionMargin = addDecimals(positionMargin, signedPositionInitialMargin(position));
+    }
+  }
+  const asset = response.assets.find((candidate) => candidate.asset === "USDT");
+  if (multiAssets && (response.totalMarginBalance === undefined
+    || response.totalWalletBalance === undefined || response.availableBalance === undefined)) {
+    throw new Error("多资产账户缺少 totalMarginBalance、totalWalletBalance 或 availableBalance");
+  }
+  if (!multiAssets && !asset) throw new Error("签名账户缺少 USDT 余额");
+  const equity = signedDecimal(
+    response.totalMarginBalance ?? (asset ? addDecimals(asset.walletBalance, unrealizedPnl) : undefined),
+    "totalMarginBalance",
+  );
+  const cash = signedDecimal(response.totalWalletBalance ?? asset?.walletBalance, "totalWalletBalance");
+  const availableBalance = signedDecimal(response.availableBalance ?? asset?.availableBalance, "availableBalance");
+  const usedMargin = signedDecimal(response.totalPositionInitialMargin ?? positionMargin, "totalPositionInitialMargin");
+  if (compareDecimals(usedMargin, "0") < 0) throw new Error("持仓初始保证金不能为负数");
+  return { equity, cash, availableBalance, usedMargin, unrealizedPnl };
+}
+
 function unavailableAccount(): AccountSnapshot {
   return {
     equity: 0,
@@ -252,8 +308,15 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       symbol: input.symbol,
       side: input.side,
       positionSide: input.positionSide,
+      marginType: approval.marginType,
       entrySemantics: input.entrySemantics,
+      effectiveLeverage: approval.effectiveLeverage,
+      maintenanceBracket: approval.maintenanceBracket,
+      maintMarginRatio: approval.maintMarginRatio,
+      cumMaintenance: approval.cumMaintenance,
+      liquidationPriceSource: approval.liquidationPriceSource,
       accountModeFingerprint: input.accountModeFingerprint,
+      compatibilityFrozen: false,
       type: "LIMIT",
       status: "PENDING_SEND",
       price: input.limitPrice,
@@ -493,29 +556,20 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       this.dependencies.getSettings?.(),
       this.dependencies.accounting?.listLedgerEntries() ?? Promise.resolve([]),
     ]);
-    const asset = response.assets.find((candidate) => candidate.asset === "USDT");
-    if (!asset) throw new Error("签名账户缺少 USDT 余额");
     if (!settings || !this.dependencies.dailyRisk) throw new Error("LIVE 日损状态存储未配置");
-    const active = remotePositions.filter((position) => compareDecimals(position.positionAmt, "0") !== 0);
-    let unrealizedPnl: DecimalString = "0";
-    let usedMargin: DecimalString = "0";
-    for (const position of active) {
-      unrealizedPnl = addDecimals(unrealizedPnl, multiplyDecimals(
-        position.positionAmt, subtractDecimals(position.markPrice, position.entryPrice),
-      ));
-      if (position.isolatedWallet === undefined) throw new Error(`${position.symbol} 缺少签名 isolated margin`);
-      usedMargin = addDecimals(usedMargin, position.isolatedWallet);
-    }
-    let equity: number;
+    let valuation: LiveAccountValuation;
     try {
-      equity = Number(response.totalMarginBalance ?? addDecimals(asset.walletBalance, unrealizedPnl));
+      valuation = readLiveAccountValuation(
+        response, remotePositions, this.dependencies.accountMode?.multiAssets === true,
+      );
     } catch {
       return unavailableAccount();
     }
-    const availableMargin = Number(response.availableBalance ?? asset.availableBalance);
-    const cash = Number(response.totalWalletBalance ?? asset.walletBalance);
-    const unrealized = Number(unrealizedPnl);
-    const margin = Number(usedMargin);
+    const equity = Number(valuation.equity);
+    const availableMargin = Number(valuation.availableBalance);
+    const cash = Number(valuation.cash);
+    const unrealized = Number(valuation.unrealizedPnl);
+    const margin = Number(valuation.usedMargin);
     if (![equity, availableMargin, cash, unrealized, margin].every(Number.isFinite)) {
       return unavailableAccount();
     }
@@ -527,6 +581,14 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       .reduce((total, entry) => total + (entry.entryType === "COMMISSION"
         ? -Math.abs(Number(entry.amount)) : Number(entry.amount)), 0);
     const todayPnl = equity - daily.dayStartEquity;
+    const symbolLeverages: Record<string, number> = {};
+    const symbolMarginTypes: NonNullable<AccountSnapshot["symbolMarginTypes"]> = {};
+    for (const position of remotePositions) {
+      const leverage = Number(position.leverage);
+      if (Number.isInteger(leverage) && leverage > 0) symbolLeverages[position.symbol] = leverage;
+      const marginType = position.marginType.toUpperCase();
+      if (marginType === "ISOLATED" || marginType === "CROSS") symbolMarginTypes[position.symbol] = marginType;
+    }
     return {
       equity,
       cash,
@@ -537,6 +599,11 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       todayPnl,
       todayPnlPct: daily.dayStartEquity > 0 ? todayPnl / daily.dayStartEquity * 100 : 0,
       dayStartEquity: daily.dayStartEquity,
+      dualSide: this.dependencies.accountMode?.dualSide ?? null,
+      multiAssets: this.dependencies.accountMode?.multiAssets ?? null,
+      symbolLeverages,
+      symbolMarginTypes,
+      valuationBasis: "EXCHANGE_ACCOUNT_TOTALS",
       valuationValid: true,
       valuationIssues: [],
       dailyLocked: daily.dailyLocked,
@@ -577,11 +644,14 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       if (compareDecimals(expectedQuantity, remote.positionAmt) !== 0) {
         throw new Error(`${position.symbol} 签名持仓数量与数据库不一致`);
       }
-      if (remote.isolatedWallet === undefined) throw new Error(`${position.symbol} 缺少签名 isolated margin`);
+      const marginType = remote.marginType.toUpperCase();
+      if (marginType !== "ISOLATED" && marginType !== "CROSS") throw new Error(`${position.symbol} marginType 无效`);
       const updated = await this.dependencies.store.updatePosition(position.id, {
         markPrice: remote.markPrice,
         liquidationPrice: remote.liquidationPrice,
-        isolatedWallet: remote.isolatedWallet,
+        isolatedWallet: signedPositionInitialMargin(remote),
+        marginType,
+        liquidationPriceSource: "EXCHANGE",
       });
       if (!updated) throw new Error(`${position.symbol} 持仓更新失败`);
       refreshed.push(updated);
@@ -621,6 +691,15 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       exitPending: position.exitPending ?? false,
       symbol: position.symbol,
       side: position.side,
+      positionSide: position.positionSide,
+      marginType: position.marginType,
+      entrySemantics: position.entrySemantics,
+      effectiveLeverage: position.effectiveLeverage ?? null,
+      maintenanceBracket: position.maintenanceBracket,
+      maintMarginRatio: position.maintMarginRatio,
+      cumMaintenance: position.cumMaintenance,
+      accountModeFingerprint: position.accountModeFingerprint,
+      compatibilityFrozen: position.compatibilityFrozen,
       qty: quantity,
       initialQty: Number(position.initialQuantity),
       entryPrice,
@@ -628,7 +707,8 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       stopPrice: Number(position.stopPrice),
       targetPrice,
       liquidationPrice: Number(position.liquidationPrice),
-      leverage: Number(position.leverage),
+      liquidationPriceSource: position.liquidationPriceSource,
+      leverage: position.effectiveLeverage ?? Number(position.leverage),
       margin,
       unrealizedPnl,
       unrealizedPct: valuationValid && margin > 0 ? unrealizedPnl / margin * 100 : 0,

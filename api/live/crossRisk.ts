@@ -14,8 +14,7 @@ import {
 
 export interface CrossRiskPosition {
   remote: BinancePositionRisk;
-  maintMarginRatio: DecimalString;
-  cumMaintenance: DecimalString;
+  brackets: BinanceLeverageBracket["brackets"];
 }
 
 export interface CrossRiskSnapshot {
@@ -54,6 +53,14 @@ export type CrossLiquidationBoundary =
 type Bracket = BinanceLeverageBracket["brackets"][number];
 
 const ROOT_DIVISION = { decimalPlaces: 30, roundingMode: "ROUND_HALF_UP" } as const;
+
+function bracketsAtNotional(brackets: Bracket[], notional: DecimalString): Bracket[] {
+  const sorted = [...brackets].sort((left, right) => compareDecimals(left.notionalFloor, right.notionalFloor)
+    || left.bracket - right.bracket);
+  return sorted.filter((bracket, index) => compareDecimals(notional, bracket.notionalFloor) >= 0
+    && (compareDecimals(notional, bracket.notionalCap) < 0
+      || (index === sorted.length - 1 && compareDecimals(notional, bracket.notionalCap) === 0)));
+}
 
 function maintenance(quantity: DecimalString, price: DecimalString, bracket: {
   maintMarginRatio: DecimalString;
@@ -128,8 +135,14 @@ export function estimateCrossLiquidationBoundary(
         ? subtractDecimals("0", signedQuantity) : signedQuantity;
       const markPrice = decimal(position.remote.markPrice);
       const positionEntry = decimal(position.remote.entryPrice);
-      const maintMarginRatio = decimal(position.maintMarginRatio);
-      const cumMaintenance = decimal(position.cumMaintenance);
+      const currentNotional = multiplyDecimals(absoluteQuantity, markPrice);
+      const currentBrackets = bracketsAtNotional(position.brackets, currentNotional);
+      if (currentBrackets.length !== 1) {
+        return reject(`${position.remote.symbol} 当前 cross 名义价值档位缺失或有歧义`);
+      }
+      const currentBracket = currentBrackets[0];
+      const maintMarginRatio = decimal(currentBracket.maintMarginRatio);
+      const cumMaintenance = decimal(currentBracket.cum);
       if (compareDecimals(markPrice, "0") <= 0 || compareDecimals(positionEntry, "0") < 0
         || compareDecimals(maintMarginRatio, "0") < 0 || compareDecimals(cumMaintenance, "0") < 0) {
         return reject(`${position.remote.symbol} cross 持仓维持保证金数据无效`);
@@ -171,9 +184,8 @@ export function estimateCrossLiquidationBoundary(
       }
     }
     const entryNotional = multiplyDecimals(quantity, entryPrice);
-    const entryBrackets = brackets.filter((bracket) => compareDecimals(entryNotional, bracket.notionalFloor) >= 0
-      && compareDecimals(entryNotional, bracket.notionalCap) <= 0);
-    if (entryBrackets.length === 0) return reject("候选成交名义价值没有对应维持保证金档位");
+    const entryBrackets = bracketsAtNotional(brackets, entryNotional);
+    if (entryBrackets.length !== 1) return reject("候选成交名义价值档位缺失或有歧义");
 
     const signedQuantity = candidate.side === "LONG" ? quantity : subtractDecimals("0", quantity);
     const crossEquity = addDecimals(walletBalance, unrealizedPnl);
@@ -190,6 +202,42 @@ export function estimateCrossLiquidationBoundary(
         return reject("候选成交后 cross 权益已不超过维持保证金");
       }
     }
+    const proveSolvencyPath = (rootPrice: DecimalString): string | null => {
+      const rootNotional = multiplyDecimals(quantity, rootPrice);
+      const lowerNotional = candidate.side === "LONG" ? rootNotional : entryNotional;
+      const upperNotional = candidate.side === "LONG" ? entryNotional : rootNotional;
+      const pathBrackets = [...brackets].sort((left, right) => compareDecimals(
+        left.notionalFloor, right.notionalFloor,
+      ) || left.bracket - right.bracket);
+      let coveredThrough = lowerNotional;
+      let previousCap: DecimalString | null = null;
+      for (const bracket of pathBrackets) {
+        if (compareDecimals(bracket.notionalCap, lowerNotional) < 0
+          || compareDecimals(bracket.notionalFloor, upperNotional) > 0) continue;
+        if (previousCap !== null && compareDecimals(bracket.notionalFloor, previousCap) < 0) {
+          return "入场到强平根的档位覆盖有歧义";
+        }
+        if (compareDecimals(bracket.notionalFloor, coveredThrough) > 0) {
+          return "入场到强平根的档位覆盖存在缺口";
+        }
+        const segmentLower = compareDecimals(bracket.notionalFloor, lowerNotional) > 0
+          ? bracket.notionalFloor : lowerNotional;
+        const segmentUpper = compareDecimals(bracket.notionalCap, upperNotional) < 0
+          ? bracket.notionalCap : upperNotional;
+        for (const endpointNotional of [segmentLower, segmentUpper]) {
+          if (compareDecimals(endpointNotional, rootNotional) === 0) continue;
+          const price = divideDecimals(endpointNotional, quantity, ROOT_DIVISION);
+          if (compareDecimals(valueAt(price, bracket), "0") <= 0) {
+            return "入场到强平根之间存在更早强平或无偿付能力区间";
+          }
+        }
+        previousCap = bracket.notionalCap;
+        if (compareDecimals(bracket.notionalCap, coveredThrough) > 0) coveredThrough = bracket.notionalCap;
+        if (compareDecimals(coveredThrough, upperNotional) >= 0) break;
+      }
+      return compareDecimals(coveredThrough, upperNotional) < 0
+        ? "入场到强平根的档位覆盖存在缺口" : null;
+    };
 
     const roots: Array<{ price: DecimalString; bracket: number }> = [];
     for (const bracket of brackets) {
@@ -227,6 +275,8 @@ export function estimateCrossLiquidationBoundary(
         return (candidate.side === "LONG" ? comparison > 0 : comparison < 0) ? current : selected;
       });
       const bracket = brackets.find((candidateBracket) => candidateBracket.bracket === root.bracket)!;
+      const pathIssue = proveSolvencyPath(root.price);
+      if (pathIssue) return reject(pathIssue);
       const boundary = candidate.side === "LONG"
         ? ceilToStep(root.price, tickSize) : floorToStep(root.price, tickSize);
       if (!stopPrecedes(stopPrice, boundary, candidate.side)) {

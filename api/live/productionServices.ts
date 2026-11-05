@@ -6,7 +6,11 @@ import { getSettings as readSettings, settingsFromRow } from "../queries/trading
 import { binance } from "../services/binance";
 import { alignedCorrelation } from "../services/risk";
 import { log } from "../lib/logger";
-import { BinanceSignedClient, type BinanceAccountResponse } from "./binanceSigned";
+import {
+  BinanceSignedClient,
+  type BinanceAccountResponse,
+  type BinanceLeverageBracket,
+} from "./binanceSigned";
 import { estimateCrossLiquidationBoundary, type CrossRiskPosition } from "./crossRisk";
 import { binanceCredentialStore } from "../credentials/binanceCredentialStore";
 import {
@@ -76,7 +80,7 @@ export interface ProductionServicesOptions {
   reconciliationIntervalMs?: number;
   pauseAutoTrade?: () => Promise<void>;
   accountMode?: OrderWireAccountMode;
-  crossCollateral?: { haircut: DecimalString; observedAt: number };
+  readCrossCollateral?: (observedAt: number) => Promise<{ haircut: DecimalString; observedAt: number }>;
 }
 
 interface FreshPreflight {
@@ -295,7 +299,7 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       }
       let existingExposure: DecimalString = "0";
       const portfolioPositions: Array<{ remote: (typeof activeRemote)[number]; stopPrice: DecimalString }> = [];
-      const crossPositions: CrossRiskPosition[] = [];
+      const crossPositions: Array<{ remote: (typeof activeRemote)[number] }> = [];
       for (const remote of activeRemote) {
         const remotePositionSide = remote.positionSide === "LONG" || remote.positionSide === "SHORT"
           ? remote.positionSide
@@ -314,12 +318,35 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
           ? subtractDecimals("0", remote.positionAmt) : remote.positionAmt;
         existingExposure = addDecimals(existingExposure, multiplyDecimals(signedQuantity, remote.markPrice));
         portfolioPositions.push({ remote, stopPrice: intentStop.stopPrice });
-        if (remote.marginType.toLowerCase() === "cross") {
-          crossPositions.push({
-            remote,
-            maintMarginRatio: local.maintMarginRatio,
-            cumMaintenance: local.cumMaintenance,
-          });
+        if (remote.marginType.toLowerCase() === "cross") crossPositions.push({ remote });
+      }
+      const crossSymbols = [...new Set(crossPositions.map((position) => position.remote.symbol))];
+      const firstExistingBrackets: BinanceLeverageBracket[][] = [];
+      const currentCrossPositions: CrossRiskPosition[] = [];
+      if (marginType === "CROSS" && crossSymbols.length > 0) {
+        try {
+          const payloads = await Promise.all(crossSymbols.map((symbol) => client.leverageBracket(symbol)));
+          for (const [index, symbol] of crossSymbols.entries()) {
+            const payload = payloads[index];
+            const matches = payload.filter((entry) => entry.symbol === symbol);
+            if (matches.length !== 1) {
+              return { approved: false, reason: `${symbol} 当前 cross bracket payload 缺失或有歧义` };
+            }
+            firstExistingBrackets.push(payload);
+          }
+          for (const position of crossPositions) {
+            const index = crossSymbols.indexOf(position.remote.symbol);
+            const payload = firstExistingBrackets[index];
+            currentCrossPositions.push({
+              remote: position.remote,
+              brackets: payload.find((entry) => entry.symbol === position.remote.symbol)!.brackets,
+            });
+          }
+        } catch (error) {
+          return {
+            approved: false,
+            reason: `读取 cross 当前 brackets 失败：${error instanceof Error ? error.message : String(error)}`,
+          };
         }
       }
       const actualLeverage = Number(cached.result.positionRisk.leverage);
@@ -386,12 +413,20 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       }
       if (marginType === "CROSS") {
         try {
+          const multiAssets = options.accountMode?.multiAssets === true;
+          let firstCollateral: { haircut: DecimalString; observedAt: number } | undefined;
+          if (multiAssets) {
+            if (!options.readCrossCollateral) {
+              return { approved: false, reason: "多资产 cross 缺少可重复读取的 collateral haircut" };
+            }
+            firstCollateral = await options.readCrossCollateral(cached.checkedAt);
+          }
           const boundary = estimateCrossLiquidationBoundary({
-            ...crossAccountValuation(cached.account, options.accountMode?.multiAssets === true),
-            positions: crossPositions,
-            multiAssets: options.accountMode?.multiAssets === true,
+            ...crossAccountValuation(cached.account, multiAssets),
+            positions: currentCrossPositions,
+            multiAssets,
             observedAt: cached.checkedAt,
-            collateral: options.crossCollateral,
+            collateral: firstCollateral,
             relatedPendingIntents: pendingSymbols.length,
           }, {
             symbol: opportunity.symbol,
@@ -404,13 +439,25 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
           });
           if (!boundary.ok) return { approved: false, reason: boundary.reason };
           approvedLiquidationPrice = boundary.liquidationPrice ?? "0";
-          const [secondAccount, secondPositions, secondOrders] = await Promise.all([
-            client.account(), client.positionRisk(), client.openOrders(),
+          const [secondAccount, secondPositions, secondOrders, secondBrackets, secondCollateral] = await Promise.all([
+            client.account(),
+            client.positionRisk(),
+            client.openOrders(),
+            Promise.all([opportunity.symbol, ...crossSymbols].map((symbol) => client.leverageBracket(symbol))),
+            multiAssets ? options.readCrossCollateral!(cached.checkedAt) : Promise.resolve(undefined),
           ]);
           if (JSON.stringify(secondAccount) !== JSON.stringify(cached.account)
             || JSON.stringify(secondPositions) !== JSON.stringify(cached.result.positions)
             || JSON.stringify(secondOrders) !== JSON.stringify(cached.result.orders)) {
             return { approved: false, reason: "Cross 二次快照与预检账户、持仓或活动单不一致" };
+          }
+          const firstBrackets = [cached.result.leverageBrackets, ...firstExistingBrackets];
+          if (secondBrackets.some((payload, index) => JSON.stringify(payload) !== JSON.stringify(firstBrackets[index]))) {
+            return { approved: false, reason: "Cross 二次快照 bracket payload 发生变化" };
+          }
+          if (multiAssets && (!secondCollateral || secondCollateral.observedAt !== cached.checkedAt
+            || JSON.stringify(secondCollateral) !== JSON.stringify(firstCollateral))) {
+            return { approved: false, reason: "Cross 二次 collateral haircut 无法刷新或发生变化" };
           }
         } catch (error) {
           return {

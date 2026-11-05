@@ -55,8 +55,7 @@ function position(
       marginType: "cross",
       ...remote,
     },
-    maintMarginRatio,
-    cumMaintenance,
+    brackets: [{ ...BRACKETS[0], maintMarginRatio, cum: cumMaintenance }],
   };
 }
 
@@ -95,6 +94,42 @@ describe("cross portfolio liquidation boundary", () => {
     }), candidate({ stopPrice: "82" }));
 
     expect(result).toMatchObject({ ok: true, liquidationPrice: "81.82" });
+  });
+
+  it("selects an existing leg bracket from its current mark notional after a transition", () => {
+    const existing = position({ symbol: "ETHUSDT", positionAmt: "1", entryPrice: "100", markPrice: "200" });
+    const result = estimateCrossLiquidationBoundary(snapshot({
+      crossWalletBalance: "0",
+      crossUnrealizedPnl: "100",
+      positions: [{
+        ...existing,
+        brackets: [
+          { ...BRACKETS[0], notionalCap: "150" },
+          {
+            bracket: 2, initialLeverage: 50, notionalFloor: "150", notionalCap: "1000",
+            maintMarginRatio: "0.02", cum: "1.5",
+          },
+        ],
+      } as CrossRiskPosition],
+    }), candidate({ stopPrice: "3" }));
+
+    expect(result).toMatchObject({ ok: true, liquidationPrice: "2.53" });
+  });
+
+  it("rejects a gap between entry and a discovered root instead of skipping the uncovered interval", () => {
+    const result = estimateCrossLiquidationBoundary(snapshot({ crossWalletBalance: "520" }), candidate({
+      quantity: "10",
+      stopPrice: "49",
+      brackets: [
+        { ...BRACKETS[0], notionalCap: "500" },
+        {
+          bracket: 2, initialLeverage: 50, notionalFloor: "600", notionalCap: "5000",
+          maintMarginRatio: "0.02", cum: "5",
+        },
+      ],
+    }));
+
+    expect(result).toMatchObject({ ok: false, reason: expect.stringMatching(/覆盖|gap/) });
   });
 
   it("re-solves in the post-fill maintenance bracket and applies its cum", () => {

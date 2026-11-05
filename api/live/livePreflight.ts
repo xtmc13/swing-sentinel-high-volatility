@@ -47,6 +47,7 @@ export type LivePreflightResult =
       ok: true;
       filters: LiveContractFilters;
       brackets: BinanceLeverageBracket["brackets"];
+      leverageBrackets: BinanceLeverageBracket[];
       positionRisk: BinancePositionRisk;
       positions: BinancePositionRisk[];
       orders: BinanceOpenOrder[];
@@ -168,6 +169,7 @@ export async function runLivePreflight(input: LivePreflightInput): Promise<LiveP
       minNotional: filters.minNotional,
     },
     brackets,
+    leverageBrackets,
     positionRisk,
     positions,
     orders,

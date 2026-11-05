@@ -461,13 +461,25 @@ describe("production service composition with fake exchange", () => {
       symbol: "BTCUSDT", positionSide: "SHORT", positionAmt: "0", entryPrice: "0", markPrice: "100",
       liquidationPrice: "0", leverage: "150", marginType: "cross",
     }]);
-    vi.spyOn(client, "leverageBracket").mockResolvedValue([{
+    let bracketResponse = [{
       symbol: "BTCUSDT",
       brackets: [{
         bracket: 1, initialLeverage: 150, notionalCap: "50000", notionalFloor: "0",
         maintMarginRatio: "0.005", cum: "0",
       }],
-    }]);
+    }];
+    let changeAfterNextBracketRead = false;
+    vi.spyOn(client, "leverageBracket").mockImplementation(async () => {
+      const current = bracketResponse;
+      if (changeAfterNextBracketRead) {
+        changeAfterNextBracketRead = false;
+        bracketResponse = [{
+          ...current[0],
+          brackets: [{ ...current[0].brackets[0], maintMarginRatio: "0.006" }],
+        }];
+      }
+      return current;
+    });
     let account = {
       assets: [
         { asset: "USDT", walletBalance: "600", availableBalance: "500" },
@@ -495,6 +507,8 @@ describe("production service composition with fake exchange", () => {
       side: request.side, positionSide: request.positionSide, type: request.type,
     }));
     const store = finalGateDatabase({ leverageMode: "ACCOUNT_CONFIGURED", fixedLeverage: 20 });
+    let collateralHaircut = "1";
+    let changeAfterNextCollateralRead = false;
     const services = createBinanceProductionLiveServices({
       env: {
         LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key",
@@ -512,7 +526,14 @@ describe("production service composition with fake exchange", () => {
       socketFactory: () => socket,
       now,
       accountMode: { dualSide: true, multiAssets: true, fingerprint: ACCOUNT_MODE.fingerprint },
-      crossCollateral: { haircut: "1", observedAt: now() },
+      readCrossCollateral: async (observedAt: number) => {
+        const current = collateralHaircut;
+        if (changeAfterNextCollateralRead) {
+          changeAfterNextCollateralRead = false;
+          collateralHaircut = "0.5";
+        }
+        return { haircut: current, observedAt };
+      },
     });
     const signal: Opportunity = {
       id: "multi-asset-opportunity", signalId: "multi-asset-signal", strategyType: "SWING",
@@ -565,6 +586,30 @@ describe("production service composition with fake exchange", () => {
       });
       expect(changed.ok).toBe(false);
       expect(changed.reason).toMatch(/二次快照|snapshot/);
+      expect(store.insertedCount()).toBe(0);
+      expect(placeOrder).toHaveBeenCalledTimes(1);
+
+      store.clearIntents();
+      changeAfterNextBracketRead = true;
+      const changedBracket = await services.adapter.open({
+        ...signal,
+        id: "cross-changed-bracket-opportunity",
+        signalId: "cross-changed-bracket-signal",
+      });
+      expect(changedBracket.ok).toBe(false);
+      expect(changedBracket.reason).toMatch(/bracket|档位/);
+      expect(store.insertedCount()).toBe(0);
+      expect(placeOrder).toHaveBeenCalledTimes(1);
+
+      store.clearIntents();
+      changeAfterNextCollateralRead = true;
+      const changedCollateral = await services.adapter.open({
+        ...signal,
+        id: "cross-changed-collateral-opportunity",
+        signalId: "cross-changed-collateral-signal",
+      });
+      expect(changedCollateral.ok).toBe(false);
+      expect(changedCollateral.reason).toMatch(/collateral|折算/);
       expect(store.insertedCount()).toBe(0);
       expect(placeOrder).toHaveBeenCalledTimes(1);
     } finally {

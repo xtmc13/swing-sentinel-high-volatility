@@ -843,14 +843,15 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
     await createApprovedIntent(database, input);
     const seed = {
       id, symbol: input.symbol, side: input.side, positionSide: input.positionSide,
-      entrySemantics: input.entrySemantics, accountModeFingerprint: fingerprint,
+      entrySemantics: input.entrySemantics, accountModeFingerprint: fingerprint, compatibilityFrozen: false,
       stopPrice: input.stopPrice, liquidationPrice: input.liquidationPrice, leverage: String(input.leverage),
       maintenanceBracket: 1, maintMarginRatio: "0.01", cumMaintenance: "0",
     };
     await store.insertOrder({
       id: "ordering-entry", intentId: id, clientOrderId: "ordering-entry", exchangeOrderId: "990",
       symbol: input.symbol, side: input.side, positionSide: "LONG", entrySemantics: "ENTRY",
-      accountModeFingerprint: fingerprint, type: "LIMIT", status: "NEW", price: "100", stopPrice: null,
+      accountModeFingerprint: fingerprint, compatibilityFrozen: false,
+      type: "LIMIT", status: "NEW", price: "100", stopPrice: null,
       originalQuantity: "2", executedQuantity: "0", averagePrice: "0", commission: "0",
       reduceOnly: false, createdAt: NOW,
     });
@@ -867,7 +868,8 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
       await store.insertOrder({
         id: close.rowId, intentId: id, clientOrderId: `close-${id}${close.suffix}`,
         exchangeOrderId: close.exchangeOrderId, symbol: input.symbol, side: input.side, positionSide: "LONG",
-        entrySemantics: "REDUCE", accountModeFingerprint: fingerprint, type: "MARKET", status: close.status,
+        entrySemantics: "REDUCE", accountModeFingerprint: fingerprint, compatibilityFrozen: false,
+        type: "MARKET", status: close.status,
         price: "0", stopPrice: null, originalQuantity: "2", executedQuantity: "0", averagePrice: "0",
         commission: "0", reduceOnly: true, createdAt: NOW + 1,
       });

@@ -582,7 +582,9 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         fixedLeverage: settings.fixedLeverage,
         reconciliationIssues: issues,
         ownedClientOrderIds: ownedOrders.map((order) => order.clientOrderId),
-        managedPositionSymbols: managedPositions.map((position) => position.symbol),
+        managedPositions: managedPositions.map((position) => ({
+          symbol: position.symbol, positionSide: position.positionSide,
+        })),
       })));
       const reasons = results.flatMap((result) => result.ok ? [] : result.reasons);
       const market = options.market ?? binance;

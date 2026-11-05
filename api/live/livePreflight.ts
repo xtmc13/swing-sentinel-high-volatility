@@ -31,7 +31,7 @@ export interface LivePreflightInput {
   fixedLeverage: number;
   reconciliationIssues: LiveReconciliationIssue[];
   ownedClientOrderIds?: string[];
-  managedPositionSymbols?: string[];
+  managedPositions?: { symbol: string; positionSide?: "LONG" | "SHORT" | null }[];
 }
 
 export interface LiveContractFilters {
@@ -128,11 +128,13 @@ export async function runLivePreflight(input: LivePreflightInput): Promise<LiveP
     }
   }
 
-  const managedSymbols = new Set(input.managedPositionSymbols ?? []);
+  const managedPositions = input.managedPositions ?? [];
   const externalPositions = positions.filter((position) => compareDecimals(position.positionAmt, "0") !== 0
-    && !managedSymbols.has(position.symbol));
+    && !managedPositions.some((managed) => managed.symbol === position.symbol
+      && (positionSide.dualSidePosition ? managed.positionSide : "BOTH") === position.positionSide));
   if (externalPositions.length > 0) {
-    reasons.push(`存在未知外部持仓：${externalPositions.map((position) => position.symbol).join(",")}`);
+    reasons.push(`存在未知外部持仓：${externalPositions.map((position) =>
+      `${position.symbol} ${position.positionSide ?? "UNKNOWN"}`).join(",")}`);
   }
   const ownedOrderIds = new Set(input.ownedClientOrderIds ?? []);
   const externalOrders = orders.filter((order) => !ownedOrderIds.has(order.clientOrderId));

@@ -226,6 +226,22 @@ describe("主网只读预检", () => {
     if (!result.ok) expect(result.reasons.join(" ")).toMatch(/外部持仓|人工|外部订单/);
   });
 
+  it("dual 模式同 symbol 另一方向的外部持仓不被本系统持仓掩盖", async () => {
+    const result = await runLivePreflight(input({
+      managedPositions: [{ symbol: "BTCUSDT", positionSide: "LONG" }],
+      client: client({
+        positionSide: { dualSidePosition: true },
+        positions: [
+          { ...isolatedPosition, positionSide: "LONG", positionAmt: "1", entryPrice: "100" },
+          { ...isolatedPosition, positionSide: "SHORT", positionAmt: "-1", entryPrice: "100" },
+        ],
+      }),
+    }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reasons.join(" ")).toMatch(/外部持仓.*BTCUSDT SHORT/);
+  });
+
   it("预检读取全账户持仓而不是只读取候选合约", async () => {
     const accountWideClient = client();
     accountWideClient.positionRisk = async (symbol?: string) => symbol

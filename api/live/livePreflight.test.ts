@@ -154,6 +154,22 @@ describe("主网只读预检", () => {
         { ...isolatedPosition, positionSide: "SHORT" as const },
       ],
     },
+    {
+      name: "包含额外 BOTH",
+      rows: [
+        { ...isolatedPosition, positionSide: "LONG" as const },
+        { ...isolatedPosition, positionSide: "SHORT" as const },
+        { ...isolatedPosition, positionSide: "BOTH" as const },
+      ],
+    },
+    {
+      name: "包含 undefined positionSide",
+      rows: [
+        { ...isolatedPosition, positionSide: "LONG" as const },
+        { ...isolatedPosition, positionSide: "SHORT" as const },
+        { ...isolatedPosition, positionSide: undefined },
+      ],
+    },
   ])("dual 目标合约$name时失败关闭", async ({ rows }) => {
     const result = await runLivePreflight(input({
       client: client({

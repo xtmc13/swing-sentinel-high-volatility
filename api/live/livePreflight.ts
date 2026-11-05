@@ -116,7 +116,7 @@ export async function runLivePreflight(input: LivePreflightInput): Promise<LiveP
     if (positionSide.dualSidePosition) {
       const longLegs = targetPositions.filter((candidate) => candidate.positionSide === "LONG");
       const shortLegs = targetPositions.filter((candidate) => candidate.positionSide === "SHORT");
-      if (longLegs.length !== 1 || shortLegs.length !== 1) {
+      if (targetPositions.length !== 2 || longLegs.length !== 1 || shortLegs.length !== 1) {
         reasons.push("双向模式目标合约必须各有唯一 LONG 和 SHORT positionSide 行");
       }
     }

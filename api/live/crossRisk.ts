@@ -54,12 +54,13 @@ type Bracket = BinanceLeverageBracket["brackets"][number];
 
 const ROOT_DIVISION = { decimalPlaces: 30, roundingMode: "ROUND_HALF_UP" } as const;
 
-function bracketsAtNotional(brackets: Bracket[], notional: DecimalString): Bracket[] {
+export function selectUniqueCrossBracket(brackets: Bracket[], notional: DecimalString): Bracket | null {
   const sorted = [...brackets].sort((left, right) => compareDecimals(left.notionalFloor, right.notionalFloor)
     || left.bracket - right.bracket);
-  return sorted.filter((bracket, index) => compareDecimals(notional, bracket.notionalFloor) >= 0
+  const matches = sorted.filter((bracket, index) => compareDecimals(notional, bracket.notionalFloor) >= 0
     && (compareDecimals(notional, bracket.notionalCap) < 0
       || (index === sorted.length - 1 && compareDecimals(notional, bracket.notionalCap) === 0)));
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function maintenance(quantity: DecimalString, price: DecimalString, bracket: {
@@ -136,11 +137,10 @@ export function estimateCrossLiquidationBoundary(
       const markPrice = decimal(position.remote.markPrice);
       const positionEntry = decimal(position.remote.entryPrice);
       const currentNotional = multiplyDecimals(absoluteQuantity, markPrice);
-      const currentBrackets = bracketsAtNotional(position.brackets, currentNotional);
-      if (currentBrackets.length !== 1) {
+      const currentBracket = selectUniqueCrossBracket(position.brackets, currentNotional);
+      if (!currentBracket) {
         return reject(`${position.remote.symbol} 当前 cross 名义价值档位缺失或有歧义`);
       }
-      const currentBracket = currentBrackets[0];
       const maintMarginRatio = decimal(currentBracket.maintMarginRatio);
       const cumMaintenance = decimal(currentBracket.cum);
       if (compareDecimals(markPrice, "0") <= 0 || compareDecimals(positionEntry, "0") < 0
@@ -184,8 +184,9 @@ export function estimateCrossLiquidationBoundary(
       }
     }
     const entryNotional = multiplyDecimals(quantity, entryPrice);
-    const entryBrackets = bracketsAtNotional(brackets, entryNotional);
-    if (entryBrackets.length !== 1) return reject("候选成交名义价值档位缺失或有歧义");
+    const entryBracket = selectUniqueCrossBracket(brackets, entryNotional);
+    if (!entryBracket) return reject("候选成交名义价值档位缺失或有歧义");
+    const entryBrackets = [entryBracket];
 
     const signedQuantity = candidate.side === "LONG" ? quantity : subtractDecimals("0", quantity);
     const crossEquity = addDecimals(walletBalance, unrealizedPnl);

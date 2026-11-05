@@ -11,7 +11,11 @@ import {
   type BinanceAccountResponse,
   type BinanceLeverageBracket,
 } from "./binanceSigned";
-import { estimateCrossLiquidationBoundary, type CrossRiskPosition } from "./crossRisk";
+import {
+  estimateCrossLiquidationBoundary,
+  selectUniqueCrossBracket,
+  type CrossRiskPosition,
+} from "./crossRisk";
 import { binanceCredentialStore } from "../credentials/binanceCredentialStore";
 import {
   createLiveAdapter,
@@ -404,10 +408,7 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
           decimalPlaces: 30, roundingMode: "ROUND_UP",
         }));
       }
-      const approvedBracket = [...cached.result.brackets]
-        .sort((left, right) => left.bracket - right.bracket)
-        .find((bracket) => compareDecimals(notional, bracket.notionalFloor) >= 0
-          && compareDecimals(notional, bracket.notionalCap) <= 0);
+      const approvedBracket = selectUniqueCrossBracket(cached.result.brackets, notional);
       if (!approvedBracket || risk.effectiveLeverage > approvedBracket.initialLeverage) {
         return { approved: false, reason: "最终批准名义价值没有可用杠杆档位" };
       }

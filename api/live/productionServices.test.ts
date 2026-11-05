@@ -464,8 +464,11 @@ describe("production service composition with fake exchange", () => {
     let bracketResponse = [{
       symbol: "BTCUSDT",
       brackets: [{
-        bracket: 1, initialLeverage: 150, notionalCap: "50000", notionalFloor: "0",
+        bracket: 1, initialLeverage: 150, notionalCap: "1458.7", notionalFloor: "0",
         maintMarginRatio: "0.005", cum: "0",
+      }, {
+        bracket: 2, initialLeverage: 150, notionalCap: "50000", notionalFloor: "1458.7",
+        maintMarginRatio: "0.006", cum: "1.4587",
       }],
     }];
     let changeAfterNextBracketRead = false;
@@ -475,7 +478,8 @@ describe("production service composition with fake exchange", () => {
         changeAfterNextBracketRead = false;
         bracketResponse = [{
           ...current[0],
-          brackets: [{ ...current[0].brackets[0], maintMarginRatio: "0.006" }],
+          brackets: current[0].brackets.map((bracket, index) => index === 0
+            ? { ...bracket, maintMarginRatio: "0.0055" } : bracket),
         }];
       }
       return current;
@@ -554,15 +558,15 @@ describe("production service composition with fake exchange", () => {
         effectiveLeverage: 150,
         leverage: 150,
         marginType: "CROSS",
-        maintenanceBracket: 1,
-        maintMarginRatio: "0.005",
-        cumMaintenance: "0",
+        maintenanceBracket: 2,
+        maintMarginRatio: "0.006",
+        cumMaintenance: "1.4587",
         reservedMargin: "9.724666666666666666666666666666",
         liquidationPriceSource: "PRETRADE_ESTIMATE",
         compatibilityFrozen: false,
       });
       expect(store.inserted()?.liquidationPrice).not.toBe(estimateFlatLiquidationPrice({
-        side: "LONG", entryPrice: "100", leverage: 150, maintMarginRatio: "0.005",
+        side: "LONG", entryPrice: "100", leverage: 150, maintMarginRatio: "0.006",
       }));
       expect(placeOrder).toHaveBeenCalledWith(expect.objectContaining({ positionSide: "LONG" }));
 
@@ -610,6 +614,22 @@ describe("production service composition with fake exchange", () => {
       });
       expect(changedCollateral.ok).toBe(false);
       expect(changedCollateral.reason).toMatch(/collateral|折算/);
+      expect(store.insertedCount()).toBe(0);
+      expect(placeOrder).toHaveBeenCalledTimes(1);
+
+      store.clearIntents();
+      bracketResponse = [{
+        ...bracketResponse[0],
+        brackets: bracketResponse[0].brackets.map((bracket) => bracket.bracket === 2
+          ? { ...bracket, initialLeverage: 125 } : bracket),
+      }];
+      const overUpperBracketLeverage = await services.adapter.open({
+        ...signal,
+        id: "cross-seam-leverage-opportunity",
+        signalId: "cross-seam-leverage-signal",
+      });
+      expect(overUpperBracketLeverage.ok).toBe(false);
+      expect(overUpperBracketLeverage.reason).toMatch(/杠杆|leverage/);
       expect(store.insertedCount()).toBe(0);
       expect(placeOrder).toHaveBeenCalledTimes(1);
     } finally {

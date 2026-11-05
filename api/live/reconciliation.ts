@@ -678,7 +678,9 @@ export class ReconciliationService {
     for (const position of localPositions) {
       add(position.id, position.symbol, position.accountModeFingerprint, position.compatibilityFrozen === true);
     }
-    for (const intent of unsettledIntents) add(intent.id, intent.symbol);
+    for (const intent of unsettledIntents) {
+      if (!active.has(intent.id)) add(intent.id, intent.symbol);
+    }
 
     const configured = this.options.accountMode;
     const invalidConfigured = !configured || !ACCOUNT_FINGERPRINT.test(configured.fingerprint)

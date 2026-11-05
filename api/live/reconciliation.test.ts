@@ -878,6 +878,19 @@ describe("account compatibility reconciliation", () => {
     expect(await h.orders.getOrder(working.clientOrderId)).toMatchObject({ compatibilityFrozen: true });
   });
 
+  it("does not apply legacy missing-fingerprint handling to a valid active order listed as unsettled", async () => {
+    const h = await harness({
+      statuses: ["NEW"],
+      unsettledIntents: [{ id: "intent-1", symbol: "BTCUSDT", status: "NEW" }],
+    });
+
+    const result = await h.service.reconcile();
+
+    expect(result.ok).toBe(true);
+    expect((await h.store.listIssues()).some((issue) => issue.category === "ACCOUNT_MODE_MISMATCH")).toBe(false);
+    expect((await h.orders.getOrder("client-1"))?.compatibilityFrozen).not.toBe(true);
+  });
+
   it("marks an orphaned legacy unsettled intent as fingerprint-incompatible", async () => {
     const h = await harness({
       unsettledIntents: [{ id: "legacy-orphan", symbol: "BTCUSDT", status: "SUBMITTING" }],

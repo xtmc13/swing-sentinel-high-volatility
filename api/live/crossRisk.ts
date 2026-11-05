@@ -117,7 +117,8 @@ export function estimateCrossLiquidationBoundary(
       if (!snapshot.collateral) return reject("多资产 cross 缺少可验证的抵押品折算率");
       const haircut = decimal(snapshot.collateral.haircut);
       if (!Number.isSafeInteger(snapshot.collateral.observedAt)
-        || snapshot.collateral.observedAt !== snapshot.observedAt
+        || snapshot.collateral.observedAt < snapshot.observedAt
+        || snapshot.collateral.observedAt - snapshot.observedAt > 10_000
         || compareDecimals(haircut, "0") <= 0 || compareDecimals(haircut, "1") > 0) {
         return reject("多资产 cross 抵押品折算率缺失、陈旧或无效");
       }

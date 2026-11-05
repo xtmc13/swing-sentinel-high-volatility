@@ -48,6 +48,11 @@ describe("交易设置持久化契约", () => {
       .toBe("ACCOUNT_CONFIGURED");
   });
 
+  it("FIXED 接受 150x，由真实账户和最终 bracket 决定上限", () => {
+    expect(settingsInput.parse({ ...DEFAULT_SETTINGS, leverageMode: "FIXED", fixedLeverage: 150 }).fixedLeverage)
+      .toBe(150);
+  });
+
   it("PAPER 新默认值显式保留 SYMBOL_MAX", () => {
     expect(DEFAULT_SETTINGS.executionMode).toBe("PAPER");
     expect(DEFAULT_SETTINGS.leverageMode).toBe("SYMBOL_MAX");

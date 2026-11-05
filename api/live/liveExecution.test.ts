@@ -586,6 +586,7 @@ describe("mainnet live execution adapter", () => {
       executedQty: "0",
       status: "CANCELED",
       side: "BUY",
+      positionSide: "BOTH",
       type: "LIMIT",
     });
 
@@ -611,7 +612,7 @@ describe("mainnet live execution adapter", () => {
     const entryClientId = `${h.created[0].id}-entry`;
     h.gateway.queryOrder = async () => ({
       symbol: "BTCUSDT", orderId: 500, clientOrderId: entryClientId, price: "100", origQty: "2",
-      executedQty: "0", status: "CANCELED", side: "BUY", type: "LIMIT",
+      executedQty: "0", status: "CANCELED", side: "BUY", positionSide: "BOTH", type: "LIMIT",
     });
     h.store.pauseExecution();
 
@@ -626,7 +627,7 @@ describe("mainnet live execution adapter", () => {
     const entryClientId = `${h.created[0].id}-entry`;
     h.gateway.queryOrder = async () => ({
       symbol: "BTCUSDT", orderId: 500, clientOrderId: entryClientId, price: "100", origQty: "2",
-      executedQty: "0", status: "CANCELED", side: "BUY", type: "LIMIT",
+      executedQty: "0", status: "CANCELED", side: "BUY", positionSide: "BOTH", type: "LIMIT",
     });
     h.assertCurrentAdmission.mockRejectedValue(new Error("preflight stale"));
 

@@ -231,6 +231,7 @@ describe("Binance signed mainnet client", () => {
     { name: "leverageBracket", invoke: (client: BinanceSignedClient) => client.leverageBracket("BTCUSDT"), path: "/fapi/v1/leverageBracket", query: { symbol: "BTCUSDT" } },
     { name: "positionSide", invoke: (client: BinanceSignedClient) => client.positionSide(), path: "/fapi/v1/positionSide/dual", query: {} },
     { name: "multiAssetsMargin", invoke: (client: BinanceSignedClient) => client.multiAssetsMargin(), path: "/fapi/v1/multiAssetsMargin", query: {} },
+    { name: "collateralRate", invoke: (client: BinanceSignedClient) => client.collateralRate(), path: "/fapi/v1/collateralRate", query: {} },
     { name: "openOrders", invoke: (client: BinanceSignedClient) => client.openOrders("BTCUSDT"), path: "/fapi/v1/openOrders", query: { symbol: "BTCUSDT" } },
     {
       name: "userTrades",
@@ -272,6 +273,19 @@ describe("Binance signed mainnet client", () => {
     expect(url.searchParams.get("symbol")).toBe("BTCUSDT");
     expect(url.searchParams.has("signature")).toBe(false);
     expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: "GET", headers: undefined });
+  });
+
+  it("reads collateral mark prices through the unsigned premiumIndex endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ symbol: "BNBUSDT", markPrice: "400" }));
+    const client = clientWith(fetchMock);
+
+    await client.premiumIndex("BNBUSDT");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const url = requestUrl(fetchMock);
+    expect(url.pathname).toBe("/fapi/v1/premiumIndex");
+    expect(url.searchParams.get("symbol")).toBe("BNBUSDT");
+    expect(url.searchParams.has("signature")).toBe(false);
   });
 
   it("preserves trade and income decimal strings without numeric conversion", async () => {

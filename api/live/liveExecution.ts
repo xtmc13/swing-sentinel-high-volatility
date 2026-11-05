@@ -74,6 +74,11 @@ export interface MainnetLiveExecutionDependencies {
     tx: LiveTransaction,
     context: LiveFinalGateContext,
   ) => LiveFinalGateResult | Promise<LiveFinalGateResult>;
+  assertOrderAdmission?: (
+    order: LiveOrder,
+    approval: Extract<LiveFinalGateResult, { approved: true }>,
+  ) => Promise<void>;
+  assertFreshOrderAdmission?: (order: LiveOrder) => Promise<void>;
   pauseAutoTrade: () => Promise<void>;
   alert?: (message: string) => unknown;
   now?: () => number;
@@ -234,6 +239,7 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
         alert: dependencies.alert,
         id: this.id,
         assertCurrentAdmission: dependencies.assertCurrentAdmission,
+        assertOrderAdmission: dependencies.assertFreshOrderAdmission,
         accountMode: dependencies.accountMode,
       },
     );
@@ -331,7 +337,13 @@ export class MainnetLiveExecutionAdapter implements ExecutionAdapter {
       admissionGeneration: created.emergencyGeneration,
       createdAt: this.now(),
     });
-    const submitted = await this.machine.submit(clientOrderId, created.emergencyGeneration);
+    const submitted = await this.machine.submit(
+      clientOrderId,
+      created.emergencyGeneration,
+      this.dependencies.assertOrderAdmission
+        ? (order) => this.dependencies.assertOrderAdmission!(order, approval)
+        : undefined,
+    );
     if (submitted.status === "CANCEL" && submitted.executedQuantity === "0") {
       return { ok: false, reason: "IOC 已终止且没有实际成交" };
     }

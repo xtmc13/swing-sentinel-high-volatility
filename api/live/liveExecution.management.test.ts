@@ -41,12 +41,18 @@ function harness(
     },
     cancelOrder: async (request: { symbol: string; origClientOrderId?: string }) => ({
       symbol: request.symbol, orderId: 999, clientOrderId: request.origClientOrderId ?? "order", price: "95",
-      origQty: "1", executedQty: "0", status: "CANCELED", side: "SELL", type: "STOP_MARKET", reduceOnly: true,
+      origQty: "1", executedQty: "0", status: "CANCELED", side: "SELL",
+      positionSide: remote.positionSide, type: "STOP_MARKET", reduceOnly: true,
     }),
-    queryOrder: async (request: { symbol: string; origClientOrderId?: string }) => ({
-      symbol: request.symbol, orderId: 999, clientOrderId: request.origClientOrderId ?? "order", price: "95",
-      origQty: "1", executedQty: "0", status: "CANCELED", side: "SELL", type: "STOP_MARKET", reduceOnly: true,
-    }),
+    queryOrder: async (request: { symbol: string; origClientOrderId?: string }) => {
+      const local = await store.getOrder(request.origClientOrderId ?? "");
+      return {
+        symbol: request.symbol, orderId: Number(local?.exchangeOrderId ?? 999),
+        clientOrderId: request.origClientOrderId ?? "order", price: "95",
+        origQty: local?.originalQuantity ?? "1", executedQty: local?.executedQuantity ?? "0", status: "CANCELED",
+        side: "SELL", positionSide: remote.positionSide, type: "STOP_MARKET", reduceOnly: true,
+      };
+    },
     userTrades: async () => [],
   };
   const dayKey = new Date(NOW).toISOString().slice(0, 10);

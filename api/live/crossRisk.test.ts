@@ -195,6 +195,12 @@ describe("cross portfolio liquidation boundary", () => {
     expect(estimateCrossLiquidationBoundary({
       ...multiAsset, collateral: { haircut: "0.5", observedAt: 999 },
     }, candidate())).toMatchObject({ ok: false });
+    expect(estimateCrossLiquidationBoundary({
+      ...multiAsset, collateral: { haircut: "0.5", observedAt: 1_001 },
+    }, candidate())).toMatchObject({ ok: true, liquidationPrice: "90.91" });
+    expect(estimateCrossLiquidationBoundary({
+      ...multiAsset, collateral: { haircut: "0.5", observedAt: 11_001 },
+    }, candidate())).toMatchObject({ ok: false });
   });
 
   it("allows a LONG with no positive root only when its stop is valid throughout the positive range", () => {

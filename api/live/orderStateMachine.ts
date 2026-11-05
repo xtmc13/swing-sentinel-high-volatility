@@ -443,6 +443,7 @@ export interface OrderStateMachineOptions {
   alert?: (message: string) => unknown;
   id?: () => string;
   assertCurrentAdmission?: AssertCurrentLiveAdmission;
+  assertOrderAdmission?: (order: LiveOrder) => Promise<void>;
   accountMode?: OrderWireAccountMode;
 }
 
@@ -475,6 +476,7 @@ export class OrderStateMachine {
   private readonly alert: (message: string) => unknown;
   private readonly id: () => string;
   private readonly assertCurrentAdmission?: AssertCurrentLiveAdmission;
+  private readonly assertOrderAdmission?: (order: LiveOrder) => Promise<void>;
   private readonly accountMode?: OrderWireAccountMode;
 
   constructor(
@@ -487,6 +489,7 @@ export class OrderStateMachine {
     this.alert = options.alert ?? (() => undefined);
     this.id = options.id ?? (() => crypto.randomUUID());
     this.assertCurrentAdmission = options.assertCurrentAdmission;
+    this.assertOrderAdmission = options.assertOrderAdmission;
     this.accountMode = options.accountMode;
   }
 
@@ -495,7 +498,11 @@ export class OrderStateMachine {
     return order;
   }
 
-  async submit(clientOrderId: string, expectedGeneration?: number): Promise<LiveOrder> {
+  async submit(
+    clientOrderId: string,
+    expectedGeneration?: number,
+    assertOrderAdmission?: (order: LiveOrder) => Promise<void>,
+  ): Promise<LiveOrder> {
     const order = await this.requireOrder(clientOrderId);
     if (order.status !== "PENDING_SEND") return order;
     assertNotCompatibilityFrozen(order);
@@ -509,13 +516,58 @@ export class OrderStateMachine {
     const admissionState = await this.requireOrder(clientOrderId);
     if (admissionState.status !== "SUBMITTING") return admissionState;
     assertNotCompatibilityFrozen(admissionState);
+    const admissionAssertion = assertOrderAdmission
+      ?? (expectedGeneration === undefined ? undefined : this.assertOrderAdmission);
+    if (admissionAssertion) {
+      try {
+        await admissionAssertion(admissionState);
+      } catch (error) {
+        await this.alert(`${admissionState.clientOrderId} admission snapshot mismatch: ${
+          error instanceof Error ? error.message : String(error)
+        }`);
+        return await this.store.transitionOrder(clientOrderId, ["SUBMITTING"], { status: "CANCEL" })
+          ?? this.requireOrder(clientOrderId);
+      }
+    }
     const finalAdmission = expectedGeneration === undefined ? admissionState
       : await this.store.admitOrder(clientOrderId, expectedGeneration, this.assertCurrentAdmission!);
     if (finalAdmission.status !== "SUBMITTING") return finalAdmission;
     assertNotCompatibilityFrozen(finalAdmission);
+    if (admissionAssertion) {
+      try {
+        await admissionAssertion(finalAdmission);
+      } catch (error) {
+        await this.alert(`${finalAdmission.clientOrderId} admission snapshot mismatch: ${
+          error instanceof Error ? error.message : String(error)
+        }`);
+        return await this.store.transitionOrder(clientOrderId, ["SUBMITTING"], { status: "CANCEL" })
+          ?? this.requireOrder(clientOrderId);
+      }
+    }
+    let transportOrder = finalAdmission;
+    if (this.accountMode?.dualSide && finalAdmission.entrySemantics === "REDUCE") {
+      try {
+        const quantity = await this.authoritativeReduceQuantity(finalAdmission);
+        if (compareDecimals(quantity, "0") === 0) {
+          const cancelled = await this.store.transitionOrder(clientOrderId, ["SUBMITTING"], { status: "CANCEL" });
+          if (!cancelled) return this.requireOrder(clientOrderId);
+          await this.reconcileZeroTarget(finalAdmission);
+          return cancelled;
+        }
+        const updated = await this.store.transitionOrder(clientOrderId, ["SUBMITTING"], { originalQuantity: quantity });
+        if (!updated) return this.requireOrder(clientOrderId);
+        transportOrder = updated;
+      } catch (error) {
+        await this.alert(`${finalAdmission.symbol} ${finalAdmission.positionSide} REDUCE 数量复核失败：${
+          error instanceof Error ? error.message : String(error)
+        }`);
+        return await this.store.transitionOrder(clientOrderId, ["SUBMITTING"], { status: "UNKNOWN" })
+          ?? this.requireOrder(clientOrderId);
+      }
+    }
     let acknowledgement: Partial<BinanceOpenOrder>;
     try {
-      acknowledgement = await this.gateway.placeOrder(this.requestFor(finalAdmission)) as Partial<BinanceOpenOrder>;
+      acknowledgement = await this.gateway.placeOrder(this.requestFor(transportOrder)) as Partial<BinanceOpenOrder>;
       if ((typeof acknowledgement.orderId !== "number" && typeof acknowledgement.orderId !== "string")
         || String(acknowledgement.orderId).length === 0) {
         throw new Error("Invalid order acknowledgement");
@@ -559,17 +611,36 @@ export class OrderStateMachine {
     return unresolved.length > 0 ? { ...result, unresolved } : result;
   }
 
+  private async reconcileZeroTarget(order: Pick<LiveOrder,
+    "intentId" | "symbol" | "positionSide" | "accountModeFingerprint"
+  >): Promise<void> {
+    const position = await this.store.getPosition(order.intentId);
+    if (!position || position.status !== "OPEN" || position.symbol !== order.symbol
+      || position.positionSide !== order.positionSide
+      || position.accountModeFingerprint !== order.accountModeFingerprint) {
+      await this.alert(`${order.symbol} ${order.positionSide} remote position is zero; local identity requires reconciliation`);
+      return;
+    }
+    const unresolved = await this.cancelResidualProtection(position);
+    await this.alert(`${order.symbol} ${order.positionSide} remote position is zero; reconciliation remains unresolved${
+      unresolved.length > 0 ? `: ${unresolved.join("；")}` : ""
+    }`);
+  }
+
   private async cancelResidualProtection(position: LivePosition): Promise<string[]> {
     const unresolved: string[] = [];
     const protections = (await this.store.listOrders()).filter((order) => this.protectionOwnedBy(position, order)
       && WORKING_STATUSES.has(order.status));
     for (const protection of protections) {
       try {
-        if (protection.status !== "PENDING_SEND") {
-          await this.gateway.cancelOrder({ symbol: protection.symbol, origClientOrderId: protection.clientOrderId });
+        if (protection.status === "PENDING_SEND") {
+          const cancelled = await this.store.transitionOrder(protection.clientOrderId, ["PENDING_SEND"], { status: "CANCEL" });
+          if (!cancelled) throw new Error("protection state changed during cleanup");
+          continue;
         }
-        const cancelled = await this.store.transitionOrder(protection.clientOrderId, [protection.status], { status: "CANCEL" });
-        if (!cancelled) throw new Error("protection state changed during cleanup");
+        await this.gateway.cancelOrder({ symbol: protection.symbol, origClientOrderId: protection.clientOrderId });
+        const confirmed = await this.reconcile(protection);
+        if (confirmed.status !== "CANCEL") throw new Error(`protection cancel remains ${confirmed.status}`);
       } catch (error) {
         const message = `${position.symbol} ${position.positionSide} 残留保护单 ${protection.clientOrderId} 清理失败：${
           error instanceof Error ? error.message : String(error)
@@ -671,42 +742,88 @@ export class OrderStateMachine {
       if (!unknown) throw new Error("Order changed during failed reconciliation");
       return unknown;
     }
-    if (!remote) {
-      const unknown = await this.store.transitionOrder(order.clientOrderId, ["RECONCILING"], { status: "UNKNOWN" });
-      if (!unknown) throw new Error("Order changed during missing-order reconciliation");
-      return unknown;
-    }
+    if (!remote) return this.recoveryIssue(order, "remote order is missing");
+    const identityIssue = this.recoveredIdentityIssue(order, remote);
+    if (identityIssue) return this.recoveryIssue(order, identityIssue);
     const reconciled = await this.store.transitionOrder(order.clientOrderId, ["RECONCILING"], {
       exchangeOrderId: String(remote.orderId),
       status: "RECONCILING",
     });
     if (!reconciled) throw new Error("Order changed during reconciliation");
-    const trades = await this.gateway.userTrades({ symbol: order.symbol, limit: 1000 });
-    for (const trade of trades.filter((candidate) => String(candidate.orderId) === String(remote.orderId))) {
-      const position = await this.store.getPosition(order.intentId);
-      const seed = position ?? recoverySeed;
-      if (!seed) throw new Error("Position seed is required for recovered fills");
-      await this.applyFillAndProtect(order.clientOrderId, {
-        exchangeTradeId: String(trade.id),
-        exchangeOrderId: String(trade.orderId),
-        symbol: trade.symbol,
-        side: trade.side === "SELL" ? "SELL" : "BUY",
-        positionSide: trade.positionSide,
-        price: trade.price,
-        quantity: trade.qty,
-        commission: trade.commission,
-        commissionAsset: trade.commissionAsset,
-        realizedPnl: trade.realizedPnl,
-        isMaker: trade.maker,
-        executedAt: trade.time,
-      }, seed);
+    let recoveredQuantity: DecimalString = "0";
+    try {
+      const trades = await this.gateway.userTrades({ symbol: order.symbol, limit: 1000 });
+      for (const trade of trades.filter((candidate) => String(candidate.orderId) === String(remote.orderId))) {
+        const position = await this.store.getPosition(order.intentId);
+        const seed = position ?? recoverySeed;
+        if (!seed) throw new Error("Position seed is required for recovered fills");
+        recoveredQuantity = addDecimals(recoveredQuantity, trade.qty);
+        await this.applyFillAndProtect(order.clientOrderId, {
+          exchangeTradeId: String(trade.id),
+          exchangeOrderId: String(trade.orderId),
+          symbol: trade.symbol,
+          side: trade.side === "SELL" ? "SELL" : "BUY",
+          positionSide: trade.positionSide,
+          price: trade.price,
+          quantity: trade.qty,
+          commission: trade.commission,
+          commissionAsset: trade.commissionAsset,
+          realizedPnl: trade.realizedPnl,
+          isMaker: trade.maker,
+          executedAt: trade.time,
+        }, seed);
+      }
+    } catch (error) {
+      return this.recoveryIssue(order, `trade recovery failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     const latest = await this.requireOrder(order.clientOrderId);
+    if (compareDecimals(latest.executedQuantity, remote.executedQty) !== 0) {
+      return this.recoveryIssue(order, `recovered executedQty ${latest.executedQuantity} != remote.executedQty ${remote.executedQty}`);
+    }
+    if (remote.status === "FILLED" && (compareDecimals(remote.executedQty, "0") <= 0
+      || compareDecimals(latest.executedQuantity, latest.originalQuantity) !== 0
+      || compareDecimals(recoveredQuantity, remote.executedQty) !== 0)) {
+      return this.recoveryIssue(order, `positive FILLED lacks complete corresponding trades for remote.executedQty ${remote.executedQty}`);
+    }
     const terminal = await this.store.transitionOrder(order.clientOrderId, [latest.status], {
       status: this.statusFromExchange(remote.status),
     });
     if (!terminal) throw new Error("Order changed while finishing reconciliation");
     return terminal;
+  }
+
+  private recoveredIdentityIssue(order: LiveOrder, remote: BinanceOpenOrder): string | null {
+    try {
+      const expected = this.requestFor(order);
+      if (remote.clientOrderId !== order.clientOrderId || remote.symbol !== order.symbol
+        || remote.side !== expected.side || remote.positionSide !== expected.positionSide
+        || remote.type !== expected.type || compareDecimals(remote.origQty, order.originalQuantity) !== 0) {
+        return "remote order identity, positionSide, type, side, or original quantity mismatch";
+      }
+      if (order.exchangeOrderId !== null && String(remote.orderId) !== order.exchangeOrderId) {
+        return "remote exchange order identity mismatch";
+      }
+      if (expected.reduceOnly === true && remote.reduceOnly !== true) return "remote reduceOnly identity mismatch";
+      if (expected.reduceOnly === undefined && order.entrySemantics === "REDUCE" && remote.reduceOnly === true) {
+        return "dual REDUCE must not carry remote reduceOnly";
+      }
+      const executed = decimal(remote.executedQty);
+      if (compareDecimals(executed, "0") < 0 || compareDecimals(executed, order.originalQuantity) > 0) {
+        return "remote.executedQty is outside the persisted order quantity";
+      }
+      return null;
+    } catch (error) {
+      return `remote identity validation failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  private async recoveryIssue(order: LiveOrder, detail: string): Promise<LiveOrder> {
+    await this.alert(`${order.symbol} ${order.positionSide} ${order.clientOrderId} recovery issue: ${detail}`);
+    const latest = await this.requireOrder(order.clientOrderId);
+    if (latest.status === "UNKNOWN") return latest;
+    const unknown = await this.store.transitionOrder(order.clientOrderId, [latest.status], { status: "UNKNOWN" });
+    if (!unknown) throw new Error("Order changed while recording recovery issue");
+    return unknown;
   }
 
   private assertPositionIdentity(position: LivePosition): void {
@@ -726,17 +843,21 @@ export class OrderStateMachine {
       && order.entrySemantics === "REDUCE" && order.type === "STOP_MARKET";
   }
 
+  private async authoritativeReduceQuantity(order: Pick<LiveOrder, "symbol" | "positionSide">): Promise<DecimalString> {
+    if (!this.gateway.positionRisk) throw new Error("Dual REDUCE requires signed positionRisk");
+    const matches = (await this.gateway.positionRisk(order.symbol)).filter((candidate) =>
+      candidate.symbol === order.symbol && candidate.positionSide === order.positionSide);
+    if (matches.length !== 1) throw new Error(`${order.symbol} ${order.positionSide} remote position is not unique`);
+    const signed = decimal(matches[0].positionAmt);
+    const quantity = order.positionSide === "SHORT" ? subtractDecimals("0", signed) : signed;
+    if (compareDecimals(quantity, "0") < 0) throw new Error("Remote position direction mismatch");
+    return quantity;
+  }
+
   private async closeQuantity(position: LivePosition): Promise<DecimalString> {
     this.assertPositionIdentity(position);
     if (!this.accountMode!.dualSide) return position.quantity;
-    if (!this.gateway.positionRisk) throw new Error("Dual close requires signed positionRisk");
-    const matches = (await this.gateway.positionRisk(position.symbol)).filter((candidate) =>
-      candidate.symbol === position.symbol && candidate.positionSide === position.positionSide);
-    if (matches.length !== 1) throw new Error(`${position.symbol} ${position.positionSide} remote position is not unique`);
-    const signed = decimal(matches[0].positionAmt);
-    const quantity = position.positionSide === "SHORT" ? subtractDecimals("0", signed) : signed;
-    if (compareDecimals(quantity, "0") < 0) throw new Error("Remote position direction mismatch");
-    return quantity;
+    return this.authoritativeReduceQuantity(position);
   }
 
   async closePosition(positionId: string): Promise<LiveOrder | null> {
@@ -779,6 +900,12 @@ export class OrderStateMachine {
     }
     const quantity = await this.closeQuantity(position);
     if (compareDecimals(quantity, "0") <= 0) {
+      await this.reconcileZeroTarget({
+        intentId: position.id,
+        symbol: position.symbol,
+        positionSide: position.positionSide,
+        accountModeFingerprint: position.accountModeFingerprint,
+      });
       if (latest?.status === "CANCEL") return latest;
       throw new Error("Target remote position is already zero; reconciliation required");
     }

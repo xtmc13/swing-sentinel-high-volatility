@@ -11,6 +11,7 @@ import { estimateFlatLiquidationPrice } from "./liveRisk";
 import { createProductionLiveRuntime } from "./productionRuntime";
 import type { LiveFill, LiveOrder, LivePositionSeed } from "./orderStateMachine";
 import type { UserDataSocket } from "./userDataStream";
+import type { MainnetLiveExecutionAdapter } from "./liveExecution";
 
 const ACCOUNT_MODE = { dualSide: false, multiAssets: false, fingerprint: "0".repeat(64) } as const;
 
@@ -94,6 +95,8 @@ function fakeClient(now: () => number) {
       ],
     }] }),
     account: async () => ({ assets: [{ asset: "USDT", walletBalance: "1000", availableBalance: "1000", crossWalletBalance: "1000" }] }),
+    collateralRate: async () => { throw new Error("collateralRate not configured in fake"); },
+    premiumIndex: async () => { throw new Error("premiumIndex not configured in fake"); },
     income: async () => [],
     userTrades: async () => [],
     createListenKey: async () => ({ listenKey: "fake-listen-key" }),
@@ -449,11 +452,217 @@ describe("production service composition with fake exchange", () => {
     }
   });
 
+  it.each([
+    { field: "mode", check: 1 },
+    { field: "mode", check: 2 },
+    { field: "leverage", check: 1 },
+    { field: "leverage", check: 2 },
+    { field: "bracket", check: 1 },
+    { field: "bracket", check: 2 },
+  ] as const)("cancels transport when $field changes at admission check $check", async ({ field, check }) => {
+    const now = () => 1_800_000_000_000;
+    const socket = new FakeSocket();
+    const { client, placeOrder } = fakeClient(now);
+    placeOrder.mockImplementation(async (request) => ({
+      symbol: request.symbol, orderId: 175, clientOrderId: request.newClientOrderId ?? "admission-entry",
+      price: request.price ?? "0", origQty: request.quantity, executedQty: "0", status: "NEW",
+      side: request.side, positionSide: request.positionSide, type: request.type, reduceOnly: request.reduceOnly,
+    }));
+    let admitting = false;
+    let freshBracket = false;
+    let reads = 0;
+    vi.spyOn(client, "positionSide").mockImplementation(async () => {
+      if (admitting && field === "mode") reads += 1;
+      return { dualSidePosition: admitting && reads === check && field === "mode" };
+    });
+    vi.spyOn(client, "positionRisk").mockImplementation(async (symbol) => {
+      if (admitting && symbol && field === "leverage") reads += 1;
+      if (admitting && symbol && field === "bracket") freshBracket = true;
+      return [{
+        symbol: "BTCUSDT", positionSide: "BOTH", positionAmt: "0", entryPrice: "0", markPrice: "100",
+        liquidationPrice: "0", leverage: admitting && reads === check && field === "leverage" ? "3" : "2",
+        marginType: "isolated", isolatedWallet: "0", positionInitialMargin: "0",
+      }];
+    });
+    vi.spyOn(client, "leverageBracket").mockImplementation(async () => {
+      if (freshBracket) {
+        freshBracket = false;
+        reads += 1;
+      }
+      return [{
+        symbol: "BTCUSDT",
+        brackets: [{
+          bracket: 1, initialLeverage: 10, notionalCap: "50000", notionalFloor: "0",
+          maintMarginRatio: admitting && reads === check && field === "bracket" ? "0.02" : "0.01", cum: "0",
+        }],
+      }];
+    });
+    const orderStore = new InMemoryLiveOrderStore();
+    const insertOrder = orderStore.insertOrder.bind(orderStore);
+    orderStore.insertOrder = async (order) => {
+      admitting = true;
+      reads = 0;
+      await insertOrder(order);
+    };
+    const settings = {
+      ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" as const, leverageMode: "FIXED" as const,
+      fixedLeverage: 2, riskPerTradePct: 0.01, portfolioStopRiskPct: 0.1,
+    };
+    const store = finalGateDatabase(settings);
+    const services = createBinanceProductionLiveServices({
+      env: {
+        LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key",
+        BINANCE_MAINNET_API_SECRET: "fake-secret", BINANCE_MAINNET_ALLOWED_SYMBOLS: "BTCUSDT",
+      },
+      db: store.db,
+      getSettings: async () => settings,
+      client,
+      orderStore,
+      reconciliationStore: new InMemoryReconciliationStore(),
+      accountingStore: new InMemoryAccountingStore(),
+      dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) },
+      socketFactory: () => socket,
+      now,
+      accountMode: ACCOUNT_MODE,
+    });
+    const signal: Opportunity = {
+      id: `admission-${field}-${check}`, signalId: `admission-${field}-${check}`, strategyType: "SWING",
+      symbol: "BTCUSDT", side: "LONG", status: "READY", score: 1, regime: "NORMAL",
+      entry: 100, stop: 99.5, target: 101.1, stopDistancePct: 0.5, rewardRisk: 2.2,
+      leverage: 2, marginPct: 2, riskPct: 0.01, reasons: [], signalCloseTime: now(), signalTime: now(),
+      expiryTime: now() + 60_000, triggerPrice: 100, limitPrice: 100, stateVersion: 1,
+      sourceGeneration: 1, detectorVersion: "test", configVersion: "test", createdAt: new Date(now()).toISOString(),
+    };
+
+    try {
+      await services.start();
+      await expect(services.preflight()).resolves.toMatchObject({ ready: true });
+      const opened = await services.adapter.open(signal);
+
+      expect(opened.ok).toBe(false);
+      expect(placeOrder).not.toHaveBeenCalled();
+      expect(store.insertedCount()).toBe(1);
+      const orders = await orderStore.listOrders();
+      expect(orders).toHaveLength(1);
+      expect(orders[0]).toMatchObject({ status: "CANCEL" });
+    } finally {
+      await services.stop();
+    }
+  });
+
+  it("cancels an entry replacement when its fresh bracket differs from the persisted approval", async () => {
+    const now = () => 1_800_000_000_000;
+    const socket = new FakeSocket();
+    const { client, placeOrder } = fakeClient(now);
+    placeOrder.mockImplementation(async (request) => ({
+      symbol: request.symbol, orderId: 180 + placeOrder.mock.calls.length,
+      clientOrderId: request.newClientOrderId ?? "replacement-entry", price: request.price ?? "0",
+      origQty: request.quantity, executedQty: "0", status: "NEW", side: request.side,
+      positionSide: request.positionSide, type: request.type, reduceOnly: request.reduceOnly,
+    }));
+    vi.spyOn(client, "positionRisk").mockResolvedValue([{
+      symbol: "BTCUSDT", positionSide: "BOTH", positionAmt: "0", entryPrice: "0", markPrice: "100",
+      liquidationPrice: "0", leverage: "2", marginType: "isolated", isolatedWallet: "0", positionInitialMargin: "0",
+    }]);
+    let maintMarginRatio = "0.01";
+    vi.spyOn(client, "leverageBracket").mockImplementation(async () => [{
+      symbol: "BTCUSDT",
+      brackets: [{
+        bracket: 1, initialLeverage: 10, notionalCap: "50000", notionalFloor: "0",
+        maintMarginRatio, cum: "0",
+      }],
+    }]);
+    const orderStore = new InMemoryLiveOrderStore();
+    const settings = {
+      ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" as const, leverageMode: "FIXED" as const,
+      fixedLeverage: 2, riskPerTradePct: 0.01, portfolioStopRiskPct: 0.1,
+    };
+    const store = finalGateDatabase(settings);
+    const services = createBinanceProductionLiveServices({
+      env: {
+        LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key",
+        BINANCE_MAINNET_API_SECRET: "fake-secret", BINANCE_MAINNET_ALLOWED_SYMBOLS: "BTCUSDT",
+      },
+      db: store.db,
+      getSettings: async () => settings,
+      client,
+      orderStore,
+      reconciliationStore: new InMemoryReconciliationStore(),
+      accountingStore: new InMemoryAccountingStore(),
+      dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) },
+      socketFactory: () => socket,
+      now,
+      accountMode: ACCOUNT_MODE,
+    });
+    const signal: Opportunity = {
+      id: "replacement-bracket-opportunity", signalId: "replacement-bracket-signal", strategyType: "SWING",
+      symbol: "BTCUSDT", side: "LONG", status: "READY", score: 1, regime: "NORMAL",
+      entry: 100, stop: 99.5, target: 101.1, stopDistancePct: 0.5, rewardRisk: 2.2,
+      leverage: 2, marginPct: 2, riskPct: 0.01, reasons: [], signalCloseTime: now(), signalTime: now(),
+      expiryTime: now() + 60_000, triggerPrice: 100, limitPrice: 100, stateVersion: 1,
+      sourceGeneration: 1, detectorVersion: "test", configVersion: "test", createdAt: new Date(now()).toISOString(),
+    };
+
+    try {
+      await services.start();
+      await expect(services.preflight()).resolves.toMatchObject({ ready: true });
+      await expect(services.adapter.open(signal)).resolves.toMatchObject({ ok: true });
+      expect(placeOrder).toHaveBeenCalledTimes(1);
+      const entryOrder = (await orderStore.listOrders())[0]!;
+      vi.spyOn(client, "queryOrder").mockResolvedValue({
+        symbol: "BTCUSDT", orderId: Number(entryOrder.exchangeOrderId), clientOrderId: entryOrder.clientOrderId,
+        price: "100", origQty: entryOrder.originalQuantity, executedQty: "0", status: "CANCELED",
+        side: "BUY", positionSide: "BOTH", type: "LIMIT",
+      });
+      maintMarginRatio = "0.02";
+
+      const replacement = await (services.adapter as MainnetLiveExecutionAdapter)
+        .replaceOrder(entryOrder.clientOrderId, "100");
+
+      expect(replacement.status).toBe("CANCEL");
+      expect(placeOrder).toHaveBeenCalledTimes(1);
+    } finally {
+      await services.stop();
+    }
+  });
+
+  it("includes account mode in read-only preflight", async () => {
+    const now = () => 1_800_000_000_000;
+    const { client } = fakeClient(now);
+    vi.spyOn(client, "positionSide").mockResolvedValue({ dualSidePosition: true });
+    const services = createBinanceProductionLiveServices({
+      env: {
+        LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key",
+        BINANCE_MAINNET_API_SECRET: "fake-secret", BINANCE_MAINNET_ALLOWED_SYMBOLS: "BTCUSDT",
+      },
+      db: finalGateDatabase().db,
+      getSettings: async () => ({ ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET", leverageMode: "FIXED", fixedLeverage: 2 }),
+      client,
+      orderStore: new InMemoryLiveOrderStore(),
+      reconciliationStore: new InMemoryReconciliationStore(),
+      accountingStore: new InMemoryAccountingStore(),
+      dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) },
+      socketFactory: () => new FakeSocket(),
+      now,
+      accountMode: ACCOUNT_MODE,
+    });
+
+    await expect(services.preflight()).resolves.toMatchObject({ ready: false });
+    expect((await services.preflight()).reasons.join(" ")).toMatch(/mode|模式/);
+  });
+
   it("uses the same multi-asset totals and actual 150x leverage through finalGate persistence", async () => {
     const now = () => 1_800_000_000_000;
     const socket = new FakeSocket();
     const { client, placeOrder } = fakeClient(now);
-    vi.spyOn(client, "positionSide").mockResolvedValue({ dualSidePosition: true });
+    let changeAfterNextModeRead = false;
+    vi.spyOn(client, "positionSide").mockImplementation(async () => {
+      if (changeAfterNextModeRead) {
+        changeAfterNextModeRead = false;
+        return { dualSidePosition: false };
+      }
+      return { dualSidePosition: true };
+    });
     vi.spyOn(client, "multiAssetsMargin").mockResolvedValue({ multiAssetsMargin: true });
     vi.spyOn(client, "positionRisk").mockResolvedValue([{
       symbol: "BTCUSDT", positionSide: "LONG", positionAmt: "0", entryPrice: "0", markPrice: "100",
@@ -487,8 +696,8 @@ describe("production service composition with fake exchange", () => {
     });
     let account = {
       assets: [
-        { asset: "USDT", walletBalance: "600", availableBalance: "500" },
-        { asset: "BNB", walletBalance: "1", availableBalance: "1" },
+        { asset: "USDT", walletBalance: "600", availableBalance: "500", crossWalletBalance: "600" },
+        { asset: "BNB", walletBalance: "1", availableBalance: "1", crossWalletBalance: "1" },
       ],
       totalWalletBalance: "1000",
       totalMarginBalance: "1000",
@@ -514,6 +723,15 @@ describe("production service composition with fake exchange", () => {
     const store = finalGateDatabase({ leverageMode: "ACCOUNT_CONFIGURED", fixedLeverage: 20 });
     let collateralHaircut = "1";
     let changeAfterNextCollateralRead = false;
+    vi.spyOn(client, "collateralRate").mockImplementation(async () => {
+      const current = collateralHaircut;
+      if (changeAfterNextCollateralRead) {
+        changeAfterNextCollateralRead = false;
+        collateralHaircut = "0.5";
+      }
+      return [{ asset: "BNB", collateralRate: current, updateTime: now() - 1000 }];
+    });
+    vi.spyOn(client, "premiumIndex").mockImplementation(async (symbol) => ({ symbol, markPrice: "400" }));
     const services = createBinanceProductionLiveServices({
       env: {
         LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key",
@@ -531,14 +749,6 @@ describe("production service composition with fake exchange", () => {
       socketFactory: () => socket,
       now,
       accountMode: { dualSide: true, multiAssets: true, fingerprint: ACCOUNT_MODE.fingerprint },
-      readCrossCollateral: async (observedAt: number) => {
-        const current = collateralHaircut;
-        if (changeAfterNextCollateralRead) {
-          changeAfterNextCollateralRead = false;
-          collateralHaircut = "0.5";
-        }
-        return { haircut: current, observedAt };
-      },
     });
     const signal: Opportunity = {
       id: "multi-asset-opportunity", signalId: "multi-asset-signal", strategyType: "SWING",
@@ -619,6 +829,19 @@ describe("production service composition with fake exchange", () => {
       expect(placeOrder).toHaveBeenCalledTimes(1);
 
       store.clearIntents();
+      changeAfterNextModeRead = true;
+      const changedMode = await services.adapter.open({
+        ...signal,
+        id: "cross-changed-mode-opportunity",
+        signalId: "cross-changed-mode-signal",
+      }).catch((error: unknown) => ({ ok: false, reason: error instanceof Error ? error.message : String(error) }));
+      expect(changedMode.ok).toBe(false);
+      expect(changedMode.reason).toMatch(/mode|positionSide|模式/);
+      expect(store.insertedCount()).toBe(0);
+      expect(placeOrder).toHaveBeenCalledTimes(1);
+
+      store.clearIntents();
+      await expect(services.preflight()).resolves.toMatchObject({ ready: true });
       bracketResponse = [{
         ...bracketResponse[0],
         brackets: bracketResponse[0].brackets.map((bracket) => bracket.bracket === 2

@@ -45,6 +45,8 @@ export type LivePreflightResult =
   | { ok: false; reasons: string[] }
   | {
       ok: true;
+      positionSide: BinancePositionSideResponse;
+      multiAssets: BinanceMultiAssetsMarginResponse;
       filters: LiveContractFilters;
       brackets: BinanceLeverageBracket["brackets"];
       leverageBrackets: BinanceLeverageBracket[];
@@ -164,6 +166,8 @@ export async function runLivePreflight(input: LivePreflightInput): Promise<LiveP
   }
   return {
     ok: true,
+    positionSide,
+    multiAssets,
     filters: {
       tickSize: filters.tickSize,
       stepSize: filters.stepSize,

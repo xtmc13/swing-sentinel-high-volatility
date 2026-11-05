@@ -108,6 +108,18 @@ export interface BinanceMultiAssetsMarginResponse {
   multiAssetsMargin: boolean;
 }
 
+export interface BinanceCollateralRate {
+  asset: string;
+  collateralRate: DecimalString;
+  updateTime: number;
+}
+
+export interface BinancePremiumIndex {
+  symbol: string;
+  markPrice: DecimalString;
+  [key: string]: unknown;
+}
+
 export interface BinanceOpenOrder {
   symbol: string;
   orderId: number;
@@ -250,6 +262,10 @@ export class BinanceSignedClient {
     return this.perform("GET", "/fapi/v1/exchangeInfo", { symbol }, false, false, this.maxRateLimitRetries);
   }
 
+  premiumIndex(symbol: string): Promise<BinancePremiumIndex> {
+    return this.perform("GET", "/fapi/v1/premiumIndex", { symbol }, false, false, this.maxRateLimitRetries);
+  }
+
   positionRisk(symbol?: string): Promise<BinancePositionRisk[]> {
     return this.signedRequest("GET", "/fapi/v2/positionRisk", { symbol });
   }
@@ -264,6 +280,10 @@ export class BinanceSignedClient {
 
   multiAssetsMargin(): Promise<BinanceMultiAssetsMarginResponse> {
     return this.signedRequest("GET", "/fapi/v1/multiAssetsMargin");
+  }
+
+  collateralRate(): Promise<BinanceCollateralRate[]> {
+    return this.signedRequest("GET", "/fapi/v1/collateralRate");
   }
 
   openOrders(symbol?: string): Promise<BinanceOpenOrder[]> {

@@ -11,6 +11,8 @@ import {
   type BinanceAccountResponse,
   type BinanceLeverageBracket,
 } from "./binanceSigned";
+import { createBinanceCrossCollateralReader } from "./binanceCollateral";
+import { canonicalSnapshot } from "./canonicalSnapshot";
 import {
   estimateCrossLiquidationBoundary,
   selectUniqueCrossBracket,
@@ -63,7 +65,7 @@ import {
   LiveAccountingSynchronizer,
   type LiveAccountingStore,
 } from "./accounting";
-import type { LiveOrderStore, LivePositionSeed } from "./orderStateMachine";
+import type { LiveOrder, LiveOrderStore, LivePositionSeed } from "./orderStateMachine";
 import type { OrderWireAccountMode } from "./orderWire";
 import { UserDataStream, type UserDataSocket } from "./userDataStream";
 import type { ProductionLiveServices } from "./productionRuntime";
@@ -84,7 +86,11 @@ export interface ProductionServicesOptions {
   reconciliationIntervalMs?: number;
   pauseAutoTrade?: () => Promise<void>;
   accountMode?: OrderWireAccountMode;
-  readCrossCollateral?: (observedAt: number) => Promise<{ haircut: DecimalString; observedAt: number }>;
+  readCrossCollateral?: (observedAt: number) => Promise<{
+    crossWalletBalance?: DecimalString;
+    haircut: DecimalString;
+    observedAt: number;
+  }>;
 }
 
 interface FreshPreflight {
@@ -100,9 +106,13 @@ function allowedSymbols(env: ServerEnvironment): string[] {
     .split(",").map((symbol) => symbol.trim().toUpperCase()).filter(Boolean))];
 }
 
-function crossAccountValuation(account: BinanceAccountResponse, multiAssets: boolean) {
+function crossAccountValuation(
+  account: BinanceAccountResponse,
+  multiAssets: boolean,
+  collateral?: { crossWalletBalance?: DecimalString },
+) {
   const usdt = account.assets.find((asset) => asset.asset === "USDT");
-  const crossWalletBalance = account.totalCrossWalletBalance
+  const crossWalletBalance = collateral?.crossWalletBalance ?? account.totalCrossWalletBalance
     ?? (multiAssets ? undefined : usdt?.crossWalletBalance);
   const crossUnrealizedPnl = account.totalCrossUnPnl
     ?? (multiAssets ? undefined : usdt?.crossUnPnl);
@@ -175,6 +185,7 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     options.env,
     (credentials) => new BinanceSignedClient(credentials),
   );
+  const readCrossCollateral = options.readCrossCollateral ?? createBinanceCrossCollateralReader(client, now);
   const orders = options.orderStore ?? new DrizzleLiveOrderStore(options.db);
   const reconciliationStore = options.reconciliationStore ?? new DrizzleReconciliationStore(options.db);
   const accountingStore = options.accountingStore ?? new DrizzleAccountingStore(options.db);
@@ -219,6 +230,59 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     };
   }
 
+  async function assertOrderAdmission(
+    order: LiveOrder,
+    approval?: Extract<LiveFinalGateResult, { approved: true }>,
+  ): Promise<void> {
+    if (!options.accountMode) throw new Error("缺少最终订单账户模式批准");
+    const [positionSide, multiAssets, positions, leverageBrackets] = await Promise.all([
+      client.positionSide(),
+      client.multiAssetsMargin(),
+      client.positionRisk(order.symbol),
+      client.leverageBracket(order.symbol),
+    ]);
+    if (positionSide.dualSidePosition !== options.accountMode.dualSide
+      || multiAssets.multiAssetsMargin !== options.accountMode.multiAssets) {
+      throw new Error("最终订单账户模式与批准指纹不一致");
+    }
+    if (order.accountModeFingerprint !== options.accountMode.fingerprint) {
+      throw new Error("最终订单账户模式指纹已变化");
+    }
+    if (approval && (order.effectiveLeverage !== approval.effectiveLeverage
+      || order.maintenanceBracket !== approval.maintenanceBracket
+      || compareDecimals(order.maintMarginRatio!, approval.maintMarginRatio) !== 0
+      || compareDecimals(order.cumMaintenance!, approval.cumMaintenance) !== 0
+      || order.marginType !== approval.marginType
+      || compareDecimals(order.originalQuantity, approval.quantity) !== 0
+      || compareDecimals(multiplyDecimals(order.originalQuantity, order.price), approval.notional) !== 0)) {
+      throw new Error("最终订单与持久化批准令牌不一致");
+    }
+    const effectiveLeverage = approval?.effectiveLeverage ?? order.effectiveLeverage;
+    const maintenanceBracket = approval?.maintenanceBracket ?? order.maintenanceBracket;
+    const maintMarginRatio = approval?.maintMarginRatio ?? order.maintMarginRatio;
+    const cumMaintenance = approval?.cumMaintenance ?? order.cumMaintenance;
+    if (!Number.isInteger(effectiveLeverage) || !Number.isInteger(maintenanceBracket)
+      || !maintMarginRatio || !cumMaintenance) {
+      throw new Error("最终订单缺少持久化杠杆或 bracket 批准");
+    }
+    const expectedPositionSide = options.accountMode.dualSide ? order.positionSide : "BOTH";
+    const target = positions.filter((position) => position.symbol === order.symbol
+      && (position.positionSide ?? "BOTH") === expectedPositionSide);
+    if (target.length !== 1 || Number(target[0].leverage) !== effectiveLeverage) {
+      throw new Error("最终订单实际杠杆与批准值不一致");
+    }
+    const payload = leverageBrackets.filter((entry) => entry.symbol === order.symbol);
+    const bracket = payload.length === 1
+      ? selectUniqueCrossBracket(payload[0].brackets, multiplyDecimals(order.originalQuantity, order.price))
+      : null;
+    if (!bracket || bracket.bracket !== maintenanceBracket
+      || compareDecimals(bracket.maintMarginRatio, maintMarginRatio) !== 0
+      || compareDecimals(bracket.cum, cumMaintenance) !== 0
+      || effectiveLeverage! > bracket.initialLeverage) {
+      throw new Error("最终订单 bracket 与批准值不一致");
+    }
+  }
+
   const assertCurrentAdmission = createLiveAdmissionGuard(options.env, () => preflight(), now);
   const adapter = createMainnetLiveExecutionAdapter({
     db: options.db,
@@ -234,6 +298,8 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       if (!admission.allowed) throw new Error("私有流或对账已冻结主网新开仓");
       await assertCurrentAdmission();
     },
+    assertOrderAdmission,
+    assertFreshOrderAdmission: (order) => assertOrderAdmission(order),
     alert: (message) => log.error("live execution alert", { message }),
     prepareIntent: (opportunity) => {
       const cached = fresh.get(opportunity.symbol);
@@ -415,15 +481,20 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       if (marginType === "CROSS") {
         try {
           const multiAssets = options.accountMode?.multiAssets === true;
-          let firstCollateral: { haircut: DecimalString; observedAt: number } | undefined;
+          let firstCollateral: {
+            crossWalletBalance?: DecimalString;
+            haircut: DecimalString;
+            observedAt: number;
+          } | undefined;
           if (multiAssets) {
-            if (!options.readCrossCollateral) {
-              return { approved: false, reason: "多资产 cross 缺少可重复读取的 collateral haircut" };
+            firstCollateral = await readCrossCollateral(cached.checkedAt);
+            if (firstCollateral.observedAt < cached.checkedAt || firstCollateral.observedAt > now()
+              || now() - firstCollateral.observedAt > 10_000) {
+              return { approved: false, reason: "Cross collateral 首次读取时间不新鲜" };
             }
-            firstCollateral = await options.readCrossCollateral(cached.checkedAt);
           }
           const boundary = estimateCrossLiquidationBoundary({
-            ...crossAccountValuation(cached.account, multiAssets),
+            ...crossAccountValuation(cached.account, multiAssets, firstCollateral),
             positions: currentCrossPositions,
             multiAssets,
             observedAt: cached.checkedAt,
@@ -440,25 +511,36 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
           });
           if (!boundary.ok) return { approved: false, reason: boundary.reason };
           approvedLiquidationPrice = boundary.liquidationPrice ?? "0";
-          const [secondAccount, secondPositions, secondOrders, secondBrackets, secondCollateral] = await Promise.all([
+          const [
+            secondAccount, secondPositions, secondOrders, secondBrackets, secondCollateral,
+            secondPositionSide, secondMultiAssets,
+          ] = await Promise.all([
             client.account(),
             client.positionRisk(),
             client.openOrders(),
             Promise.all([opportunity.symbol, ...crossSymbols].map((symbol) => client.leverageBracket(symbol))),
-            multiAssets ? options.readCrossCollateral!(cached.checkedAt) : Promise.resolve(undefined),
+            multiAssets ? readCrossCollateral(firstCollateral!.observedAt) : Promise.resolve(undefined),
+            client.positionSide(),
+            client.multiAssetsMargin(),
           ]);
-          if (JSON.stringify(secondAccount) !== JSON.stringify(cached.account)
-            || JSON.stringify(secondPositions) !== JSON.stringify(cached.result.positions)
-            || JSON.stringify(secondOrders) !== JSON.stringify(cached.result.orders)) {
-            return { approved: false, reason: "Cross 二次快照与预检账户、持仓或活动单不一致" };
+          if (canonicalSnapshot(secondAccount) !== canonicalSnapshot(cached.account)
+            || canonicalSnapshot(secondPositions) !== canonicalSnapshot(cached.result.positions)
+            || canonicalSnapshot(secondOrders) !== canonicalSnapshot(cached.result.orders)
+            || canonicalSnapshot(secondPositionSide) !== canonicalSnapshot(cached.result.positionSide)
+            || canonicalSnapshot(secondMultiAssets) !== canonicalSnapshot(cached.result.multiAssets)) {
+            return { approved: false, reason: "Cross 二次快照与预检账户模式、持仓或活动单不一致" };
           }
           const firstBrackets = [cached.result.leverageBrackets, ...firstExistingBrackets];
-          if (secondBrackets.some((payload, index) => JSON.stringify(payload) !== JSON.stringify(firstBrackets[index]))) {
+          if (secondBrackets.some((payload, index) =>
+            canonicalSnapshot(payload) !== canonicalSnapshot(firstBrackets[index]))) {
             return { approved: false, reason: "Cross 二次快照 bracket payload 发生变化" };
           }
-          if (multiAssets && (!secondCollateral || secondCollateral.observedAt !== cached.checkedAt
-            || JSON.stringify(secondCollateral) !== JSON.stringify(firstCollateral))) {
-            return { approved: false, reason: "Cross 二次 collateral haircut 无法刷新或发生变化" };
+          if (multiAssets && (!secondCollateral
+            || secondCollateral.observedAt < firstCollateral!.observedAt
+            || secondCollateral.observedAt > now() || now() - secondCollateral.observedAt > 10_000
+            || secondCollateral.haircut !== firstCollateral!.haircut
+            || secondCollateral.crossWalletBalance !== firstCollateral!.crossWalletBalance)) {
+            return { approved: false, reason: "Cross 二次 collateral valuation/haircut 无法刷新或发生变化" };
           }
         } catch (error) {
           return {
@@ -586,7 +668,12 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
           symbol: position.symbol, positionSide: position.positionSide,
         })),
       })));
-      const reasons = results.flatMap((result) => result.ok ? [] : result.reasons);
+      const modeMatches = results.map((result) => result.ok && options.accountMode !== undefined
+        && result.positionSide.dualSidePosition === options.accountMode.dualSide
+        && result.multiAssets.multiAssetsMargin === options.accountMode.multiAssets);
+      const reasons = results.flatMap((result, index) => result.ok
+        ? modeMatches[index] ? [] : ["账户模式与启动批准 fingerprint 不一致"]
+        : result.reasons);
       const market = options.market ?? binance;
       const entries = await Promise.all(results.map(async (result, index) => {
         const symbol = symbols[index];
@@ -619,7 +706,7 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       }));
       results.forEach((result, index) => {
         const entry = entries[index];
-        if (result.ok && entry) fresh.set(entry.symbol, entry.value);
+        if (result.ok && entry && modeMatches[index]) fresh.set(entry.symbol, entry.value);
         else fresh.delete(symbols[index]);
       });
       const ws = stream.health();

@@ -231,6 +231,9 @@ function setup(options: {
         maintenanceBracket: 1,
         maintMarginRatio: "0.01",
         cumMaintenance: "0",
+        notionalCap: "50000",
+        notionalFloor: "0",
+        initialLeverage: 10,
         liquidationPriceSource: "PRETRADE_ESTIMATE",
         validUntil: new Date(9_999_999_999_999),
       };

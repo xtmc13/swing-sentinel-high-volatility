@@ -94,6 +94,9 @@ function finalGateFor(input: CreateLiveIntentInput, overrides: Record<string, un
     maintenanceBracket: 1,
     maintMarginRatio: "0.01",
     cumMaintenance: "0",
+    notionalCap: "50000",
+    notionalFloor: "0",
+    initialLeverage: 10,
     liquidationPriceSource: "PRETRADE_ESTIMATE" as const,
     validUntil: input.expiresAt,
     ...overrides,
@@ -305,6 +308,19 @@ describeDatabase("Task 3 独立 MariaDB 持久化", () => {
     expect([first.ok, second.ok].filter(Boolean)).toHaveLength(1);
     if (!db) throw new Error("database required");
     expect(await db.select().from(schema.liveIntents)).toHaveLength(1);
+  });
+
+  it("持久化完整 bracket 批准的 cap、floor 和 initialLeverage", async () => {
+    const id = crypto.randomUUID();
+    await createApprovedIntent(independentDb(), intentInput(id, "complete-bracket-approval"));
+    if (!db) throw new Error("database required");
+
+    const row = (await db.select().from(schema.liveIntents).where(eq(schema.liveIntents.id, id)))[0];
+    expect(row).toMatchObject({
+      notionalCap: "50000.000000000000000000000000000000",
+      notionalFloor: "0.000000000000000000000000000000",
+      initialLeverage: 10,
+    });
   });
 
   it("worker lease 到期前拒绝其他 worker，到期后原子接管并递增版本", async () => {

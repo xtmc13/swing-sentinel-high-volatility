@@ -49,6 +49,9 @@ export interface LiveOrder {
   maintenanceBracket?: number | null;
   maintMarginRatio?: DecimalString | null;
   cumMaintenance?: DecimalString | null;
+  notionalCap?: DecimalString | null;
+  notionalFloor?: DecimalString | null;
+  initialLeverage?: number | null;
   liquidationPriceSource?: LiquidationPriceSource | null;
   accountModeFingerprint?: string | null;
   compatibilityFrozen?: boolean;
@@ -139,6 +142,11 @@ export interface LiveOrderStore {
     clientOrderId: string,
     expectedStatuses: LiveOrderStatus[],
     patch: Partial<LiveOrder>,
+  ): Promise<LiveOrder | null>;
+  transitionOrderQuantity(
+    clientOrderId: string,
+    expectedQuantity: DecimalString,
+    quantity: DecimalString,
   ): Promise<LiveOrder | null>;
   createReplacement(
     parentClientOrderId: string,
@@ -331,6 +339,19 @@ export class InMemoryLiveOrderStore implements LiveOrderStore {
     const current = this.orders.get(clientOrderId);
     if (!current || !expectedStatuses.includes(current.status)) return null;
     const next = { ...current, ...patch, clientOrderId: current.clientOrderId };
+    this.orders.set(clientOrderId, next);
+    return copyOrder(next);
+  }
+
+  async transitionOrderQuantity(
+    clientOrderId: string,
+    expectedQuantity: DecimalString,
+    quantity: DecimalString,
+  ): Promise<LiveOrder | null> {
+    const current = this.orders.get(clientOrderId);
+    if (!current || current.status !== "SUBMITTING" || current.exchangeOrderId !== null
+      || compareDecimals(current.originalQuantity, expectedQuantity) !== 0) return null;
+    const next = { ...current, originalQuantity: quantity };
     this.orders.set(clientOrderId, next);
     return copyOrder(next);
   }
@@ -554,8 +575,15 @@ export class OrderStateMachine {
           await this.reconcileZeroTarget(finalAdmission);
           return cancelled;
         }
-        const updated = await this.store.transitionOrder(clientOrderId, ["SUBMITTING"], { originalQuantity: quantity });
+        const updated = await this.store.transitionOrderQuantity(
+          clientOrderId, finalAdmission.originalQuantity, quantity,
+        );
         if (!updated) return this.requireOrder(clientOrderId);
+        if (compareDecimals(updated.originalQuantity, quantity) !== 0) {
+          await this.alert(`${finalAdmission.clientOrderId} REDUCE quantity CAS returned ${updated.originalQuantity}, expected ${quantity}`);
+          return await this.store.transitionOrder(clientOrderId, ["SUBMITTING"], { status: "UNKNOWN" })
+            ?? this.requireOrder(clientOrderId);
+        }
         transportOrder = updated;
       } catch (error) {
         await this.alert(`${finalAdmission.symbol} ${finalAdmission.positionSide} REDUCE 数量复核失败：${
@@ -804,8 +832,8 @@ export class OrderStateMachine {
         return "remote exchange order identity mismatch";
       }
       if (expected.reduceOnly === true && remote.reduceOnly !== true) return "remote reduceOnly identity mismatch";
-      if (expected.reduceOnly === undefined && order.entrySemantics === "REDUCE" && remote.reduceOnly === true) {
-        return "dual REDUCE must not carry remote reduceOnly";
+      if (expected.reduceOnly === undefined && remote.reduceOnly === true) {
+        return "remote reduceOnly is forbidden when the expected wire omits it";
       }
       const executed = decimal(remote.executedQty);
       if (compareDecimals(executed, "0") < 0 || compareDecimals(executed, order.originalQuantity) > 0) {

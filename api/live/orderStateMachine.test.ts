@@ -1295,6 +1295,7 @@ describe("dual REDUCE authoritative transport quantity", () => {
       ...parent!,
       id: `pending-close-${side}`,
       clientOrderId: `close-${seed.id}`,
+      exchangeOrderId: null,
       type: "MARKET",
       entrySemantics: "REDUCE",
       status: "PENDING_SEND",
@@ -1320,7 +1321,7 @@ describe("dual REDUCE authoritative transport quantity", () => {
   it("rewrites a pending protection after restart without touching opposite protection", async () => {
     const h = await openPosition(DUAL_MODE, "LONG", "3");
     await addOppositeProtection(h);
-    await h.store.transitionOrder(`protect-${seed.id}`, ["NEW"], { status: "PENDING_SEND" });
+    await h.store.transitionOrder(`protect-${seed.id}`, ["NEW"], { status: "PENDING_SEND", exchangeOrderId: null });
     h.gateway.remotePositions = [
       { ...h.gateway.remotePositions[0]!, positionAmt: "1.25" },
       { ...h.gateway.remotePositions[0]!, positionSide: "SHORT", positionAmt: "-7" },
@@ -1374,6 +1375,27 @@ describe("dual REDUCE authoritative transport quantity", () => {
     expect(retry).toMatchObject({ status: "NEW", originalQuantity: "0.75" });
     expect(h.gateway.placed.at(-1)).toMatchObject({ type: "MARKET", quantity: "0.75" });
     expect(await h.store.getOrder("protect-external-opposite-position")).toMatchObject({ status: "NEW" });
+  });
+
+  it("refuses transport when the quantity CAS returns a different quantity", async () => {
+    const h = await openPosition(DUAL_MODE, "LONG", "3");
+    const parent = await h.store.getOrder("entry-1");
+    h.store.addOrder({
+      ...parent!, id: "cas-mismatch-close", clientOrderId: `close-${seed.id}`, exchangeOrderId: null, type: "MARKET",
+      entrySemantics: "REDUCE", status: "PENDING_SEND", originalQuantity: "3", reduceOnly: true,
+    });
+    h.store.transitionOrderQuantity = async (clientOrderId) => ({
+      ...(await h.store.getOrder(clientOrderId))!, status: "SUBMITTING", originalQuantity: "9",
+    });
+    const restarted = new OrderStateMachine(h.store, h.gateway, {
+      accountMode: DUAL_MODE, alert: (message) => h.alerts.push(message),
+    });
+
+    const result = await restarted.closePosition(seed.id);
+
+    expect(result).toMatchObject({ status: "UNKNOWN" });
+    expect(h.gateway.placed.filter((order) => order.type === "MARKET")).toHaveLength(0);
+    expect(h.alerts.join(" ")).toMatch(/quantity|数量/);
   });
 
   it("cancels only exact owned protection on zero before the first close and leaves reconciliation open", async () => {
@@ -1455,6 +1477,30 @@ describe("REST recovery trade completeness", () => {
     expect(recovered).toMatchObject({ status: "UNKNOWN", executedQuantity: "1" });
     expect(await store.getPosition(seed.id)).toMatchObject({ status: "OPEN", quantity: "1" });
     expect(alerts.join(" ")).toMatch(/trades|executedQty|成交/);
+  });
+
+  it.each([
+    { name: "one-way", accountMode: ONE_WAY_MODE, positionSide: "BOTH" },
+    { name: "dual", accountMode: DUAL_MODE, positionSide: "LONG" },
+  ] as const)("rejects remote reduceOnly on $name ENTRY recovery before applying trades", async ({ accountMode, positionSide }) => {
+    const { store, gateway, alerts, machine } = setup(accountMode);
+    entry(store, "1", accountMode);
+    gateway.failNextEntryAfterAccept = true;
+    expect((await machine.submit("entry-1")).status).toBe("UNKNOWN");
+    const remote = gateway.exchangeOrders.get("entry-1")!;
+    gateway.exchangeOrders.set("entry-1", { ...remote, status: "FILLED", executedQty: "1", reduceOnly: true });
+    gateway.trades.push({
+      symbol: seed.symbol, id: 990, orderId: remote.orderId, side: "BUY", positionSide,
+      price: "100", qty: "1", realizedPnl: "0", commission: "0.1", commissionAsset: "USDT",
+      time: 4, buyer: true, maker: false,
+    });
+    const recoverySeed = { ...seed, accountModeFingerprint: accountMode.fingerprint };
+
+    const recovered = await machine.recover("entry-1", recoverySeed);
+
+    expect(recovered).toMatchObject({ status: "UNKNOWN", executedQuantity: "0" });
+    expect(await store.getPosition(seed.id)).toBeNull();
+    expect(alerts.join(" ")).toContain("reduceOnly");
   });
 
   it("rejects a recovered remote positionSide mismatch before applying fills", async () => {

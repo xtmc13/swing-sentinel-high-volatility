@@ -459,6 +459,12 @@ describe("production service composition with fake exchange", () => {
     { field: "leverage", check: 2 },
     { field: "bracket", check: 1 },
     { field: "bracket", check: 2 },
+    { field: "cap", check: 1 },
+    { field: "cap", check: 2 },
+    { field: "floor", check: 1 },
+    { field: "floor", check: 2 },
+    { field: "initialLeverage", check: 1 },
+    { field: "initialLeverage", check: 2 },
   ] as const)("cancels transport when $field changes at admission check $check", async ({ field, check }) => {
     const now = () => 1_800_000_000_000;
     const socket = new FakeSocket();
@@ -477,7 +483,7 @@ describe("production service composition with fake exchange", () => {
     });
     vi.spyOn(client, "positionRisk").mockImplementation(async (symbol) => {
       if (admitting && symbol && field === "leverage") reads += 1;
-      if (admitting && symbol && field === "bracket") freshBracket = true;
+      if (admitting && symbol && ["bracket", "cap", "floor", "initialLeverage"].includes(field)) freshBracket = true;
       return [{
         symbol: "BTCUSDT", positionSide: "BOTH", positionAmt: "0", entryPrice: "0", markPrice: "100",
         liquidationPrice: "0", leverage: admitting && reads === check && field === "leverage" ? "3" : "2",
@@ -489,11 +495,15 @@ describe("production service composition with fake exchange", () => {
         freshBracket = false;
         reads += 1;
       }
+      const changed = admitting && reads === check;
       return [{
         symbol: "BTCUSDT",
         brackets: [{
-          bracket: 1, initialLeverage: 10, notionalCap: "50000", notionalFloor: "0",
-          maintMarginRatio: admitting && reads === check && field === "bracket" ? "0.02" : "0.01", cum: "0",
+          bracket: 1,
+          initialLeverage: changed && field === "initialLeverage" ? 9 : 10,
+          notionalCap: changed && field === "cap" ? "40000" : "50000",
+          notionalFloor: changed && field === "floor" ? "0.01" : "0",
+          maintMarginRatio: changed && field === "bracket" ? "0.02" : "0.01", cum: "0",
         }],
       }];
     });
@@ -545,6 +555,86 @@ describe("production service composition with fake exchange", () => {
       const orders = await orderStore.listOrders();
       expect(orders).toHaveLength(1);
       expect(orders[0]).toMatchObject({ status: "CANCEL" });
+    } finally {
+      await services.stop();
+    }
+  });
+
+  it.each([
+    { from: "isolated", to: "cross", check: 1 },
+    { from: "isolated", to: "cross", check: 2 },
+    { from: "cross", to: "isolated", check: 1 },
+    { from: "cross", to: "isolated", check: 2 },
+  ] as const)("cancels $from to $to marginType change at admission check $check", async ({ from, to, check }) => {
+    const now = () => 1_800_000_000_000;
+    const socket = new FakeSocket();
+    const { client, placeOrder } = fakeClient(now);
+    placeOrder.mockImplementation(async (request) => ({
+      symbol: request.symbol, orderId: 190, clientOrderId: request.newClientOrderId ?? "margin-entry",
+      price: request.price ?? "0", origQty: request.quantity, executedQty: "0", status: "NEW",
+      side: request.side, positionSide: request.positionSide, type: request.type, reduceOnly: request.reduceOnly,
+    }));
+    vi.spyOn(client, "account").mockResolvedValue({
+      assets: [{ asset: "USDT", walletBalance: "1000", availableBalance: "1000", crossWalletBalance: "1000", crossUnPnl: "0" }],
+      totalWalletBalance: "1000", totalMarginBalance: "1000", availableBalance: "1000",
+      totalPositionInitialMargin: "0", totalCrossWalletBalance: "1000", totalCrossUnPnl: "0",
+    });
+    let admitting = false;
+    let reads = 0;
+    vi.spyOn(client, "positionRisk").mockImplementation(async (symbol) => {
+      if (admitting && symbol) reads += 1;
+      return [{
+        symbol: "BTCUSDT", positionSide: "BOTH", positionAmt: "0", entryPrice: "0", markPrice: "100",
+        liquidationPrice: "0", leverage: "2",
+        marginType: admitting && reads === check ? to : from,
+        isolatedWallet: "0", positionInitialMargin: "0",
+      }];
+    });
+    const orderStore = new InMemoryLiveOrderStore();
+    const insertOrder = orderStore.insertOrder.bind(orderStore);
+    orderStore.insertOrder = async (order) => {
+      admitting = true;
+      reads = 0;
+      await insertOrder(order);
+    };
+    const settings = {
+      ...DEFAULT_SETTINGS, executionMode: "LIVE_MAINNET" as const, leverageMode: "FIXED" as const,
+      fixedLeverage: 2, riskPerTradePct: 0.01, portfolioStopRiskPct: 0.1,
+    };
+    const store = finalGateDatabase(settings);
+    const services = createBinanceProductionLiveServices({
+      env: {
+        LIVE_TRADING_ENABLED: "true", BINANCE_MAINNET_API_KEY: "fake-key",
+        BINANCE_MAINNET_API_SECRET: "fake-secret", BINANCE_MAINNET_ALLOWED_SYMBOLS: "BTCUSDT",
+      },
+      db: store.db,
+      getSettings: async () => settings,
+      client,
+      orderStore,
+      reconciliationStore: new InMemoryReconciliationStore(),
+      accountingStore: new InMemoryAccountingStore(),
+      dailyRisk: { evaluate: async (_dayKey, equity) => ({ dayStartEquity: equity, dailyLocked: false }) },
+      socketFactory: () => socket,
+      now,
+      accountMode: ACCOUNT_MODE,
+    });
+    const signal: Opportunity = {
+      id: `margin-${from}-${check}`, signalId: `margin-${from}-${check}`, strategyType: "SWING",
+      symbol: "BTCUSDT", side: "LONG", status: "READY", score: 1, regime: "NORMAL",
+      entry: 100, stop: 99.5, target: 101.1, stopDistancePct: 0.5, rewardRisk: 2.2,
+      leverage: 2, marginPct: 2, riskPct: 0.01, reasons: [], signalCloseTime: now(), signalTime: now(),
+      expiryTime: now() + 60_000, triggerPrice: 100, limitPrice: 100, stateVersion: 1,
+      sourceGeneration: 1, detectorVersion: "test", configVersion: "test", createdAt: new Date(now()).toISOString(),
+    };
+
+    try {
+      await services.start();
+      await expect(services.preflight()).resolves.toMatchObject({ ready: true });
+      const opened = await services.adapter.open(signal);
+
+      expect(opened.ok).toBe(false);
+      expect(placeOrder).not.toHaveBeenCalled();
+      expect(await orderStore.listOrders()).toMatchObject([{ status: "CANCEL", marginType: from.toUpperCase() }]);
     } finally {
       await services.stop();
     }

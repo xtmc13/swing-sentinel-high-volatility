@@ -252,6 +252,9 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
       || order.maintenanceBracket !== approval.maintenanceBracket
       || compareDecimals(order.maintMarginRatio!, approval.maintMarginRatio) !== 0
       || compareDecimals(order.cumMaintenance!, approval.cumMaintenance) !== 0
+      || compareDecimals(order.notionalCap!, approval.notionalCap) !== 0
+      || compareDecimals(order.notionalFloor!, approval.notionalFloor) !== 0
+      || order.initialLeverage !== approval.initialLeverage
       || order.marginType !== approval.marginType
       || compareDecimals(order.originalQuantity, approval.quantity) !== 0
       || compareDecimals(multiplyDecimals(order.originalQuantity, order.price), approval.notional) !== 0)) {
@@ -261,15 +264,23 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     const maintenanceBracket = approval?.maintenanceBracket ?? order.maintenanceBracket;
     const maintMarginRatio = approval?.maintMarginRatio ?? order.maintMarginRatio;
     const cumMaintenance = approval?.cumMaintenance ?? order.cumMaintenance;
+    const notionalCap = approval?.notionalCap ?? order.notionalCap;
+    const notionalFloor = approval?.notionalFloor ?? order.notionalFloor;
+    const initialLeverage = approval?.initialLeverage ?? order.initialLeverage;
+    const approvedMarginType = approval?.marginType ?? order.marginType;
     if (!Number.isInteger(effectiveLeverage) || !Number.isInteger(maintenanceBracket)
-      || !maintMarginRatio || !cumMaintenance) {
-      throw new Error("最终订单缺少持久化杠杆或 bracket 批准");
+      || !Number.isInteger(initialLeverage) || !maintMarginRatio || !cumMaintenance
+      || !notionalCap || !notionalFloor || !approvedMarginType) {
+      throw new Error("最终订单缺少完整持久化杠杆、marginType 或 bracket 批准");
     }
     const expectedPositionSide = options.accountMode.dualSide ? order.positionSide : "BOTH";
     const target = positions.filter((position) => position.symbol === order.symbol
       && (position.positionSide ?? "BOTH") === expectedPositionSide);
     if (target.length !== 1 || Number(target[0].leverage) !== effectiveLeverage) {
       throw new Error("最终订单实际杠杆与批准值不一致");
+    }
+    if (target[0].marginType.toUpperCase() !== approvedMarginType) {
+      throw new Error("最终订单 marginType 与批准值不一致");
     }
     const payload = leverageBrackets.filter((entry) => entry.symbol === order.symbol);
     const bracket = payload.length === 1
@@ -278,8 +289,11 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
     if (!bracket || bracket.bracket !== maintenanceBracket
       || compareDecimals(bracket.maintMarginRatio, maintMarginRatio) !== 0
       || compareDecimals(bracket.cum, cumMaintenance) !== 0
+      || compareDecimals(bracket.notionalCap, notionalCap) !== 0
+      || compareDecimals(bracket.notionalFloor, notionalFloor) !== 0
+      || bracket.initialLeverage !== initialLeverage
       || effectiveLeverage! > bracket.initialLeverage) {
-      throw new Error("最终订单 bracket 与批准值不一致");
+      throw new Error("最终订单完整 bracket 与批准值不一致");
     }
   }
 
@@ -580,6 +594,9 @@ export function createBinanceProductionLiveServices(options: ProductionServicesO
         maintenanceBracket: approvedBracket.bracket,
         maintMarginRatio: approvedBracket.maintMarginRatio,
         cumMaintenance: approvedBracket.cum,
+        notionalCap: approvedBracket.notionalCap,
+        notionalFloor: approvedBracket.notionalFloor,
+        initialLeverage: approvedBracket.initialLeverage,
         liquidationPrice: approvedLiquidationPrice,
         liquidationPriceSource: marginType === "CROSS" ? "PRETRADE_ESTIMATE"
           : compareDecimals(cached.result.positionRisk.positionAmt, "0") !== 0

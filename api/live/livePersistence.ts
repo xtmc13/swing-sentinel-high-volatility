@@ -62,6 +62,9 @@ export type LiveFinalGateResult =
       maintenanceBracket: number;
       maintMarginRatio: DecimalString;
       cumMaintenance: DecimalString;
+      notionalCap: DecimalString;
+      notionalFloor: DecimalString;
+      initialLeverage: number;
       liquidationPrice?: DecimalString;
       liquidationPriceSource: Exclude<LiquidationPriceSource, "LEGACY_UNKNOWN">;
       validUntil: Date;
@@ -143,6 +146,7 @@ function approvalError(
   }
   if (input.expiresAt.getTime() <= now.getTime()) return "意图在提交前复核时已过期";
   if (!Number.isInteger(approval.effectiveLeverage) || approval.effectiveLeverage < 1
+    || !Number.isInteger(approval.initialLeverage) || approval.initialLeverage < 1
     || !Number.isInteger(approval.maintenanceBracket) || approval.maintenanceBracket < 1
     || !["ISOLATED", "CROSS"].includes(approval.marginType)
     || !["EXCHANGE", "PRETRADE_ESTIMATE"].includes(approval.liquidationPriceSource)) {
@@ -152,6 +156,8 @@ function approvalError(
     if (compareDecimals(approval.quantity, "0") <= 0 || compareDecimals(approval.notional, "0") <= 0
       || compareDecimals(approval.reservedMargin, "0") <= 0 || compareDecimals(approval.reservedRisk, "0") <= 0
       || compareDecimals(approval.maintMarginRatio, "0") < 0 || compareDecimals(approval.cumMaintenance, "0") < 0
+      || compareDecimals(approval.notionalCap, "0") < 0 || compareDecimals(approval.notionalFloor, "0") < 0
+      || compareDecimals(approval.notionalCap, approval.notionalFloor) < 0
       || (approval.liquidationPrice !== undefined && compareDecimals(approval.liquidationPrice, "0") < 0)) {
       return "final gate 数量、名义价值、margin、opening risk、强平价或 bracket 数值无效";
     }
@@ -256,6 +262,9 @@ export async function createLiveIntent(
         maintenanceBracket: approval.maintenanceBracket,
         maintMarginRatio: approval.maintMarginRatio,
         cumMaintenance: approval.cumMaintenance,
+        notionalCap: approval.notionalCap,
+        notionalFloor: approval.notionalFloor,
+        initialLeverage: approval.initialLeverage,
         liquidationPriceSource: approval.liquidationPriceSource,
         accountModeFingerprint: input.accountModeFingerprint ?? null,
         compatibilityFrozen: false,

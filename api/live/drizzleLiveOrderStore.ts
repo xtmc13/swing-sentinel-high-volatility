@@ -59,6 +59,9 @@ function orderFromRows(row: OrderRow, fills: FillRow[]): LiveOrder {
     maintenanceBracket: row.maintenanceBracket,
     maintMarginRatio: row.maintMarginRatio,
     cumMaintenance: row.cumMaintenance,
+    notionalCap: row.notionalCap,
+    notionalFloor: row.notionalFloor,
+    initialLeverage: row.initialLeverage,
     liquidationPriceSource: row.liquidationPriceSource as LiquidationPriceSource,
     accountModeFingerprint: row.accountModeFingerprint,
     compatibilityFrozen: row.compatibilityFrozen,
@@ -165,6 +168,9 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
       maintenanceBracket: order.maintenanceBracket ?? null,
       maintMarginRatio: order.maintMarginRatio ?? null,
       cumMaintenance: order.cumMaintenance ?? null,
+      notionalCap: order.notionalCap ?? null,
+      notionalFloor: order.notionalFloor ?? null,
+      initialLeverage: order.initialLeverage ?? null,
       liquidationPriceSource: order.liquidationPriceSource ?? "LEGACY_UNKNOWN",
       accountModeFingerprint: order.accountModeFingerprint ?? null,
       compatibilityFrozen: order.compatibilityFrozen ?? true,
@@ -223,6 +229,20 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
     });
   }
 
+  async transitionOrderQuantity(
+    clientOrderId: string,
+    expectedQuantity: string,
+    quantity: string,
+  ): Promise<LiveOrder | null> {
+    return this.db.transaction(async (tx) => {
+      const current = await readOrder(tx, clientOrderId, true);
+      if (!current || current.status !== "SUBMITTING" || current.exchangeOrderId !== null
+        || compareDecimals(current.originalQuantity, expectedQuantity) !== 0) return null;
+      await tx.update(liveOrders).set({ originalQuantity: quantity }).where(eq(liveOrders.id, current.id));
+      return readOrder(tx, clientOrderId);
+    });
+  }
+
   async createReplacement(
     parentClientOrderId: string,
     expectedExecutedQuantity: string,
@@ -252,6 +272,9 @@ export class DrizzleLiveOrderStore implements LiveOrderStore {
           maintenanceBracket: replacement.maintenanceBracket ?? null,
           maintMarginRatio: replacement.maintMarginRatio ?? null,
           cumMaintenance: replacement.cumMaintenance ?? null,
+          notionalCap: replacement.notionalCap ?? null,
+          notionalFloor: replacement.notionalFloor ?? null,
+          initialLeverage: replacement.initialLeverage ?? null,
           liquidationPriceSource: replacement.liquidationPriceSource ?? "LEGACY_UNKNOWN",
           accountModeFingerprint: replacement.accountModeFingerprint ?? null,
           compatibilityFrozen: replacement.compatibilityFrozen ?? true,

@@ -48,6 +48,9 @@ function approval(
     maintenanceBracket: 1,
     maintMarginRatio: "0.01",
     cumMaintenance: "0",
+    notionalCap: "50000",
+    notionalFloor: "0",
+    initialLeverage: 150,
     liquidationPriceSource: "PRETRADE_ESTIMATE",
     validUntil: value.expiresAt,
     ...overrides,
@@ -101,6 +104,9 @@ describe("live final-gate approval persistence", () => {
       maintenanceBracket: 2,
       maintMarginRatio: "0.005",
       cumMaintenance: "0",
+      notionalCap: "50000",
+      notionalFloor: "0",
+      initialLeverage: 150,
       compatibilityFrozen: false,
     });
   });
